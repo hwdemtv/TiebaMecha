@@ -110,6 +110,26 @@ async def do_auto_bump_task():
     manager = AutoBumpManager(db)
     await manager.process_all_candidates()
 
+async def do_maintenance_task():
+    """执行拟人化养号维护任务的内部包裹"""
+    db = await get_db()
+    from .maintenance import MaintManager
+    manager = MaintManager(db)
+    
+    # 获取所有开启了养号功能的账号
+    maint_accounts = await db.get_maint_accounts()
+    if not maint_accounts:
+        return
+        
+    print(f"[{datetime.now()}] [DAEMON] 启动全域 BioWarming 养号周期，覆盖 {len(maint_accounts)} 个终端...")
+    for acc in maint_accounts:
+        try:
+            await manager.run_maint_cycle(acc.id)
+            # 账号间增加长随机延迟，防止 IP 行为重合
+            await asyncio.sleep(__import__("random").uniform(300, 900)) 
+        except Exception as e:
+            print(f"[DAEMON] 账号 {acc.name} 维护异常: {e}")
+
 class TiebaMechaDaemon:
     _instance = None
     
@@ -140,6 +160,7 @@ class TiebaMechaDaemon:
             self.scheduler.add_job(do_auto_monitor_task, 'interval', minutes=10, id=self.monitor_job_id, replace_existing=True)
             self.scheduler.add_job(do_batch_post_tasks, 'interval', minutes=1, id="batch_post_polling", replace_existing=True)
             self.scheduler.add_job(do_auto_bump_task, 'interval', minutes=20, id="auto_bump_job", replace_existing=True)
+            self.scheduler.add_job(do_maintenance_task, 'interval', hours=4, id="biowarming_job", replace_existing=True)
             
             # 尝试从库热加载签到
             db = await get_db()

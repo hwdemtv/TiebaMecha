@@ -4,6 +4,7 @@ from .core_button import CoreButton, CoreButtonWithLabel
 from .hud_panel import DualHUD, HUDPanel
 from .stream_list import ForumList, SignResultList, StreamList
 from .tiles import FunctionTiles, TileGrid
+from .notification_bell import NotificationBell, NotificationPanel, show_notification_dialog
 from .theme import (
     GRADIENT_CYAN,
     GRADIENT_DANGER,
@@ -39,4 +40,8 @@ __all__ = [
     "StreamList",
     "ForumList",
     "SignResultList",
+    # Notification
+    "NotificationBell",
+    "NotificationPanel",
+    "show_notification_dialog",
 ]

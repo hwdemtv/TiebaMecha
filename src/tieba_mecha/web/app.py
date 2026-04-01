@@ -23,6 +23,8 @@ from .pages.settings import SettingsPage
 from ..db.crud import get_db
 from ..core.account import verify_account, decrypt_value
 from ..core.logger import log_info, log_warn, log_error
+from ..core.notification import init_notification_manager, get_notification_manager
+from ..core.updater import get_update_manager
 
 if TYPE_CHECKING:
     from tieba_mecha.db.crud import Database
@@ -143,23 +145,31 @@ class TiebaMechaApp:
     async def initialize(self, db: Database):
         """初始化数据库和其他异步资源"""
         self.db = db
-        
+
+        # 初始化通知管理器
+        init_notification_manager(db=db, page=self.page)
+
+        # 初始化更新管理器
+        get_update_manager(db=db)
+
         # 检查是否是首次运行（无账号）
         accounts = await self.db.get_accounts()
         if not accounts:
             await self._navigate("welcome")
         else:
             await self._navigate("dashboard")
-        
+
         # 启动后台任务
         self.page.run_task(self._account_heartbeat)
         self.page.run_task(self._batch_scheduler)
         self.page.run_task(self._proxy_monitor) # 挂载代理智能监控
-        
+        self.page.run_task(self._notification_sync)  # 通知同步
+        self.page.run_task(self._update_checker)  # 更新检测
+
         # 拉起全局调度引擎
         from ..core.daemon import daemon_instance
         self.page.run_task(daemon_instance.start)
-        
+
         await log_info("TiebaMecha 系统内聚核动力引擎已启动")
 
     async def _is_quiet_hour(self) -> bool:
@@ -369,6 +379,68 @@ class TiebaMechaApp:
             except Exception as e:
                 await log_error(f"代理监控引擎异常: {str(e)}")
                 await asyncio.sleep(600)
+
+    async def _notification_sync(self):
+        """通知同步后台任务 - 定期从 hw-license-center 拉取远程通知"""
+        nm = get_notification_manager()
+        if not nm:
+            return
+
+        while True:
+            try:
+                # 每小时同步一次远程通知
+                await asyncio.sleep(3600)
+
+                # 加载许可证配置
+                license_key = await self.db.get_setting("license_key", "")
+                device_id = await self.db.get_setting("device_id", "")
+                server_url = await self.db.get_setting("license_server_url", "")
+
+                if license_key and server_url:
+                    nm.set_license_config(license_key, device_id, server_url)
+                    added = await nm.sync_remote_notifications()
+                    if added > 0:
+                        await log_info(f"同步远程通知: 新增 {added} 条")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await log_error(f"通知同步异常: {str(e)}")
+                await asyncio.sleep(1800)
+
+    async def _update_checker(self):
+        """更新检测后台任务 - 定期检查 GitHub Releases"""
+        updater = get_update_manager()
+
+        while True:
+            try:
+                # 检查是否应该检测更新（默认 24 小时一次）
+                if await updater.should_check_update(interval_hours=24):
+                    release = await updater.check_update()
+                    if release:
+                        nm = get_notification_manager()
+                        if nm:
+                            await nm.push(
+                                type="update_available",
+                                title=f"发现新版本 {release.tag_name}",
+                                message="点击查看更新内容",
+                                action_url=release.html_url,
+                                extra={
+                                    "version": release.version,
+                                    "published_at": release.published_at.isoformat(),
+                                },
+                                show_snackbar=True,
+                            )
+                            await log_info(f"检测到新版本: {release.tag_name}")
+
+                # 每 24 小时检查一次
+                await asyncio.sleep(86400)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await log_error(f"更新检测异常: {str(e)}")
+                await asyncio.sleep(3600)
 
 
     def _on_nav_change(self, e):

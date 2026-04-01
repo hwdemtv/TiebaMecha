@@ -306,8 +306,8 @@ def sign_status():
         table.add_column("数量", style="green")
 
         table.add_row("总贴吧数", str(stats["total"]))
-        table.add_row("已签到", str(stats["signed"]))
-        table.add_row("未签到", str(stats["unsigned"]))
+        table.add_row("已签到", str(stats["success"]))
+        table.add_row("未签到/失败", str(stats["total"] - stats["success"]))
 
         console.print(table)
 
