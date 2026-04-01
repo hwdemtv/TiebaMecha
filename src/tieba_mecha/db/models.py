@@ -1,0 +1,259 @@
+"""Database models for TiebaMecha"""
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    """SQLAlchemy declarative base"""
+    pass
+
+
+class Account(Base):
+    """贴吧账号"""
+
+    __tablename__ = "accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, comment="账号名称/备注")
+    bduss: Mapped[str] = mapped_column(String(200), nullable=False, comment="加密存储的BDUSS")
+    stoken: Mapped[str] = mapped_column(String(200), default="", comment="加密存储的STOKEN")
+    user_id: Mapped[int] = mapped_column(Integer, default=0, comment="用户ID")
+    user_name: Mapped[str] = mapped_column(String(100), default="", comment="贴吧用户名")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否为当前使用账号")
+    proxy_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="关联代理ID")
+    cuid: Mapped[str] = mapped_column(String(100), default="", comment="唯一设备标识")
+    user_agent: Mapped[str] = mapped_column(String(255), default="", comment="浏览器标识")
+    status: Mapped[str] = mapped_column(String(20), default="unknown", comment="账号状态: active/expired/error/suspended_proxy")
+    last_verified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后验证时间")
+    post_weight: Mapped[int] = mapped_column(Integer, default=5, comment="发帖权重 1–10，用于加权随机抽样")
+    suspended_reason: Mapped[str] = mapped_column(String(200), default="", comment="挂起原因（代理失效自动填充）")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
+    )
+    
+    # 索引定义 - 优化查询性能
+    __table_args__ = (
+        Index("ix_accounts_is_active", "is_active"),  # 查找活跃账号
+        Index("ix_accounts_status", "status"),  # 按状态筛选
+        Index("ix_accounts_proxy_id", "proxy_id"),  # 查找绑定特定代理的账号
+    )
+
+
+class Forum(Base):
+    """关注的贴吧"""
+
+    __tablename__ = "forums"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fid: Mapped[int] = mapped_column(Integer, nullable=False, comment="贴吧ID")
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名称")
+    is_sign_today: Mapped[bool] = mapped_column(Boolean, default=False, comment="今日是否已签到")
+    last_sign_status: Mapped[str] = mapped_column(String(20), default="pending", comment="签到状态: pending/success/failure")
+    sign_count: Mapped[int] = mapped_column(Integer, default=0, comment="连续签到天数")
+    level: Mapped[int] = mapped_column(Integer, default=0, comment="用户在该吧的等级")
+    last_sign_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后签到日期")
+    history_total: Mapped[int] = mapped_column(Integer, default=0, comment="历史累积签到次数")
+    history_success: Mapped[int] = mapped_column(Integer, default=0, comment="历史签到成功次数")
+    history_failed: Mapped[int] = mapped_column(Integer, default=0, comment="历史签到失败次数")
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
+    is_post_target: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否允许作为发贴目标")
+
+    __table_args__ = (
+        UniqueConstraint("fid", "account_id", name="uq_forum_fid_account"),
+        Index("ix_forums_account_id", "account_id"),  # 按账号查询贴吧
+    )
+
+
+class SignLog(Base):
+    """签到日志"""
+
+    __tablename__ = "sign_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    forum_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="贴吧ID")
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名称")
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, comment="是否成功")
+    message: Mapped[str] = mapped_column(String(200), default="", comment="签到结果信息")
+    signed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="签到时间")
+    
+    __table_args__ = (
+        Index("ix_sign_logs_signed_at", "signed_at"),  # 按时间排序查询
+    )
+
+
+class CrawlTask(Base):
+    """爬取任务"""
+
+    __tablename__ = "crawl_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(50), nullable=False, comment="任务类型: threads/user/posts")
+    target: Mapped[str] = mapped_column(String(200), nullable=False, comment="目标: 贴吧名/用户ID等")
+    status: Mapped[str] = mapped_column(String(20), default="pending", comment="状态: pending/running/completed/failed")
+    result_path: Mapped[str] = mapped_column(String(500), default="", comment="结果文件路径")
+    total_count: Mapped[int] = mapped_column(Integer, default=0, comment="已爬取数量")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="完成时间")
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
+    
+    __table_args__ = (
+        Index("ix_crawl_tasks_created_at", "created_at"),  # 按时间排序
+        Index("ix_crawl_tasks_account_id", "account_id"),  # 按账号查询
+    )
+
+
+class PostCache(Base):
+    """帖子缓存 (用于批量操作)"""
+
+    __tablename__ = "post_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tid: Mapped[int] = mapped_column(Integer, nullable=False, comment="主题帖ID")
+    pid: Mapped[int] = mapped_column(Integer, nullable=False, comment="回复ID")
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名称")
+    title: Mapped[str] = mapped_column(String(500), default="", comment="帖子标题")
+    author_id: Mapped[int] = mapped_column(Integer, default=0, comment="作者ID")
+    author_name: Mapped[str] = mapped_column(String(100), default="", comment="作者名称")
+    is_selected: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否选中")
+    cached_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="缓存时间")
+    
+    __table_args__ = (
+        Index("ix_post_cache_fname", "fname"),  # 按贴吧名称查询
+        Index("ix_post_cache_cached_at", "cached_at"),  # 按缓存时间排序
+    )
+
+
+class Setting(Base):
+    """全局设置"""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(50), primary_key=True, comment="设置键")
+    value: Mapped[str] = mapped_column(Text, default="", comment="设置值(JSON/String)")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
+    )
+
+
+class Proxy(Base):
+    """代理服务器"""
+
+    __tablename__ = "proxies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    host: Mapped[str] = mapped_column(String(100), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[str] = mapped_column(String(255), default="")
+    password: Mapped[str] = mapped_column(String(255), default="")
+    protocol: Mapped[str] = mapped_column(String(10), default="http")  # http/socks5
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    
+    __table_args__ = (
+        Index("ix_proxies_is_active", "is_active"),  # 查找可用代理
+    )
+
+
+class AutoRule(Base):
+    """自动化规则 (删帖/监控)"""
+
+    __tablename__ = "auto_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名")
+    rule_type: Mapped[str] = mapped_column(String(20), nullable=False, comment="keyword/regex")
+    pattern: Mapped[str] = mapped_column(String(500), nullable=False, comment="规则内容")
+    action: Mapped[str] = mapped_column(String(20), default="delete", comment="动作: delete/notify")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class BatchPostTask(Base):
+    """批量/定时发帖任务"""
+
+    __tablename__ = "batch_post_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="目标贴吧")
+    titles_json: Mapped[str] = mapped_column(Text, nullable=False, comment="标题池 JSON")
+    contents_json: Mapped[str] = mapped_column(Text, nullable=False, comment="内容池 JSON")
+    accounts_json: Mapped[str] = mapped_column(Text, nullable=False, comment="账号 ID 列表 JSON")
+    fnames_json: Mapped[str] = mapped_column(Text, default="[]", comment="目标贴吧列表 JSON（多贴吧支持）")
+    strategy: Mapped[str] = mapped_column(String(20), default="round_robin", comment="发帖策略: round_robin/random/weighted")
+    delay_min: Mapped[float] = mapped_column(Float, default=60.0)
+    delay_max: Mapped[float] = mapped_column(Float, default=300.0)
+
+    use_ai: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否启用 AI 改写")
+    schedule_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="计划执行时间")
+    interval_hours: Mapped[int] = mapped_column(Integer, default=0, comment="重复执行间隔(小时)，0表示不重复")
+    status: Mapped[str] = mapped_column(String(20), default="pending", comment="pending/running/completed/failed")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("ix_batch_post_tasks_created_at", "created_at"),  # 按时间排序
+    )
+
+
+class MaterialPool(Base):
+    """全局物料池 (打通短链同步、AI 预改写、矩阵发帖状态反馈)"""
+
+    __tablename__ = "material_pool"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, comment="发送用标题")
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="发送用正文 (可含图片/短链)")
+    status: Mapped[str] = mapped_column(String(20), default="pending", comment="状态: pending/success/failed")
+    
+    ai_status: Mapped[str] = mapped_column(String(20), default="none", comment="AI改写状态: none/rewritten")
+    original_title: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="改写前原标题 (供重置使用)")
+    original_content: Mapped[str | None] = mapped_column(Text, nullable=True, comment="改写前原内容 (供重置使用)")
+    
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="上次执行时间")
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="发送失败原因/错误日志")
+    
+    # --- 自动回帖(自顶) 增强字段 ---
+    posted_tid: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="发帖成功后的线程ID")
+    posted_fname: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="发布所在的贴吧")
+    is_auto_bump: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启自动回帖")
+    bump_count: Mapped[int] = mapped_column(Integer, default=0, comment="已回帖(自顶)次数")
+    last_bumped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次回帖时间")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="注入时间")
+    
+    __table_args__ = (
+        Index("ix_material_pool_status", "status"),  # 高频筛选
+        Index("ix_material_pool_created_at", "created_at"),  # 按时间排序
+    )
+
+class TargetPool(Base):
+    """全局靶场大池 (全域贴吧营销组)"""
+
+    __tablename__ = "target_pool"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fname: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, comment="贴吧名称")
+    post_group: Mapped[str] = mapped_column(String(200), default="", comment="发帖分组标签(e.g. 'IT,资源')")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="状态：可用 / 已自动熔断屏蔽")
+    
+    # 统计与自动熔断
+    success_count: Mapped[int] = mapped_column(Integer, default=0, comment="历史破防成功数")
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, comment="连续拦截失败数(满阈值熔断)")
+    last_fail_reason: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="最近被拦截的原因说明")
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="录入时间")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now, comment="状态更新时间"
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次空降轰炸时间")
+
+    __table_args__ = (
+        Index("ix_target_pool_post_group", "post_group"),
+        Index("ix_target_pool_is_active", "is_active"),
+    )
