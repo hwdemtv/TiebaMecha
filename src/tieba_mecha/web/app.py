@@ -25,6 +25,7 @@ from ..core.account import verify_account, decrypt_value
 from ..core.logger import log_info, log_warn, log_error
 from ..core.notification import init_notification_manager, get_notification_manager
 from ..core.updater import get_update_manager
+from .components.notification_bell import NotificationBell, show_notification_dialog
 
 if TYPE_CHECKING:
     from tieba_mecha.db.crud import Database
@@ -121,6 +122,21 @@ class TiebaMechaApp:
             on_change=self._on_nav_change,
         )
 
+        # 通知铃铛
+        self.notification_bell = NotificationBell(
+            page=self.page,
+            on_click=lambda _: self.page.run_task(
+                show_notification_dialog, self.page, get_notification_manager()
+            )
+        )
+
+        # 将铃铛设置为侧边栏头部
+        self.nav_rail.leading = ft.Container(
+            content=self.notification_bell,
+            padding=ft.padding.only(top=20, bottom=10),
+            alignment=ft.alignment.center,
+        )
+
         # 内容预览区
         self.content_area = ft.Container(
             padding=0,
@@ -147,7 +163,9 @@ class TiebaMechaApp:
         self.db = db
 
         # 初始化通知管理器
-        init_notification_manager(db=db, page=self.page)
+        nm = init_notification_manager(db=db, page=self.page)
+        self.notification_bell.set_notification_manager(nm)
+        await self.notification_bell.refresh()
 
         # 初始化更新管理器
         get_update_manager(db=db)
@@ -401,6 +419,7 @@ class TiebaMechaApp:
                     added = await nm.sync_remote_notifications()
                     if added > 0:
                         await log_info(f"同步远程通知: 新增 {added} 条")
+                        await self.notification_bell.refresh()
 
             except asyncio.CancelledError:
                 break
