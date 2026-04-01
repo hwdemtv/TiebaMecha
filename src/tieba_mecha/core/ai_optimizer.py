@@ -3,6 +3,7 @@ import json
 import aiohttp
 from typing import Tuple, Optional
 from ..db.crud import Database
+from .auth import require_pro
 
 class AIOptimizer:
     """基于 LLM 的贴吧帖子 SEO 优化器"""
@@ -22,6 +23,7 @@ class AIOptimizer:
             "model": model
         }
 
+    @require_pro
     async def optimize_post(self, title: str, content: str) -> Tuple[bool, str, str, str]:
         """
         优化帖子内容

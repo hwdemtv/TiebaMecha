@@ -7,8 +7,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .sign import sign_all_forums
 from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
-from .account import get_account_credentials
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
+from .auth import get_auth_manager
 from ..db.crud import get_db
 
 async def do_sign_task():
@@ -130,6 +130,16 @@ async def do_maintenance_task():
         except Exception as e:
             print(f"[DAEMON] 账号 {acc.name} 维护异常: {e}")
 
+async def do_auth_check_task():
+    """执行在线授权静默探测的内部包裹"""
+    am = get_auth_manager()
+    print(f"[{datetime.now()}] [DAEMON] 启动后台授权校准与多节点探活...")
+    success = await am.verify_online()
+    if success:
+        print(f"[{datetime.now()}] [DAEMON] 授权状态校准完毕: PRO 已激活")
+    else:
+        print(f"[{datetime.now()}] [DAEMON] 授权状态校准完毕: FREE/ERROR 系统将维持当前状态")
+
 class TiebaMechaDaemon:
     _instance = None
     
@@ -158,7 +168,18 @@ class TiebaMechaDaemon:
         try:
             # 始终加载监控任务和批量发帖轮询
             self.scheduler.add_job(do_auto_monitor_task, 'interval', minutes=10, id=self.monitor_job_id, replace_existing=True)
-            self.scheduler.add_job(do_batch_post_tasks, 'interval', minutes=1, id="batch_post_polling", replace_existing=True)
+            self.scheduler.add_job(do_batch_post_tasks, 'interval', minutes=30, id="batch_post_job")
+            
+            # 6. 每 12 小时执行一次应用更新检查 (已在 updater 实现逻辑，此处挂载)
+            from .updater import get_update_manager
+            self.scheduler.add_job(get_update_manager().check_for_updates, 'interval', hours=12, id="update_check_job")
+            
+            # 7. 每 6 小时执行一次授权心跳
+            self.scheduler.add_job(do_auth_check_task, 'interval', hours=6, id="auth_check_job")
+            
+            # --- 立即执行一次初始化探测 ---
+            asyncio.create_task(do_auth_check_task())
+            
             self.scheduler.add_job(do_auto_bump_task, 'interval', minutes=20, id="auto_bump_job", replace_existing=True)
             self.scheduler.add_job(do_maintenance_task, 'interval', hours=4, id="biowarming_job", replace_existing=True)
             

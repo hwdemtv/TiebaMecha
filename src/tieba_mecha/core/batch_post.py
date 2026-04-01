@@ -14,6 +14,7 @@ from .client_factory import create_client
 from .ai_optimizer import AIOptimizer
 from .obfuscator import Obfuscator
 from .logger import log_info, log_warn, log_error
+from .auth import get_auth_manager, AuthStatus
 
 
 class RateLimiter:
@@ -195,9 +196,31 @@ class BatchPostManager:
         Yields:
             dict: {status, tid/msg, progress, total, fname, account_id}
         """
-        task.status = "running"
-        task.start_time = datetime.now()
         task.progress = 0
+
+        # --- 授权门控与配额限制 ---
+        am = get_auth_manager()
+        is_pro = (am.status == AuthStatus.PRO)
+        
+        if not is_pro:
+            # 尝试刷新一次授权状态
+            await am.check_local_status()
+            is_pro = (am.status == AuthStatus.PRO)
+            
+        if not is_pro:
+            # Free 版配额限制
+            if len(task.accounts) > 1:
+                task.accounts = task.accounts[:1]
+                await log_warn("Free 版仅支持单账号发帖，已自动截断账号列表")
+            
+            if task.total > 3:
+                task.total = 3
+                await log_warn("Free 版单次任务上限为 3 帖，请升级 Pro 解锁无限火力")
+                
+            if task.use_ai:
+                task.use_ai = False
+                await log_warn("AI 变体功能仅对 Pro 用户开放，已自动降级为原始文案")
+        # ------------------------
 
         fnames = task.get_fnames()
         if not fnames:

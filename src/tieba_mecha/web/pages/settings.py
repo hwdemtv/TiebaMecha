@@ -7,6 +7,7 @@ from typing import List, Optional
 from ..components import create_gradient_button
 from ...core.ai_optimizer import AIOptimizer
 from ...core.link_manager import SmartLinkConnector
+from ...core.auth import get_auth_manager, AuthStatus
 
 
 class SettingsPage:
@@ -38,6 +39,15 @@ class SettingsPage:
         self._settings["slm_api_url"] = await self.db.get_setting("slm_api_url", "https://s.hubinwei.top")
         self._settings["slm_api_key"] = await self.db.get_setting("slm_api_key", "")
         
+        # 加载授权配置
+        self._settings["license_key"] = await self.db.get_setting("license_key", "")
+        self._settings["device_id"] = await self.db.get_setting("device_id", "")
+        self._settings["license_server_url"] = await self.db.get_setting("license_server_url", "https://license.hubinwei.top")
+        
+        # 获取硬件指纹
+        am = get_auth_manager()
+        self._settings["hwid"] = await am.get_hwid()
+        
         self.refresh_ui()
 
     def refresh_ui(self):
@@ -55,6 +65,27 @@ class SettingsPage:
             
             self.slm_api_url_field.value = self._settings.get("slm_api_url", "https://s.hubinwei.top")
             self.slm_api_key_field.value = self._settings.get("slm_api_key", "")
+            
+            self.license_key_field.value = self._settings.get("license_key", "")
+            self.device_id_field.value = self._settings.get("device_id", "")
+            self.license_server_url_field.value = self._settings.get("license_server_url", "https://license.hubinwei.top")
+            
+            # 更新授权状态标签
+            am = get_auth_manager()
+            if am.status == AuthStatus.PRO:
+                self.auth_info_label.value = "✔️ 已激活 Pro 特权"
+                self.auth_info_label.color = ft.colors.GREEN
+            elif am.status == AuthStatus.FREE:
+                self.auth_info_label.value = "⚠️ 未激活 (基础版)"
+                self.auth_info_label.color = ft.colors.AMBER
+            elif am.status == AuthStatus.EXPIRED:
+                self.auth_info_label.value = "❌ 授权已过期"
+                self.auth_info_label.color = ft.colors.RED
+            else:
+                self.auth_info_label.value = "⚡ 授权状态未知 (离线)"
+                self.auth_info_label.color = ft.colors.GREY
+                
+            self.hwid_field.value = self._settings.get("hwid", "获取中...")
             self.page.update()
 
     def build(self) -> ft.Control:
@@ -104,6 +135,18 @@ class SettingsPage:
         # 短链系统 API 配置字段
         self.slm_api_url_field = ft.TextField(label="短链系统 API 地址 (Base URL)", border_color="primary", text_size=12)
         self.slm_api_key_field = ft.TextField(label="API 令牌 (API Key)", password=True, can_reveal_password=True, border_color="primary", text_size=12)
+
+        # 授权配置字段
+        self.auth_info_label = ft.Text("正在获取状态...", size=12, italic=True)
+        self.license_key_field = ft.TextField(label="许可证密钥 (License Key)", password=True, can_reveal_password=True, border_color="primary", text_size=12)
+        self.device_id_field = ft.TextField(label="绑定的设备 ID (留空使用当前硬件)", border_color="primary", text_size=12)
+        self.hwid_field = ft.TextField(label="当前硬件指纹 (HWID - 自动识别)", border_color="primary", text_size=11, read_only=True, color="onSurfaceVariant")
+        self.license_server_url_field = ft.TextField(label="授权服务器地址 (支持逗号分隔)", border_color="primary", text_size=12, hint_text="https://your-license-center.com")
+        self.verify_auth_btn = ft.FilledTonalButton(
+            "立即验证授权",
+            icon=ft.icons.VIRTUAL_VERDICT_ROUNDED,
+            on_click=self._verify_license_online,
+        )
 
         # 标题区域
         header = ft.Row(
@@ -242,8 +285,33 @@ class SettingsPage:
                         ], spacing=15),
                         padding=10,
                     ),
+
+                    ft.Divider(height=10, color="transparent"),
+
+                    # 第 4 段：软件授权
+                    self._create_section_title("软件授权 / LICENSING", ft.icons.VPN_KEY_ROUNDED),
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([
+                                ft.Text("连接 hw-license-center 以激活 Pro 特权与获取系统广播。", size=12, color="onSurfaceVariant"),
+                                ft.Container(expand=True),
+                                self.auth_info_label,
+                            ]),
+                            self.license_key_field,
+                            ft.Row([
+                                self.device_id_field,
+                                self.license_server_url_field,
+                            ], spacing=15),
+                            self.hwid_field,
+                            ft.Row([
+                                ft.Text("💡 如果没有 Device ID，系统将在首次验证时自动绑定当前硬件。", size=10, color="onSurfaceVariant"),
+                                ft.Container(expand=True),
+                                self.verify_auth_btn,
+                            ]),
+                        ], spacing=15),
+                        padding=10,
+                    ),
                     
-                    ft.Container(expand=True),
                     
                     # 底部：版本与保存
                     ft.Row([
@@ -315,6 +383,27 @@ class SettingsPage:
         e.control.text = "测试 API 连通性"
         self.page.update()
 
+    async def _verify_license_online(self, e):
+        e.control.disabled = True
+        e.control.text = "正在核销..."
+        self.page.update()
+        
+        # 先保存当前填写的配置，以便验证
+        await self.db.set_setting("license_key", self.license_key_field.value)
+        await self.db.set_setting("license_server_url", self.license_server_url_field.value)
+        
+        am = get_auth_manager()
+        success = await am.verify_online()
+        
+        if success:
+            self._show_snackbar("🎉 授权激活成功！Pro 功能已解锁。", "success")
+        else:
+            self._show_snackbar("❌ 授权验证失败，请检查卡密或网络状态。", "error")
+            
+        e.control.disabled = False
+        e.control.text = "立即验证授权"
+        self.refresh_ui()
+
     async def _do_save(self, e):
         if not self.db: return
         
@@ -333,7 +422,11 @@ class SettingsPage:
         await self.db.set_setting("slm_api_url", self.slm_api_url_field.value)
         await self.db.set_setting("slm_api_key", self.slm_api_key_field.value)
         
-        self._show_snackbar("API 配置已同步至核心数据库", "success")
+        await self.db.set_setting("license_key", self.license_key_field.value)
+        await self.db.set_setting("device_id", self.device_id_field.value)
+        await self.db.set_setting("license_server_url", self.license_server_url_field.value)
+        
+        self._show_snackbar("配置已同步至核心数据库", "success")
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)
