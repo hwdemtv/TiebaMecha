@@ -31,6 +31,8 @@ class Account(Base):
     last_verified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后验证时间")
     post_weight: Mapped[int] = mapped_column(Integer, default=5, comment="发帖权重 1–10，用于加权随机抽样")
     suspended_reason: Mapped[str] = mapped_column(String(200), default="", comment="挂起原因（代理失效自动填充）")
+    is_maint_enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启拟人化自动养号")
+    last_maint_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次养号维护时间")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
@@ -241,12 +243,12 @@ class TargetPool(Base):
     fname: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, comment="贴吧名称")
     post_group: Mapped[str] = mapped_column(String(200), default="", comment="发帖分组标签(e.g. 'IT,资源')")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="状态：可用 / 已自动熔断屏蔽")
-    
+
     # 统计与自动熔断
     success_count: Mapped[int] = mapped_column(Integer, default=0, comment="历史破防成功数")
     fail_count: Mapped[int] = mapped_column(Integer, default=0, comment="连续拦截失败数(满阈值熔断)")
     last_fail_reason: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="最近被拦截的原因说明")
-    
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="录入时间")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now, comment="状态更新时间"
@@ -256,4 +258,27 @@ class TargetPool(Base):
     __table_args__ = (
         Index("ix_target_pool_post_group", "post_group"),
         Index("ix_target_pool_is_active", "is_active"),
+    )
+
+
+class Notification(Base):
+    """系统通知"""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    type: Mapped[str] = mapped_column(String(30), nullable=False, comment="通知类型")
+    title: Mapped[str] = mapped_column(String(200), nullable=False, comment="标题")
+    message: Mapped[str] = mapped_column(Text, nullable=False, comment="内容")
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否已读")
+    action_url: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="操作链接")
+    extra_json: Mapped[str] = mapped_column(Text, default="{}", comment="扩展数据 JSON")
+    source: Mapped[str] = mapped_column(String(50), default="local", comment="来源: local/remote")
+    remote_id: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="远程通知ID")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
+
+    __table_args__ = (
+        Index("ix_notifications_is_read", "is_read"),
+        Index("ix_notifications_created_at", "created_at"),
+        Index("ix_notifications_source", "source"),
     )

@@ -14,6 +14,7 @@ from .models import (
     CrawlTask,
     Forum,
     MaterialPool,
+    Notification,
     PostCache,
     Proxy,
     Setting,
@@ -112,6 +113,17 @@ class Database:
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 print(f"[DB MIGRATION WARNING] Failed to add is_post_target to forums: {e}")
+
+        # Accounts 表新字段迁移 (BioWarming 养号支持)
+        for col_sql in [
+            "ALTER TABLE accounts ADD COLUMN is_maint_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE accounts ADD COLUMN last_maint_at DATETIME DEFAULT NULL",
+        ]:
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.execute(text(col_sql))
+            except Exception:
+                pass
 
 
     async def close(self) -> None:
@@ -264,6 +276,22 @@ class Database:
                 select(Account).where(Account.proxy_id == proxy_id)
             )
             return list(result.scalars().all())
+
+    async def get_maint_accounts(self) -> list[Account]:
+        """获取需要执行 BioWarming 养号任务的账号"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Account).where(Account.is_maint_enabled == True)
+            )
+            return list(result.scalars().all())
+
+    async def update_maint_status(self, account_id: int) -> None:
+        """更新账号的最后养号时间"""
+        async with self.async_session() as session:
+            account = await session.get(Account, account_id)
+            if account:
+                account.last_maint_at = __import__("datetime").datetime.now()
+                await session.commit()
 
     async def suspend_accounts_for_proxy(self, proxy_id: int, reason: str = "代理失效自动隔离") -> list[Account]:
         """代理失效时批量挂起关联账号，返回被挂起的账号列表"""
@@ -925,6 +953,117 @@ class Database:
             for f in result.scalars().all():
                 f.is_post_target = is_post_target
             await session.commit()
+
+    # ========== Notification CRUD ==========
+
+    async def add_notification(
+        self,
+        type: str,
+        title: str,
+        message: str,
+        action_url: str | None = None,
+        extra: dict | None = None,
+        source: str = "local",
+        remote_id: str | None = None,
+    ) -> Notification:
+        """添加通知"""
+        import json
+        async with self.async_session() as session:
+            notification = Notification(
+                type=type,
+                title=title,
+                message=message,
+                action_url=action_url,
+                extra_json=json.dumps(extra or {}),
+                source=source,
+                remote_id=remote_id,
+            )
+            session.add(notification)
+            await session.commit()
+            await session.refresh(notification)
+            return notification
+
+    async def get_unread_notifications(self, limit: int = 50) -> list[Notification]:
+        """获取未读通知列表"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Notification)
+                .where(Notification.is_read == False)
+                .order_by(Notification.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def get_all_notifications(self, limit: int = 100) -> list[Notification]:
+        """获取所有通知列表"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Notification)
+                .order_by(Notification.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def mark_notification_read(self, notification_id: int) -> bool:
+        """标记通知为已读"""
+        async with self.async_session() as session:
+            notification = await session.get(Notification, notification_id)
+            if notification:
+                notification.is_read = True
+                await session.commit()
+                return True
+            return False
+
+    async def mark_all_notifications_read(self) -> int:
+        """标记所有通知为已读，返回更新的数量"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                update(Notification).where(Notification.is_read == False).values(is_read=True)
+            )
+            await session.commit()
+            return result.rowcount
+
+    async def delete_notification(self, notification_id: int) -> bool:
+        """删除通知"""
+        async with self.async_session() as session:
+            notification = await session.get(Notification, notification_id)
+            if notification:
+                await session.delete(notification)
+                await session.commit()
+                return True
+            return False
+
+    async def clear_old_notifications(self, days: int = 30) -> int:
+        """清除指定天数前的已读通知"""
+        from datetime import datetime, timedelta
+        async with self.async_session() as session:
+            cutoff = datetime.now() - timedelta(days=days)
+            from sqlalchemy import delete
+            result = await session.execute(
+                delete(Notification).where(
+                    Notification.is_read == True,
+                    Notification.created_at < cutoff
+                )
+            )
+            await session.commit()
+            return result.rowcount
+
+    async def get_unread_count(self) -> int:
+        """获取未读通知数量"""
+        async with self.async_session() as session:
+            from sqlalchemy import func
+            result = await session.execute(
+                select(func.count(Notification.id)).where(Notification.is_read == False)
+            )
+            return result.scalar() or 0
+
+    async def notification_exists(self, remote_id: str) -> bool:
+        """检查远程通知是否已存在（避免重复入库）"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Notification.id).where(Notification.remote_id == remote_id).limit(1)
+            )
+            return result.scalar() is not None
 
 # 全局数据库实例
 _db: Database | None = None

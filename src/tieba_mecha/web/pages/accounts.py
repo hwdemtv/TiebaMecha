@@ -245,6 +245,28 @@ class AccountsPage:
                             spacing=4,
                             expand=True,
                         ),
+                        # 养号开关 (BioWarming)
+                        ft.Column(
+                            controls=[
+                                ft.Switch(
+                                    label="养号",
+                                    label_style=ft.TextStyle(size=11, color="primary" if getattr(acc, 'is_maint_enabled', False) else "onSurfaceVariant"),
+                                    value=getattr(acc, 'is_maint_enabled', False),
+                                    on_change=lambda e, aid=acc.id: self.page.run_task(self._on_maint_toggle, aid, e.control.value),
+                                    scale=0.7,
+                                    tooltip="开启后，机甲将定期模拟真人浏览与点赞以提升账号权重",
+                                ),
+                                ft.Text(
+                                    f"上次: {acc.last_maint_at.strftime('%m-%d %H:%M')}" if getattr(acc, 'last_maint_at', None) else "待维护",
+                                    size=9,
+                                    color="onSurfaceVariant",
+                                )
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=0,
+                        ),
+                        ft.Container(width=10),
                         # 动作按钮
                         ft.Row(
                             controls=[
@@ -569,6 +591,17 @@ class AccountsPage:
 
     def _on_filter_change(self, e):
         self._filter_status = e.control.value
+        self.refresh_ui()
+
+    async def _on_maint_toggle(self, account_id: int, value: bool):
+        """开启或关闭养号维护功能"""
+        await self.db.update_account(account_id, is_maint_enabled=value)
+        # 局部更新内存中的状态
+        for acc in self._accounts:
+            if acc.id == account_id:
+                acc.is_maint_enabled = value
+                break
+        self._show_snackbar(f"账号养号维护已{'开启' if value else '关闭'}", "success")
         self.refresh_ui()
 
     def _on_item_select(self, e):
