@@ -4,7 +4,7 @@ import asyncio
 import flet as ft
 from typing import List, Optional
 
-from ..components import create_gradient_button
+from ..components import create_gradient_button, icons
 from ..utils import with_opacity
 from ...core.plugin_loader import get_plugin_manager
 
@@ -35,7 +35,7 @@ class PluginsPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=icons.ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -55,7 +55,7 @@ class PluginsPage:
                 ft.Container(expand=True),
                 create_gradient_button(
                     text="刷新插件库",
-                    icon=ft.icons.REPLAY_ROUNDED,
+                    icon=icons.REPLAY_ROUNDED,
                     on_click=self._scan_plugins,
                 ),
             ],
@@ -94,7 +94,7 @@ class PluginsPage:
                 ft.Container(
                     content=ft.Column(
                         controls=[
-                            ft.Icon(ft.icons.EXTENSION_OFF, size=50, color="onSurfaceVariant"),
+                            ft.Icon(icons.EXTENSION_OFF, size=50, color="onSurfaceVariant"),
                             ft.Text("未发现可用插件 / plugins 目录为空", color="onSurfaceVariant"),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -111,7 +111,7 @@ class PluginsPage:
                     controls=[
                         # 插件图标
                         ft.Container(
-                            content=ft.Icon(ft.icons.EXTENSION, color="primary", size=24),
+                            content=ft.Icon(icons.EXTENSION, color="primary", size=24),
                             padding=10,
                             bgcolor=with_opacity(0.05, "primary"),
                             border_radius=8,
@@ -128,7 +128,7 @@ class PluginsPage:
                         # 执行按钮
                         create_gradient_button(
                             text="运行", 
-                            icon=ft.icons.PLAY_ARROW_ROUNDED,
+                            icon=icons.PLAY_ARROW_ROUNDED,
                             on_click=lambda e, n=name: self._run_plugin(n),
                             height=36,
                         ),

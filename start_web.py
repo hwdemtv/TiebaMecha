@@ -25,7 +25,8 @@ _uvc.Config.configure_logging = _patched_configure_logging
 sys.path.insert(0, "src")
 
 import flet as ft
-from tieba_mecha.web.app import TiebaMechaApp, get_db
+from tieba_mecha.web.app import TiebaMechaApp
+from tieba_mecha.db.crud import get_db
 
 
 async def main(page: ft.Page):

@@ -12,12 +12,17 @@ _LOG_HISTORY = deque(maxlen=200)
 class AsyncQueueHandler(logging.Handler):
     """标准 logging 到 asyncio.Queue 的桥接器"""
     def emit(self, record):
+        # 过滤 Flet 内部已知的 WebSocket 噪音日志 (通常发生在 Web 模式下连接断开时)
+        msg = record.getMessage()
+        if "Receive loop error: text" in msg:
+            return
+
         try:
             timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
             log_entry = {
                 "time": timestamp,
                 "level": record.levelname,
-                "message": record.getMessage()
+                "message": msg
             }
             _LOG_HISTORY.append(log_entry)
             

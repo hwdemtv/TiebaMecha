@@ -10,7 +10,8 @@ from ...core.proxy import test_proxy
 from ..components.icons import (
     ARROW_BACK_IOS_NEW, ADD_LINK_ROUNDED, SEARCH, SPEED, 
     DELETE_SWEEP, LINK_OFF, VPN_LOCK, HTTP, SPEED_ROUNDED, 
-    EDIT_NOTE_ROUNDED, DELETE_OUTLINE
+    EDIT_NOTE_ROUNDED, DELETE_OUTLINE, CHECK, SAVE_ROUNDED,
+    EDIT_ROUNDED, SYNC_ROUNDED
 )
 
 
@@ -249,7 +250,7 @@ class ProxyPage:
             ], tight=True, spacing=15, width=450),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.close(dialog)),
-                ft.FilledButton("保存节点", icon=ft.icons.CHECK, on_click=on_submit),
+                ft.FilledButton("保存节点", icon=CHECK, on_click=on_submit),
             ],
         )
         self.page.open(dialog)
@@ -282,7 +283,7 @@ class ProxyPage:
         user_f = ft.TextField(label="用户名 (可选)", value=user_val)
         pass_f = ft.TextField(label="密码 (可选)", password=True, can_reveal_password=True, value=pass_val)
 
-        save_btn = ft.FilledButton("保存修改", icon=ft.icons.SAVE_ROUNDED)
+        save_btn = ft.FilledButton("保存修改", icon=SAVE_ROUNDED)
 
         async def on_save(e):
             if not host_f.value or not port_f.value:
@@ -311,7 +312,7 @@ class ProxyPage:
         save_btn.on_click = on_save
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.EDIT_ROUNDED, color="primary"), ft.Text("修改代理节点")]),
+            title=ft.Row([ft.Icon(EDIT_ROUNDED, color="primary"), ft.Text("修改代理节点")]),
             content=ft.Column([
                 ft.Text("请更新该代理服务器的连接参数:", size=12, color="onSurfaceVariant"),
                 ft.Row([host_f, port_f], spacing=10),
@@ -333,7 +334,7 @@ class ProxyPage:
     async def _on_test_click(self, proxy, e):
         try:
             e.control.disabled = True
-            e.control.icon = ft.icons.SYNC_ROUNDED
+            e.control.icon = SYNC_ROUNDED
             self.page.update()
 
             proxy_url = f"{proxy.protocol}://{proxy.host}:{proxy.port}"
@@ -347,7 +348,7 @@ class ProxyPage:
             self._show_snackbar(f"执行测速时发生严重异常: {str(ex)}", "error")
         finally:
             e.control.disabled = False
-            e.control.icon = ft.icons.SPEED_ROUNDED
+            e.control.icon = SPEED_ROUNDED
             self.page.update()
 
     def _navigate(self, page_name: str):

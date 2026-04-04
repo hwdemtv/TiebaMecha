@@ -3,6 +3,7 @@
 import flet as ft
 import asyncio
 from ..utils import with_opacity
+from ..components import icons
 from ...core.account import verify_account, add_account as core_add_account
 
 class WelcomePage:
@@ -27,14 +28,14 @@ class WelcomePage:
         self.status = ft.Text("系统未检测到账号，请先通过量子加密信道完成首次握手。", color="onSurfaceVariant")
         self.verify_btn = ft.FilledButton(
             "启动矩阵连接", 
-            icon=ft.icons.SHADOWS, 
+            icon=icons.SHADOWS, 
             on_click=self._on_verify,
             style=ft.ButtonStyle(bgcolor="primary")
         )
 
         return ft.Container(
             content=ft.Column([
-                ft.Icon(ft.icons.SHIELD_ROUNDED, size=80, color="primary"),
+                ft.Icon(icons.SHIELD_ROUNDED, size=80, color="primary"),
                 ft.Text("欢迎使用 TIEBAMECHA v1.1.0", size=24, weight=ft.FontWeight.BOLD),
                 ft.Text("INITIALIZATION REQUIRED / 需要初始化", size=12, color="primary", weight=ft.FontWeight.W_300),
                 ft.Divider(height=40, color="transparent"),
@@ -42,7 +43,7 @@ class WelcomePage:
                     content=ft.Column([
                         ft.Text("第一步：获取登录凭据", size=14, weight=ft.FontWeight.BOLD),
                         ft.Text("在贴吧网页端 F12 找到 BDUSS 和 STOKEN。如果您不知道如何获取，请点击右侧教程。", size=12, color="onSurfaceVariant"),
-                        ft.TextButton("《手把手：Cookie 提取教程》", icon=ft.icons.HELP_OUTLINE),
+                        ft.TextButton("《手把手：Cookie 提取教程》", icon=icons.HELP_OUTLINE),
                     ], spacing=10),
                     padding=15,
                     bgcolor=with_opacity(0.03, "onSurface"),

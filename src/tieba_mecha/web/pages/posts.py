@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from typing import List, Set, Optional
 
-from ..components import create_gradient_button
+from ..components import create_gradient_button, icons
 from ..utils import with_opacity
 from ...core.post import (
     get_threads, 
@@ -99,7 +99,7 @@ class PostsPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=icons.ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -151,7 +151,7 @@ class PostsPage:
         post_area = ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Icon(ft.icons.POST_ADD, color="primary", size=18),
+                    ft.Icon(icons.POST_ADD, color="primary", size=18),
                     ft.Text("发布新帖", size=14, weight=ft.FontWeight.BOLD),
                 ]),
                 self.post_forum,
@@ -161,11 +161,11 @@ class PostsPage:
                 ft.Row([ft.Container(expand=True), self.content_counter]),
                 ft.TextButton(
                     "AI SEO 优化",
-                    icon=ft.icons.AUTO_AWESOME,
+                    icon=icons.AUTO_AWESOME,
                     on_click=self._ai_optimize_post,
                     style=ft.ButtonStyle(color="primary")
                 ),
-                create_gradient_button("立即发布", icon=ft.icons.SEND, on_click=self._do_post),
+                create_gradient_button("立即发布", icon=icons.SEND, on_click=self._do_post),
                 self.post_status,
             ], spacing=10, scroll=ft.ScrollMode.AUTO),
             padding=15,
@@ -189,11 +189,11 @@ class PostsPage:
         self.loading_indicator = ft.ProgressBar(visible=False, bar_height=2, color="primary")
 
         # 工具栏按钮 (保存为成员变量以避免索引 Bug)
-        self.download_btn = ft.IconButton(ft.icons.DOWNLOAD_ROUNDED, tooltip="导出当前结果", on_click=self._export_threads, icon_color="primary")
-        self.select_all_btn = ft.TextButton("全选/取消", icon=ft.icons.SELECT_ALL, on_click=self._select_all)
-        self.ai_bulk_btn = ft.TextButton("批量 AI SEO", icon=ft.icons.AUTO_AWESOME, icon_color="teal", on_click=self._bulk_ai_optimize, visible=False)
-        self.remove_local_btn = ft.TextButton("移除记录", icon=ft.icons.DELETE_OUTLINE, icon_color="onSurfaceVariant", on_click=self._remove_selected_local, visible=False)
-        self.delete_server_btn = ft.TextButton("物理抹除", icon=ft.icons.DELETE_FOREVER_OUTLINED, icon_color="error", on_click=self._delete_selected, visible=False)
+        self.download_btn = ft.IconButton(icons.DOWNLOAD_ROUNDED, tooltip="导出当前结果", on_click=self._export_threads, icon_color="primary")
+        self.select_all_btn = ft.TextButton("全选/取消", icon=icons.SELECT_ALL, on_click=self._select_all)
+        self.ai_bulk_btn = ft.TextButton("批量 AI SEO", icon=icons.AUTO_AWESOME, icon_color="teal", on_click=self._bulk_ai_optimize, visible=False)
+        self.remove_local_btn = ft.TextButton("移除记录", icon=icons.DELETE_OUTLINE, icon_color="onSurfaceVariant", on_click=self._remove_selected_local, visible=False)
+        self.delete_server_btn = ft.TextButton("物理抹除", icon=icons.DELETE_FOREVER_OUTLINED, icon_color="error", on_click=self._delete_selected, visible=False)
 
         self.toolbar_label = ft.Text("监控列表", size=14, weight=ft.FontWeight.W_500)
 
@@ -211,7 +211,7 @@ class PostsPage:
             ft.Row([
                 self.search_forum,
                 self.search_keyword,
-                ft.IconButton(ft.icons.SEARCH, on_click=self._do_search, icon_color="primary"),
+                ft.IconButton(icons.SEARCH, on_click=self._do_search, icon_color="primary"),
             ], spacing=10),
             self.loading_indicator,
             self.toolbar,
@@ -267,7 +267,7 @@ class PostsPage:
                 self._show_snackbar("SEO 方案已采纳", "success")
 
             dialog = ft.AlertDialog(
-                title=ft.Row([ft.Icon(ft.icons.AUTO_AWESOME, color="primary"), ft.Text("AI SEO 优化建议")]),
+                title=ft.Row([ft.Icon(icons.AUTO_AWESOME, color="primary"), ft.Text("AI SEO 优化建议")]),
                 content=ft.Column([
                     ft.Text("优化后的标题:", weight=ft.FontWeight.BOLD, size=12, color="primary"),
                     ft.Container(
@@ -288,7 +288,7 @@ class PostsPage:
                 ], tight=True, width=500),
                 actions=[
                     ft.TextButton("取消", on_click=lambda e: self.page.close(dialog)),
-                    ft.FilledButton("采纳建议", icon=ft.icons.CHECK, on_click=apply_opt),
+                    ft.FilledButton("采纳建议", icon=icons.CHECK, on_click=apply_opt),
                 ],
             )
             self.page.open(dialog)
@@ -323,7 +323,7 @@ class PostsPage:
                     ], expand=True, spacing=2),
                     # 本地移除按钮 (垃圾桶)
                     ft.IconButton(
-                        ft.icons.DELETE_OUTLINE,
+                        icons.DELETE_OUTLINE,
                         icon_color="onSurfaceVariant",
                         icon_size=18,
                         tooltip="移除记录 (仅本地)",
@@ -331,7 +331,7 @@ class PostsPage:
                     ),
                     # 物理抹除按钮 (原子图标)
                     ft.IconButton(
-                        ft.icons.DELETE_FOREVER_OUTLINED,
+                        icons.DELETE_FOREVER_OUTLINED,
                         icon_color="error",
                         icon_size=18,
                         tooltip="物理抹除 (服务器删除)",
@@ -384,17 +384,17 @@ class PostsPage:
                 ft.Row([
                     ft.FilledButton(
                         "采纳到物料库", 
-                        icon=ft.icons.POST_ADD, 
+                        icon=icons.POST_ADD, 
                         on_click=lambda e, nt=new_t, nc=new_c: self.page.run_task(adopt_item, e, nt, nc),
                         style=ft.ButtonStyle(bgcolor="primary", color="white")
                     ),
-                    ft.TextButton("复制文案", icon=ft.icons.COPY_ALL, on_click=lambda e, nc=new_c: self.page.set_clipboard(nc)),
+                    ft.TextButton("复制文案", icon=icons.COPY_ALL, on_click=lambda e, nc=new_c: self.page.set_clipboard(nc)),
                 ], spacing=10),
                 ft.Divider(),
             ]))
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.AUTO_AWESOME), ft.Text("批量 AI 优化报告")]),
+            title=ft.Row([ft.Icon(icons.AUTO_AWESOME), ft.Text("批量 AI 优化报告")]),
             content=ft.Container(result_view, width=500),
             actions=[ft.TextButton("关闭", on_click=lambda _: self.page.close(dialog))],
         )
@@ -654,13 +654,13 @@ class PostsPage:
             self.page.update()
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.WARNING_AMBER_ROUNDED, color="error"), ft.Text("确认批量物理抹除？")]),
+            title=ft.Row([ft.Icon(icons.WARNING_AMBER_ROUNDED, color="error"), ft.Text("确认批量物理抹除？")]),
             content=ft.Text(f"您已标记 {len(self._selected)} 个帖子。此操作将从贴吧服务器物理删除相关内容，由机甲控制核心执行，具有不可逆性。", size=13),
             actions=[
                 ft.TextButton("取消", on_click=close_dlg),
                 ft.FilledButton(
                     "确认执行", 
-                    icon=ft.icons.DELETE_FOREVER, 
+                    icon=icons.DELETE_FOREVER, 
                     on_click=start_batch_delete, 
                     style=ft.ButtonStyle(bgcolor=ft.colors.ERROR, color=ft.colors.WHITE)
                 ),

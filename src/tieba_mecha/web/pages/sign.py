@@ -9,7 +9,9 @@ from ..components import create_gradient_button, CoreButtonWithLabel
 from ..components.icons import (
     GROUP_WORK, PERSON, SWAP_HORIZ, ARROW_BACK_IOS_NEW,
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
-    CHECK
+    CHECK, VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, HISTORY_ROUNDED,
+    GROUP_WORK_ROUNDED, PUBLIC, VPN_LOCK, CHECK_CIRCLE,
+    PENDING_OUTLINED, ERROR, HISTORY_TOGGLE_OFF
 )
 from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
@@ -131,7 +133,7 @@ class SignPage:
         self.matrix_total_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="primary")
         
         self.mode_text = ft.Text("单账号模式", size=14, weight=ft.FontWeight.BOLD, color="primary")
-        self.mode_icon = ft.Icon("PERSON", color="primary", size=18)
+        self.mode_icon = ft.Icon(PERSON, color="primary", size=18)
         
         mode_switcher = ft.Container(
             content=ft.Row([
@@ -331,7 +333,7 @@ class SignPage:
             card = ft.Container(
                 content=ft.Row([
                     ft.Icon(
-                        ft.icons.VERIFIED_ROUNDED if is_signed else ft.icons.RADIO_BUTTON_UNCHECKED,
+                        VERIFIED_ROUNDED if is_signed else RADIO_BUTTON_UNCHECKED,
                         color="primary" if is_signed else "onSurfaceVariant",
                         size=18
                     ),
@@ -352,7 +354,7 @@ class SignPage:
                         ], spacing=10, alignment=ft.MainAxisAlignment.START),
                     ], expand=True, spacing=4),
                     ft.IconButton(
-                        icon=ft.icons.HISTORY_ROUNDED, 
+                        icon=HISTORY_ROUNDED, 
                         icon_size=18, 
                         icon_color="onSurfaceVariant",
                         tooltip="查看签到日志",
@@ -399,7 +401,7 @@ class SignPage:
             card = ft.Container(
                 content=ft.Row([
                     ft.Icon(
-                        ft.icons.GROUP_WORK_ROUNDED if is_signed else ft.icons.RADIO_BUTTON_UNCHECKED,
+                        GROUP_WORK_ROUNDED if is_signed else RADIO_BUTTON_UNCHECKED,
                         color=status_color if not is_signed else "green",
                         size=20
                     ),
@@ -417,7 +419,7 @@ class SignPage:
                             ft.Text(f"等级: LV.{f.level} | 状态: {acc_status}", size=10, color="error" if status_color == "error" else "onSurfaceVariant"),
                             ft.Container(
                                 content=ft.Row([
-                                    ft.Icon(ft.icons.PUBLIC if proxy_info == "裸连" else ft.icons.VPN_LOCK, size=9, color="white"),
+                                    ft.Icon(PUBLIC if proxy_info == "裸连" else VPN_LOCK, size=9, color="white"),
                                     ft.Text(proxy_info, size=9, color="white"),
                                 ], spacing=2),
                                 bgcolor=proxy_color,
@@ -426,7 +428,7 @@ class SignPage:
                             )
                         ], spacing=10),
                     ], expand=True, spacing=4),
-                    ft.Icon(ft.icons.CHECK_CIRCLE if is_signed else ft.icons.PENDING_OUTLINED, 
+                    ft.Icon(CHECK_CIRCLE if is_signed else PENDING_OUTLINED, 
                            color="green" if is_signed else "onSurfaceVariant", size=18),
                 ]),
                 bgcolor=with_opacity(0.02, "primary") if is_signed else with_opacity(0.01, "onSurface"),
@@ -582,7 +584,7 @@ class SignPage:
         else:
             for log in logs:
                 c = "green" if log.success else "error"
-                icon = ft.icons.CHECK_CIRCLE if log.success else ft.icons.ERROR
+                icon = CHECK_CIRCLE if log.success else ERROR
                 msg_text = log.message if log.message else ("签到成功" if log.success else "未知失败")
                 lv_items.append(ft.ListTile(
                     leading=ft.Icon(icon, color=c, size=20),
@@ -593,7 +595,7 @@ class SignPage:
             
         dlg = ft.AlertDialog(
             title=ft.Row([
-                ft.Icon(ft.icons.HISTORY_TOGGLE_OFF, color="primary"),
+                ft.Icon(HISTORY_TOGGLE_OFF, color="primary"),
                 ft.Text(f"{fname} - 近期战报日志", size=16, weight=ft.FontWeight.BOLD)
             ], spacing=10),
             content=ft.Container(
