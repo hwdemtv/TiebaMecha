@@ -112,3 +112,36 @@ HELP_OUTLINE = "help_outline"
 LOCAL_FIRE_DEPARTMENT_ROUNDED = "local_fire_department_rounded"
 RADIO_BUTTON_CHECKED = "radio_button_checked"
 SELECT_ALL = "select_all"
+
+# 模式切换 / 用户图标 (sign.py)
+GROUP_WORK = "group_work"
+PERSON = "person"
+SWAP_HORIZ = "swap_horiz"
+SYNC_ROUNDED = "sync_rounded"
+PLAY_ARROW_ROUNDED = "play_arrow_rounded"
+ACCESS_TIME_ROUNDED = "access_time_rounded"
+
+# 授权 / 安全图标 (settings.py)
+GPP_GOOD_ROUNDED = "gpp_good_rounded"
+WIFI_TETHERING_ROUNDED = "wifi_tethering_rounded"
+LOGIN_ROUNDED = "login_rounded"
+
+# 规则管理图标 (rules.py)
+NO_ENCRYPTION_ROUNDED = "no_encryption_rounded"
+TERMINAL = "terminal"
+KEYBOARD = "keyboard"
+CHECK = "check"
+
+# 代理管理图标 (proxy.py)
+ADD_LINK_ROUNDED = "add_link_rounded"
+SPEED = "speed"
+DELETE_SWEEP = "delete_sweep"
+LINK_OFF = "link_off"
+HTTP = "http"
+SPEED_ROUNDED = "speed_rounded"
+LINK_OFF = "link_off"
+
+# 仪表盘导航图标 (dashboard.py)
+EDIT_NOTE_ROUNDED = "edit_note_rounded"
+OPEN_IN_NEW = "open_in_new"
+AUTO_AWESOME = "auto_awesome"
