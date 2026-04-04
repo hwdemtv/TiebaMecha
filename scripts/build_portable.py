@@ -79,6 +79,37 @@ def build_portable():
         capture_output=True
     )
 
+    # 修复 Flet 的 uvicorn 日志级别兼容性问题
+    print(f"[5.5/6] 修复 Flet uvicorn 日志级别兼容性...")
+    flet_app_path = venv_dir / "Lib" / "site-packages" / "flet" / "app.py"
+    if flet_app_path.exists():
+        content = flet_app_path.read_text(encoding="utf-8")
+        # 检查是否已经修复过
+        if "UVICORN_LEVEL_ALIASES" not in content:
+            # 在 uvicorn.Config 调用前添加别名映射
+            patch_code = '''    # uvicorn 日志级别别名映射修复
+    log_level_str = logging.getLevelName(log_level).lower()
+    UVICORN_LEVEL_ALIASES = {"warn": "warning"}
+    log_level_str = UVICORN_LEVEL_ALIASES.get(log_level_str, log_level_str)
+'''
+            # 查找并替换 uvicorn.Config 调用
+            if "log_level=log_level" in content:
+                content = content.replace(
+                    "log_level=log_level,",
+                    "log_level=log_level_str,"
+                )
+                # 在适当位置插入 patch_code
+                content = content.replace(
+                    "config = uvicorn.Config(",
+                    patch_code + "    config = uvicorn.Config("
+                )
+                flet_app_path.write_text(content, encoding="utf-8")
+                print("  [OK] Flet uvicorn 日志级别补丁已应用")
+            else:
+                print("  [SKIP] 未找到目标代码，跳过补丁")
+        else:
+            print("  [SKIP] 补丁已存在")
+
     # 创建加固型启动入口 launcher.py
     print(f"[6.1/6] 创建加固型启动入口 launcher.py...")
     launcher_py = portable_dir / "launcher.py"
