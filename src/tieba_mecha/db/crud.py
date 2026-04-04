@@ -1,10 +1,13 @@
 """Database CRUD operations"""
 
+import logging
 from pathlib import Path
 from typing import TypeVar
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Account,
@@ -20,6 +23,7 @@ from .models import (
     Setting,
     SignLog,
     TargetPool,
+    ThreadRecord,
 )
 
 T = TypeVar("T", bound=Base)
@@ -63,8 +67,11 @@ class Database:
             try:
                 async with self.engine.begin() as conn:
                     await conn.execute(text(f"ALTER TABLE accounts ADD COLUMN {column} {col_type}"))
-            except Exception:
-                pass
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"Column '{column}' already exists in accounts table")
+                else:
+                    logger.warning(f"Failed to add column '{column}' to accounts: {e}")
 
         # BatchPostTask 新字段迎移
         batch_columns = [
@@ -75,8 +82,11 @@ class Database:
             try:
                 async with self.engine.begin() as conn:
                     await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-            except Exception:
-                pass  # 忽略错误，通常是因为列已存在
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"Column '{column}' already exists in {table} table")
+                else:
+                    logger.warning(f"Failed to add column '{column}' to {table}: {e}")
 
         # 贴吧字段迁移
         for new_col in [
@@ -89,8 +99,11 @@ class Database:
             try:
                 async with self.engine.begin() as conn:
                     await conn.execute(text(f"ALTER TABLE forums ADD COLUMN {new_col}"))
-            except Exception:
-                pass
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"Forums column already exists: {new_col.split()[0]}")
+                else:
+                    logger.warning(f"Failed to add forums column: {e}")
 
         # MaterialPool 新字段迁移
         for col_sql in [
@@ -103,8 +116,11 @@ class Database:
             try:
                 async with self.engine.begin() as conn:
                     await conn.execute(text(col_sql))
-            except Exception:
-                pass
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"MaterialPool column already exists")
+                else:
+                    logger.warning(f"Failed to add MaterialPool column: {e}")
 
         # Forums 表新字段迁移 (作为本号发帖目标)
         try:
@@ -112,7 +128,15 @@ class Database:
                 await conn.execute(text("ALTER TABLE forums ADD COLUMN is_post_target BOOLEAN DEFAULT 0"))
         except Exception as e:
             if "duplicate column" not in str(e).lower():
-                print(f"[DB MIGRATION WARNING] Failed to add is_post_target to forums: {e}")
+                logger.warning(f"Failed to add is_post_target to forums: {e}")
+
+        # Forums 表新字段迁移 (隐藏贴吧)
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE forums ADD COLUMN is_hidden BOOLEAN DEFAULT 0"))
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                logger.warning(f"Failed to add is_hidden to forums: {e}")
 
         # Accounts 表新字段迁移 (BioWarming 养号支持)
         for col_sql in [
@@ -122,8 +146,11 @@ class Database:
             try:
                 async with self.engine.begin() as conn:
                     await conn.execute(text(col_sql))
-            except Exception:
-                pass
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"Accounts BioWarming column already exists")
+                else:
+                    logger.warning(f"Failed to add Accounts BioWarming column: {e}")
 
 
     async def close(self) -> None:
@@ -149,10 +176,18 @@ class Database:
         
         # 默认 UA 库 (高仿真移动端)
         UA_POOL = [
+            # Android 14 / Pixel 8
             "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UD1A.230803.041) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
+            # iOS 17.2 / iPhone 15
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+            # Android 13 / Samsung S23
             "Mozilla/5.0 (Linux; Android 13; SM-S918B Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.163 Mobile Safari/537.36",
+            # HarmonyOS / Mate 60
+            "Mozilla/5.0 (Linux; Android 12; ALN-AL00 Build/HUAWEIALN-AL00) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 Mobile Safari/537.36",
+            # iPad OS 17.1
             "Mozilla/5.0 (iPad; CPU OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+            # Xiaomi 14
+            "Mozilla/5.0 (Linux; Android 14; 23127PN0CC Build/UKQ1.230804.001) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
         ]
 
         if not cuid:
@@ -378,13 +413,15 @@ class Database:
         async with self.async_session() as session:
             forum = await session.get(Forum, forum_id)
             if forum:
-                forum.is_sign_today = success
-                forum.last_sign_status = "success" if success else "failure"
-                if success:
+                # 仅当状态从“未签到”变为“成功”时，才累加连续天数和历史成功次数
+                if success and not forum.is_sign_today:
                     forum.sign_count += 1
                     forum.history_success += 1
-                else:
+                elif not success:
                     forum.history_failed += 1
+                
+                forum.is_sign_today = success
+                forum.last_sign_status = "success" if success else "failure"
                 forum.history_total += 1
                 forum.last_sign_date = __import__("datetime").datetime.now()
                 await session.commit()
@@ -407,6 +444,15 @@ class Database:
                 await session.commit()
                 return True
             return False
+
+    async def delete_forums_by_fids(self, account_id: int, fids: list[int]) -> None:
+        """根据 FID 列表批量删除指定账号的贴吧"""
+        from sqlalchemy import delete
+        async with self.async_session() as session:
+            await session.execute(
+                delete(Forum).where(Forum.account_id == account_id, Forum.fid.in_(fids))
+            )
+            await session.commit()
 
     # ========== SignLog CRUD ==========
 
@@ -484,6 +530,75 @@ class Database:
                 select(CrawlTask).order_by(CrawlTask.created_at.desc()).limit(limit)
             )
             return list(result.scalars().all())
+
+    async def get_crawl_task_count(self) -> int:
+        """获取爬取任务总数"""
+        async with self.async_session() as session:
+            from sqlalchemy import func
+            result = await session.execute(select(func.count(CrawlTask.id)))
+            return result.scalar() or 0
+
+    async def delete_crawl_task(self, task_id: int) -> bool:
+        """删除爬取任务记录（同时删除关联的结果文件）"""
+        from pathlib import Path
+        async with self.async_session() as session:
+            task = await session.get(CrawlTask, task_id)
+            if task:
+                # 删除关联的JSON文件
+                if task.result_path:
+                    try:
+                        file_path = Path(task.result_path)
+                        if file_path.exists():
+                            file_path.unlink()
+                    except Exception:
+                        pass  # 文件删除失败不影响记录删除
+
+                await session.delete(task)
+                await session.commit()
+                return True
+            return False
+
+    async def clear_old_crawl_tasks(self, days: int = 30) -> tuple[int, int]:
+        """
+        清理指定天数前的爬取任务
+
+        Returns:
+            (删除的任务数, 删除的文件数)
+        """
+        from datetime import datetime, timedelta
+        from pathlib import Path
+
+        cutoff = datetime.now() - timedelta(days=days)
+        deleted_tasks = 0
+        deleted_files = 0
+
+        async with self.async_session() as session:
+            from sqlalchemy import delete
+            # 查找要删除的任务
+            result = await session.execute(
+                select(CrawlTask).where(CrawlTask.created_at < cutoff)
+            )
+            tasks_to_delete = result.scalars().all()
+
+            for task in tasks_to_delete:
+                # 删除关联文件
+                if task.result_path:
+                    try:
+                        file_path = Path(task.result_path)
+                        if file_path.exists():
+                            file_path.unlink()
+                            deleted_files += 1
+                    except Exception:
+                        pass
+
+            # 批量删除记录
+            delete_result = await session.execute(
+                delete(CrawlTask).where(CrawlTask.created_at < cutoff)
+            )
+            deleted_tasks = delete_result.rowcount or 0
+            await session.commit()
+
+        return deleted_tasks, deleted_files
 
     # ========== PostCache CRUD ==========
 
@@ -1064,6 +1179,114 @@ class Database:
                 select(Notification.id).where(Notification.remote_id == remote_id).limit(1)
             )
             return result.scalar() is not None
+
+    # ==================== ThreadRecord CRUD ====================
+
+    async def upsert_thread_records(self, threads: list[dict]) -> int:
+        """
+        批量插入或更新帖子记录 (UPSERT)
+
+        Args:
+            threads: 帖子字典列表，每个字典需包含 tid, title, fname 等字段
+
+        Returns:
+            处理的记录数量
+        """
+        if not threads:
+            return 0
+
+        async with self.async_session() as session:
+            for t in threads:
+                tid = t.get("tid")
+                if not tid:
+                    continue
+
+                existing = await session.get(ThreadRecord, tid)
+                if existing:
+                    # 更新现有记录
+                    existing.title = t.get("title", existing.title)
+                    existing.author_name = t.get("author_name", existing.author_name)
+                    existing.author_id = t.get("author_id", existing.author_id)
+                    existing.reply_num = t.get("reply_num", existing.reply_num)
+                    existing.text = t.get("text", existing.text)
+                    existing.fname = t.get("fname", existing.fname)
+                    existing.is_good = t.get("is_good", existing.is_good)
+                else:
+                    # 插入新记录
+                    record = ThreadRecord(
+                        tid=tid,
+                        title=t.get("title", ""),
+                        author_name=t.get("author_name", ""),
+                        author_id=t.get("author_id", 0),
+                        reply_num=t.get("reply_num", 0),
+                        text=t.get("text"),
+                        fname=t.get("fname", ""),
+                        is_good=t.get("is_good", False),
+                    )
+                    session.add(record)
+
+            await session.commit()
+        return len(threads)
+
+    async def get_thread_records(self, fname: str | None = None, limit: int = 100) -> list[ThreadRecord]:
+        """
+        获取本地存储的帖子记录
+
+        Args:
+            fname: 贴吧名称过滤，None 表示获取所有
+            limit: 返回数量限制
+
+        Returns:
+            ThreadRecord 列表
+        """
+        async with self.async_session() as session:
+            query = select(ThreadRecord).order_by(ThreadRecord.updated_at.desc())
+            if fname:
+                query = query.where(ThreadRecord.fname == fname)
+            query = query.limit(limit)
+            result = await session.execute(query)
+            return list(result.scalars().all())
+
+    async def delete_thread_record(self, tid: int) -> bool:
+        """
+        从本地数据库删除帖子记录
+
+        Args:
+            tid: 帖子ID
+
+        Returns:
+            是否删除成功
+        """
+        async with self.async_session() as session:
+            record = await session.get(ThreadRecord, tid)
+            if record:
+                await session.delete(record)
+                await session.commit()
+                return True
+            return False
+
+    async def delete_thread_records_bulk(self, tids: list[int]) -> int:
+        """
+        批量删除本地帖子记录
+
+        Args:
+            tids: 帖子ID列表
+
+        Returns:
+            删除的数量
+        """
+        if not tids:
+            return 0
+
+        async with self.async_session() as session:
+            count = 0
+            for tid in tids:
+                record = await session.get(ThreadRecord, tid)
+                if record:
+                    await session.delete(record)
+                    count += 1
+            await session.commit()
+        return count
 
 # 全局数据库实例
 _db: Database | None = None

@@ -317,7 +317,8 @@ class NotificationPanel(ft.AlertDialog):
             if added > 0:
                 self.page.open(ft.SnackBar(content=ft.Text(f"同步完成，新增 {added} 条广播通知")))
         except Exception as ex:
-            print(f"[NotificationPanel] Refresh error: {ex}")
+            from ...core.logger import log_error
+            await log_error(f"[NotificationPanel] Refresh error: {ex}")
         finally:
             e.control.disabled = False
             await self.page.update_async()

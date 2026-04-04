@@ -1,0 +1,25 @@
+services:
+  tieba-mecha:
+    build: .
+    image: hwdemtv/tieba-mecha:latest
+    container_name: tieba-mecha
+    restart: always
+    ports:
+      - "9006:9006"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      # 如果需要指定自定义端口，可以启用下方设置
+      # - PORT=9006
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9006"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

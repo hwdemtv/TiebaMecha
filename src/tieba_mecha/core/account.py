@@ -1,6 +1,7 @@
 import re
 import base64
 import os
+from datetime import datetime
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet
@@ -82,6 +83,8 @@ class AccountInfo:
     cuid: str = ""
     user_agent: str = ""
     proxy_id: int | None = None
+    is_maint_enabled: bool = False
+    last_maint_at: datetime | None = None
 
 
 async def add_account(
@@ -116,6 +119,7 @@ async def add_account(
     status = "unknown"
 
     if verify:
+        # 在验证阶段应用指纹（如果有）
         valid, uid, uname, error = await verify_account(bduss, stoken)
         if valid:
             user_id = uid
@@ -147,10 +151,12 @@ async def add_account(
         cuid=account.cuid,
         user_agent=account.user_agent,
         proxy_id=account.proxy_id,
+        is_maint_enabled=account.is_maint_enabled,
+        last_maint_at=account.last_maint_at,
     )
 
 
-async def get_account_credentials(db: Database, account_id: int | None = None) -> tuple[str, str, int | None, str, str] | None:
+async def get_account_credentials(db: Database, account_id: int | None = None) -> tuple[int, str, str, int | None, str, str] | None:
     """
     获取账号凭证 (解密后的 BDUSS、STOKEN 以及关联代理 ID)
 
@@ -159,7 +165,7 @@ async def get_account_credentials(db: Database, account_id: int | None = None) -
         account_id: 账号ID，None 则获取当前活跃账号
 
     Returns:
-        (BDUSS, STOKEN, proxy_id, cuid, user_agent) 或 None
+        (id, BDUSS, STOKEN, proxy_id, cuid, user_agent) 或 None
     """
     if account_id:
         accounts = await db.get_accounts()
@@ -173,12 +179,12 @@ async def get_account_credentials(db: Database, account_id: int | None = None) -
     try:
         bduss = decrypt_value(account.bduss)
         stoken = decrypt_value(account.stoken) if account.stoken else ""
-        return bduss, stoken, account.proxy_id, account.cuid, account.user_agent
+        return account.id, bduss, stoken, account.proxy_id, account.cuid, account.user_agent
     except Exception:
         return None
 
 
-async def verify_account(bduss: str, stoken: str = "") -> tuple[bool, int, str, str]:
+async def verify_account(bduss: str, stoken: str = "", cuid: str = "", ua: str = "") -> tuple[bool, int, str, str]:
     """
     验证账号登录状态
 
@@ -189,10 +195,11 @@ async def verify_account(bduss: str, stoken: str = "") -> tuple[bool, int, str, 
     Returns:
         (是否有效, user_id, user_name, error_msg)
     """
-    import aiotieba
+    from .client_factory import create_client
 
     try:
-        async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken) as client:
+        # 使用 client_factory 创建客户端，确保指纹被正确应用
+        async with await create_client(None, bduss, stoken, cuid=cuid, ua=ua) as client:
             user_info = await client.get_self_info()
             if user_info and user_info.user_id:
                 # 优先使用 nick_name（用户昵称），其次 show_name，再 user_name，最后用 user_id
@@ -232,6 +239,8 @@ async def list_accounts(db: Database) -> list[AccountInfo]:
             cuid=a.cuid,
             user_agent=a.user_agent,
             proxy_id=a.proxy_id,
+            is_maint_enabled=a.is_maint_enabled,
+            last_maint_at=a.last_maint_at,
         )
         for a in accounts
     ]
@@ -272,8 +281,10 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
     except Exception:
         return None
 
-    # 验证账号
-    valid, user_id, user_name, error = await verify_account(bduss, stoken)
+    # 验证账号 (带上已有的指纹)
+    valid, user_id, user_name, error = await verify_account(
+        bduss, stoken, cuid=account.cuid, ua=account.user_agent
+    )
 
     if valid:
         status = "active"
@@ -299,6 +310,8 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
             cuid=updated.cuid,
             user_agent=updated.user_agent,
             proxy_id=updated.proxy_id,
+            is_maint_enabled=updated.is_maint_enabled,
+            last_maint_at=updated.last_maint_at,
         )
     return None
 

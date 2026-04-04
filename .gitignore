@@ -155,4 +155,21 @@ cython_debug/
 # TiebaMecha Specific
 *.db
 data/
+docs/short_link_injection_solution.md
+docs/baidu_tieba_content_guidelines.md
+
+# Debug/Development scripts (not for release)
+scripts/debug_*.py
+scripts/check_*.py
+scripts/test_*.py
+scripts/verify_fix.py
+scripts/delete_forum.py
+
+# Temporary files
+tmp/
+*.tmp
+*.temp
+
+# Claude Code
+.claude/
 

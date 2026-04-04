@@ -13,15 +13,15 @@ async def get_best_proxy_config(db: Database, proxy_id: int | None = None) -> Op
         if proxy and proxy.is_active:
             return _build_proxy_config(proxy)
             
-    # 如果指定代理失效或未指定，且启用了自动容灾
-    is_fallback_enabled = await db.get_setting("proxy_fallback", "true") == "true"
-    if is_fallback_enabled:
-        proxies = await db.get_active_proxies()
-        if proxies:
-            # 随机选择一个最稳定的代理（前 3nd）
-            top_proxies = sorted(proxies, key=lambda p: p.fail_count)[:3]
-            proxy = random.choice(top_proxies)
-            return _build_proxy_config(proxy)
+        # 仅在指定了代理但失效时，且启用了自动容灾，才尝试 Fallback
+        is_fallback_enabled = await db.get_setting("proxy_fallback", "true") == "true"
+        if is_fallback_enabled:
+            proxies = await db.get_active_proxies()
+            if proxies:
+                # 随机选择一个较稳定的代理（前 3 个）
+                top_proxies = sorted(proxies, key=lambda p: p.fail_count)[:3]
+                proxy = random.choice(top_proxies)
+                return _build_proxy_config(proxy)
     
     return None
 

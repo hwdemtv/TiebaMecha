@@ -32,8 +32,8 @@ class MaintManager:
             await log_warn(f"[BioWarming] 账号 {account_id if account_id else '当前活跃'} 凭证获取失败，跳过维护")
             return False
 
-        bduss, stoken, proxy_id, cuid, ua = creds
-        account_name = f"ID:{account_id}" if account_id else "当前账号"
+        acc_id, bduss, stoken, proxy_id, cuid, ua = creds
+        account_name = f"ID:{acc_id}"
 
         try:
             async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
@@ -79,9 +79,7 @@ class MaintManager:
                         await self._human_sleep(2, 5)
 
                 # 记录成功维护
-                await self.db.update_maint_status(account_id or self_info.user_id) # 这里逻辑稍微有点问题，crud里用的是id
-                # 修正：如果 account_id 是 None，我们需要找到数据库里的 ID
-                # 不过此处简写，假设 account_id 总是传入的
+                await self.db.update_maint_status(acc_id)
                 
                 await log_info(f"[BioWarming] {account_name} 维护周期结束 | 权重负载均衡中...")
                 return True
