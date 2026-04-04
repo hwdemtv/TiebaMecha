@@ -11,6 +11,7 @@ from ..components import (
     create_gradient_button,
     DualHUD,
 )
+from ..utils import with_opacity
 from ...core.sign import get_sign_stats
 from ...core.logger import get_log_queue
 
@@ -125,9 +126,9 @@ class DashboardPage:
             self.ai_status_icon.color = "#4CAF50" if ai_configured else "#FF6B35"
             self.ai_status_text_val.value = "ONLINE · API Key 已配置" if ai_configured else "OFFLINE · 请前往设置配置 API Key"
             self.ai_status_text_val.color = "#4CAF50" if ai_configured else "#FF6B35"
-            self.ai_status_container.bgcolor = ft.colors.with_opacity(0.1, "#4CAF50" if ai_configured else "#FF6B35")
-            self.ai_banner_outer.bgcolor = ft.colors.with_opacity(0.05, "#4CAF50" if ai_configured else "#FF6B35")
-            self.ai_banner_outer.border = ft.border.all(1, ft.colors.with_opacity(0.2, "#4CAF50" if ai_configured else "#FF6B35"))
+            self.ai_status_container.bgcolor = with_opacity(0.1, "#4CAF50" if ai_configured else "#FF6B35")
+            self.ai_banner_outer.bgcolor = with_opacity(0.05, "#4CAF50" if ai_configured else "#FF6B35")
+            self.ai_banner_outer.border = ft.border.all(1, with_opacity(0.2, "#4CAF50" if ai_configured else "#FF6B35"))
             self.ai_nav_btn.visible = not ai_configured
             
         self.page.update()
@@ -146,7 +147,7 @@ class DashboardPage:
                 ft.Container(
                     content=ft.Icon(ft.icons.TERMINAL_ROUNDED, color="primary", size=28),
                     padding=10,
-                    bgcolor=ft.colors.with_opacity(0.1, "primary"),
+                    bgcolor=with_opacity(0.1, "primary"),
                     border_radius=10,
                 ),
                 ft.Column(
@@ -200,7 +201,7 @@ class DashboardPage:
         self.ai_status_container = ft.Container(
             content=self.ai_status_text_val,
             padding=ft.padding.symmetric(horizontal=8, vertical=3),
-            bgcolor=ft.colors.with_opacity(0.1, ai_status_color),
+            bgcolor=with_opacity(0.1, ai_status_color),
             border_radius=5,
         )
         self.ai_nav_btn = ft.TextButton(
@@ -224,8 +225,8 @@ class DashboardPage:
                     on_click=lambda _: self.page.launch_url("https://www.bigmodel.cn/invite?icode=SQx7axFjnOGhwGsnmgUpHGczbXFgPRGIalpycrEwJ28%3D"),
                 ),
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            bgcolor=ft.colors.with_opacity(0.05, ai_status_color),
-            border=ft.border.all(1, ft.colors.with_opacity(0.2, ai_status_color)),
+            bgcolor=with_opacity(0.05, ai_status_color),
+            border=ft.border.all(1, with_opacity(0.2, ai_status_color)),
             border_radius=8,
             padding=ft.padding.symmetric(horizontal=15, vertical=8),
         )
@@ -331,9 +332,9 @@ class DashboardPage:
                     ft.Container(
                         content=self.log_list,
                         height=200,
-                        border=ft.border.all(1, ft.colors.with_opacity(0.1, "#00BFA5")),
+                        border=ft.border.all(1, with_opacity(0.1, "#00BFA5")),
                         border_radius=10,
-                        bgcolor=ft.colors.with_opacity(0.01, "#F2F5F9"),
+                        bgcolor=with_opacity(0.01, "#F2F5F9"),
                     ),
                 ],
                 spacing=0,

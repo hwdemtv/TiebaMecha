@@ -5,6 +5,7 @@ import flet as ft
 from typing import List, Optional
 
 from ..components import create_gradient_button
+from ..utils import with_opacity
 from ...core.account import add_account, list_accounts, switch_account, remove_account, parse_cookie, verify_account, refresh_account
 from ...core.logger import log_info, log_warn, log_error
 
@@ -55,7 +56,7 @@ class AccountsPage:
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
                             color=ft.colors.PRIMARY,
-                            bgcolor={"": ft.colors.with_opacity(0.1, ft.colors.PRIMARY)},
+                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -85,8 +86,8 @@ class AccountsPage:
             border_radius=10,
             text_size=13,
             on_change=self._on_search_change,
-            bgcolor=ft.colors.with_opacity(0.05, "onSurface"),
-            border_color=ft.colors.with_opacity(0.1, "primary"),
+            bgcolor=with_opacity(0.05, "onSurface"),
+            border_color=with_opacity(0.1, "primary"),
             expand=True,
             height=45,
         )
@@ -127,7 +128,7 @@ class AccountsPage:
                     header,
                     ft.Row([search_field, status_filter], spacing=10),
                     self.bulk_bar,
-                    ft.Divider(color=ft.colors.with_opacity(0.1, "primary"), height=10),
+                    ft.Divider(color=with_opacity(0.1, "primary"), height=10),
                     ft.Container(
                         content=self.account_list,
                         expand=True,
@@ -300,8 +301,8 @@ class AccountsPage:
                         ),
                     ],
                 ),
-                bgcolor=ft.colors.with_opacity(0.03, "primary") if is_active else ft.colors.with_opacity(0.02, "onSurface"),
-                border=ft.border.all(1, ft.colors.with_opacity(0.2, "primary") if is_active else ft.colors.with_opacity(0.1, "onSurface")),
+                bgcolor=with_opacity(0.03, "primary") if is_active else with_opacity(0.02, "onSurface"),
+                border=ft.border.all(1, with_opacity(0.2, "primary") if is_active else with_opacity(0.1, "onSurface")),
                 border_radius=10,
                 padding=10,
                 on_hover=self._on_item_hover,
@@ -314,8 +315,8 @@ class AccountsPage:
         self.refresh_ui()
 
     def _on_item_hover(self, e):
-        e.control.bgcolor = ft.colors.with_opacity(0.08, "primary") if e.data == "true" else \
-                           (ft.colors.with_opacity(0.03, "primary") if self._active_id else ft.colors.with_opacity(0.02, "onSurface"))
+        e.control.bgcolor = with_opacity(0.08, "primary") if e.data == "true" else \
+                           (with_opacity(0.03, "primary") if self._active_id else with_opacity(0.02, "onSurface"))
         e.control.update()
 
     async def _show_add_dialog(self, e):
@@ -330,8 +331,8 @@ class AccountsPage:
             border_color="primary",
         )
         
-        bduss_field = ft.TextField(label="BDUSS", password=True, can_reveal_password=True, text_size=13)
-        stoken_field = ft.TextField(label="STOKEN (可选)", password=True, can_reveal_password=True, text_size=13)
+        bduss_field = ft.TextField(label="BDUSS", password=True, can_reveal_password=True, text_size=13, expand=True)
+        stoken_field = ft.TextField(label="STOKEN (可选)", password=True, can_reveal_password=True, text_size=13, expand=True)
         name_field = ft.TextField(label="账号备注", hint_text="用于区分不同账号", text_size=13)
         
         proxy_dropdown = ft.Dropdown(
@@ -469,9 +470,30 @@ class AccountsPage:
                 stoken_val = ""
 
         name_field = ft.TextField(label="账号备注", value=account.name or account.user_name, text_size=13)
-        bduss_field = ft.TextField(label="BDUSS", value=bduss_val, password=True, can_reveal_password=True, text_size=13)
-        stoken_field = ft.TextField(label="STOKEN (可选)", value=stoken_val, password=True, can_reveal_password=True, text_size=13)
+        bduss_field = ft.TextField(label="BDUSS", value=bduss_val, password=True, can_reveal_password=True, text_size=13, expand=True)
+        stoken_field = ft.TextField(label="STOKEN (可选)", value=stoken_val, password=True, can_reveal_password=True, text_size=13, expand=True)
         
+        cookie_input = ft.TextField(
+            label="从 Cookie 更新凭据 (可选)",
+            hint_text="粘贴新的 Cookie 字符串以快速更新 BDUSS 和 STOKEN",
+            multiline=True,
+            min_lines=2,
+            max_lines=3,
+            text_size=11,
+            border_color="primary",
+        )
+
+        def on_cookie_change(e):
+            if not cookie_input.value: return
+            bduss, stoken = parse_cookie(cookie_input.value)
+            if bduss:
+                bduss_field.value = bduss
+                stoken_field.value = stoken
+                self.page.update()
+                self._show_snackbar("凭据已从 Cookie 提取", "success")
+
+        cookie_input.on_change = on_cookie_change
+
         proxy_dropdown = ft.Dropdown(
             label="关联代理",
             options=[ft.dropdown.Option("0", "不使用代理 / 直连")] + 
@@ -532,6 +554,7 @@ class AccountsPage:
                     controls=[
                         ft.Text(f"正在编辑账号: {account.user_name} (UID: {account.user_id})", size=12, color="onSurfaceVariant"),
                         name_field,
+                        cookie_input,
                         ft.Row([bduss_field, stoken_field], spacing=10),
                         proxy_dropdown,
                     ],
@@ -684,7 +707,7 @@ class AccountsPage:
         self.page.show_snack_bar(
             ft.SnackBar(
                 content=ft.Text(message),
-                bgcolor=ft.colors.with_opacity(0.8, color),
+                bgcolor=with_opacity(0.8, color),
                 behavior=ft.SnackBarBehavior.FLOATING,
             )
         )

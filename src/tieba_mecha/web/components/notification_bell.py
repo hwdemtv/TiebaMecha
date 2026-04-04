@@ -4,6 +4,7 @@ import asyncio
 from typing import TYPE_CHECKING, Optional, Callable
 
 import flet as ft
+from ..utils import with_opacity
 
 if TYPE_CHECKING:
     from ...core.notification import NotificationManager
@@ -35,8 +36,8 @@ class NotificationBell(ft.Container):
                 tooltip="通知中心",
                 on_click=self._on_bell_click,
             ),
-            text="0",
-            visible=False,
+            text=None,
+            visible=True,
             text_color="white",
             bgcolor=ft.colors.RED,
         )
@@ -44,14 +45,23 @@ class NotificationBell(ft.Container):
         self.content = self._badge
 
     def set_notification_manager(self, manager: "NotificationManager"):
-        """设置通知管理器"""
+        """设置通知管理器并订阅更新"""
         self._notification_manager = manager
+        if manager:
+            # 订阅状态变更（新消息、已读、删除都会触发）
+            manager.add_listener(lambda _: self.page.run_task(self.refresh))
 
     async def update_count(self, count: int):
         """更新未读数量"""
         self._unread_count = count
-        self._badge.text = str(count) if count < 100 else "99+"
+        self._badge.text = str(count) if count > 0 else None
+        # 如果 count >= 100，使用 99+
+        if count >= 100:
+            self._badge.text = "99+"
+        
+        # 核心修复：当数量为 0 时隐藏整个徽章，否则 Flet 会显示一个小红点
         self._badge.visible = count > 0
+        
         try:
             await self.page.update_async()
         except Exception:
@@ -60,7 +70,11 @@ class NotificationBell(ft.Container):
     async def _on_bell_click(self, e):
         """点击铃铛显示通知面板"""
         if self._on_click:
-            await self._on_click(e)
+            # 如果是 lambda 直接调用，或者是普通函数
+            res = self._on_click(e)
+            # 只有当结果本身是 coroutine/awaitable 时才 await
+            if asyncio.iscoroutine(res):
+                await res
         else:
             await self._toggle_panel()
 
@@ -103,13 +117,27 @@ class NotificationPanel(ft.AlertDialog):
         self._title_row = ft.Row(
             controls=[
                 ft.Text("通知中心", size=18, weight=ft.FontWeight.BOLD, expand=True),
+                ft.IconButton(
+                    icon=ft.icons.REFRESH_ROUNDED,
+                    tooltip="同步系统远程通知",
+                    on_click=self._on_refresh_remote,
+                    icon_size=18,
+                ),
+                ft.IconButton(
+                    icon=ft.icons.DELETE_SWEEP_OUTLINED,
+                    tooltip="清理所有已读通知",
+                    on_click=self._on_clear_read,
+                    icon_size=18,
+                    icon_color=ft.colors.ON_SURFACE_VARIANT,
+                ),
                 ft.TextButton(
                     "全部已读",
-                    on_click=self._mark_all_read,
-                    visible=False,
+                    on_click=self._mark_all_read_btn,
+                    style=ft.ButtonStyle(color=ft.colors.PRIMARY),
                 ),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         super().__init__(
@@ -151,7 +179,7 @@ class NotificationPanel(ft.AlertDialog):
 
         # 构建 UI
         unread_count = sum(1 for n in self._notifications if not n.is_read)
-        self._title_row.controls[1].visible = unread_count > 0
+        self._title_row.controls[2].visible = unread_count > 0
 
         controls = []
         for n in self._notifications:
@@ -211,19 +239,29 @@ class NotificationPanel(ft.AlertDialog):
                         expand=True,
                         spacing=4,
                     ),
-                    ft.IconButton(
-                        icon=ft.icons.OPEN_IN_NEW if notification.action_url else ft.icons.CHECK,
-                        icon_size=16,
-                        visible=bool(notification.action_url or not notification.is_read),
-                        on_click=lambda e, n=notification: self._on_item_click(n),
-                    ),
+                    ft.Row([
+                        ft.IconButton(
+                            icon=ft.icons.OPEN_IN_NEW if notification.action_url else ft.icons.CHECK,
+                            icon_size=16,
+                            tooltip="查看/标记已读",
+                            visible=bool(notification.action_url or not notification.is_read),
+                            on_click=lambda e, n=notification: self.page.run_task(self._on_item_click, n),
+                        ),
+                        ft.IconButton(
+                            icon=ft.icons.DELETE_OUTLINE,
+                            icon_size=16,
+                            icon_color=ft.colors.ERROR,
+                            tooltip="删除通知",
+                            on_click=lambda e, n=notification: self.page.run_task(self._on_delete_item, n),
+                        ),
+                    ], spacing=0),
                 ],
                 spacing=10,
             ),
             padding=ft.padding.symmetric(horizontal=8, vertical=8),
-            border=ft.border.all(1, ft.colors.with_opacity(0.1, "grey")) if not notification.is_read else None,
+            border=ft.border.all(1, with_opacity(0.1, "grey")) if not notification.is_read else None,
             border_radius=8,
-            on_click=lambda e, n=notification: self._on_item_click(n),
+            on_click=lambda e, n=notification: self.page.run_task(self._on_item_click, n),
         )
 
     async def _on_item_click(self, notification):
@@ -240,12 +278,49 @@ class NotificationPanel(ft.AlertDialog):
         await self.load_notifications()
         await self.page.update_async()
 
-    async def _mark_all_read(self, e):
+    async def _mark_all_read_btn(self, e):
         """全部标记已读"""
         if self._notification_manager:
             await self._notification_manager.mark_all_read()
         await self.load_notifications()
         await self.page.update_async()
+
+    async def _on_delete_item(self, notification):
+        """删除单条通知"""
+        if self._notification_manager:
+            await self._notification_manager.delete_notification(notification.id)
+        await self.load_notifications()
+        await self.page.update_async()
+
+    async def _on_clear_read(self, e):
+        """清理所有已读通知"""
+        if self._notification_manager:
+            count = await self._notification_manager.clear_all_read()
+            if count > 0:
+                self.page.open(ft.SnackBar(content=ft.Text(f"已清理 {count} 条已读通知")))
+        await self.load_notifications()
+        await self.page.update_async()
+
+    async def _on_refresh_remote(self, e):
+        """手动刷新远程通知"""
+        if not self._notification_manager:
+            return
+            
+        e.control.disabled = True
+        await self.page.update_async()
+        
+        try:
+            added = await self._notification_manager.sync_remote_notifications()
+            # 刷新列表和计数
+            await self.load_notifications()
+            # 如果有新通知，显示提示
+            if added > 0:
+                self.page.open(ft.SnackBar(content=ft.Text(f"同步完成，新增 {added} 条广播通知")))
+        except Exception as ex:
+            print(f"[NotificationPanel] Refresh error: {ex}")
+        finally:
+            e.control.disabled = False
+            await self.page.update_async()
 
     async def _close(self, e):
         """关闭面板"""

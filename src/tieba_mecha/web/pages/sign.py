@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from ..components import create_gradient_button, CoreButtonWithLabel
+from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
 
 
@@ -124,9 +125,9 @@ class SignPage:
             on_click=self._toggle_mode,
             ink=True,  # 替代 cursor 作为可点击反馈
             padding=ft.padding.symmetric(horizontal=12, vertical=6),
-            border=ft.border.all(1, ft.colors.with_opacity(0.3, "primary")),
+            border=ft.border.all(1, with_opacity(0.3, "primary")),
             border_radius=20,
-            bgcolor=ft.colors.with_opacity(0.1, "primary")
+            bgcolor=with_opacity(0.1, "primary")
         )
         
         # 主内
@@ -139,7 +140,7 @@ class SignPage:
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
                             color=ft.colors.PRIMARY,
-                            bgcolor={"": ft.colors.with_opacity(0.1, ft.colors.PRIMARY)},
+                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -160,17 +161,17 @@ class SignPage:
                         ft.Text("总数", size=9, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
                         self.total_stat,
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
-                    ft.VerticalDivider(width=20, color=ft.colors.with_opacity(0.1, "onSurface")),
+                    ft.VerticalDivider(width=20, color=with_opacity(0.1, "onSurface")),
                     ft.Column([
                         ft.Text("成功", size=9, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
                         self.success_stat,
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
-                    ft.VerticalDivider(width=20, color=ft.colors.with_opacity(0.1, "onSurface")),
+                    ft.VerticalDivider(width=20, color=with_opacity(0.1, "onSurface")),
                     ft.Column([
                         ft.Text("失败", size=9, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
                         self.failure_stat,
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
-                    ft.VerticalDivider(width=20, color=ft.colors.with_opacity(0.1, "onSurface")),
+                    ft.VerticalDivider(width=20, color=with_opacity(0.1, "onSurface")),
                     ft.Column([
                         ft.Text("全矩阵", size=9, weight=ft.FontWeight.BOLD, color="primary"),
                         self.matrix_total_stat,
@@ -194,6 +195,7 @@ class SignPage:
                 ),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             padding=10,
+            width=300,
         )
 
         # 进度与状态
@@ -205,63 +207,86 @@ class SignPage:
         self.list_view = ft.ListView(expand=True, spacing=8, padding=10)
         self.list_container = ft.Container(content=self.list_view, expand=True)
 
-        self.delay_min_input = ft.TextField(label="最小间隔", value="5.0", text_size=11, width=80)
-        self.delay_max_input = ft.TextField(label="最大间隔", value="15.0", text_size=11, width=80)
+        self.delay_min_input = ft.TextField(label="最小间隔", value="5.0", text_size=11, expand=True, suffix_text="秒")
+        self.delay_max_input = ft.TextField(label="最大间隔", value="15.0", text_size=11, expand=True, suffix_text="秒")
         
-        self.acc_delay_min_input = ft.TextField(label="账号切换延迟(小)", value="30.0", text_size=11, width=80)
-        self.acc_delay_max_input = ft.TextField(label="账号切换延迟(大)", value="120.0", text_size=11, width=80)
+        self.acc_delay_min_input = ft.TextField(label="最小延迟", value="30.0", text_size=11, expand=True, suffix_text="秒")
+        self.acc_delay_max_input = ft.TextField(label="最大延迟", value="120.0", text_size=11, expand=True, suffix_text="秒")
 
         self.matrix_settings = ft.Column([
-            ft.Divider(height=10, color="transparent"),
-            ft.Text("矩阵防关联机制", size=12, color="error"),
-            ft.Row([self.acc_delay_min_input, self.acc_delay_max_input], spacing=10),
+            ft.Divider(height=5, color="transparent"),
+            ft.Text("多账号防关联间隔", size=12, color="error"),
+            ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], visible=False)
 
         # 侧边设置面板 (Cyber Style)
         settings_panel = ft.Container(
             content=ft.Column([
-                ft.Text("行为配置", size=14, weight=ft.FontWeight.BOLD),
+                ft.Text("行为频率配置 / CONFIG", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                 ft.Row([
                     self.delay_min_input,
+                    ft.Text("至", size=11, color="onSurfaceVariant"),
                     self.delay_max_input,
-                ], spacing=10),
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.matrix_settings,
                 ft.Divider(height=20, color="transparent"),
                 self.sync_btn,
             ], spacing=15),
             padding=20,
-            bgcolor=ft.colors.with_opacity(0.03, "onSurface"),
+            bgcolor=with_opacity(0.03, "onSurface"),
             border_radius=12,
-            width=200,
+            width=300,
         )
 
         # 定时守护配置面板
-        self.daemon_switch = ft.Switch(label="启用定时", value=False)
-        self.daemon_time = ft.TextField(label="执行时间 (如 08:30)", value="08:00", text_size=11, width=160)
-        self.daemon_save_btn = ft.FilledButton("保存并热部署", icon=ft.icons.UPDATE, on_click=self._save_daemon_config, width=160, style=ft.ButtonStyle(bgcolor=ft.colors.SECONDARY))
+        self.daemon_switch = ft.Switch(label="启用周期执行", value=False, label_position=ft.LabelPosition.RIGHT)
+        self.daemon_time = ft.TextField(
+            label="触发时间", 
+            value="08:00", 
+            text_size=12, 
+            width=260,
+            prefix_icon=ft.icons.ACCESS_TIME_ROUNDED,
+            hint_text="HH:MM (如 08:30)",
+        )
+        self.daemon_save_btn = ft.FilledButton(
+            "保存设置并热部署", 
+            icon=ft.icons.BOLT, 
+            on_click=self._save_daemon_config, 
+            width=260, 
+            style=ft.ButtonStyle(
+                bgcolor=ft.colors.SECONDARY,
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
+        )
         
         daemon_panel = ft.Container(
             content=ft.Column([
-                ft.Text("守护进程 / DAEMON", size=14, weight=ft.FontWeight.BOLD, color="secondary"),
-                self.daemon_switch,
+                ft.Text("守护进程 / DAEMON", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
+                ft.Container(content=self.daemon_switch, padding=ft.padding.only(left=-10)),
                 self.daemon_time,
-                ft.Divider(height=10, color="transparent"),
+                ft.Divider(height=5, color="transparent"),
                 self.daemon_save_btn,
-            ], spacing=5),
+            ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             padding=20,
-            bgcolor=ft.colors.with_opacity(0.05, "secondary"),
-            border=ft.border.all(1, ft.colors.with_opacity(0.2, "secondary")),
+            bgcolor=with_opacity(0.05, "secondary"),
+            border=ft.border.all(1, with_opacity(0.2, "secondary")),
             border_radius=12,
-            width=200,
+            width=300,
         )
 
         # 主内容
         return ft.Container(
             content=ft.Column([
                 header,
-                ft.Divider(height=1, color=ft.colors.with_opacity(0.1, "onSurface")),
+                ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
-                    # 左侧列表
+                    # 左侧控制 (原右侧)
+                    ft.Column([
+                        self.main_action,
+                        settings_panel,
+                        daemon_panel,
+                    ], spacing=20),
+                    # 右侧列表 (原左侧)
                     ft.Column([
                         ft.Row([
                             ft.Text("执行队列", size=14, weight=ft.FontWeight.W_500),
@@ -272,16 +297,10 @@ class SignPage:
                         ft.Container(
                             content=self.list_container,
                             expand=True,
-                            border=ft.border.all(1, ft.colors.with_opacity(0.1, "onSurface")),
+                            border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                             border_radius=10,
                         ),
                     ], expand=True, spacing=10),
-                    # 右侧控制
-                    ft.Column([
-                        self.main_action,
-                        settings_panel,
-                        daemon_panel,
-                    ], spacing=20),
                 ], expand=True),
             ], spacing=20),
             padding=20,
@@ -309,7 +328,7 @@ class SignPage:
                                     ft.Text(f"成功:{f.history_success}", size=9, color=ft.colors.GREEN_ACCENT_400),
                                     ft.Text(f"失败:{f.history_failed}", size=9, color=ft.colors.RED_ACCENT_400),
                                 ], spacing=5),
-                                bgcolor=ft.colors.with_opacity(0.1, "onSurface"),
+                                bgcolor=with_opacity(0.1, "onSurface"),
                                 padding=ft.padding.symmetric(horizontal=6, vertical=2),
                                 border_radius=4,
                             ),
@@ -333,7 +352,7 @@ class SignPage:
                         )
                     ),
                 ]),
-                bgcolor=ft.colors.with_opacity(0.02, "primary") if is_signed else ft.colors.with_opacity(0.01, "onSurface"),
+                bgcolor=with_opacity(0.02, "primary") if is_signed else with_opacity(0.01, "onSurface"),
                 padding=8,
                 border_radius=8,
             )
@@ -372,7 +391,7 @@ class SignPage:
                             ft.Text(f.fname, size=14, weight=ft.FontWeight.W_500),
                             ft.Container(
                                 content=ft.Text(f"负责账号: {acc_name}", size=9, color="white"),
-                                bgcolor=ft.colors.with_opacity(0.4, status_color),
+                                bgcolor=with_opacity(0.4, status_color),
                                 padding=ft.padding.symmetric(horizontal=6, vertical=2),
                                 border_radius=4,
                             ),
@@ -393,10 +412,10 @@ class SignPage:
                     ft.Icon(ft.icons.CHECK_CIRCLE if is_signed else ft.icons.PENDING_OUTLINED, 
                            color="green" if is_signed else "onSurfaceVariant", size=18),
                 ]),
-                bgcolor=ft.colors.with_opacity(0.02, "primary") if is_signed else ft.colors.with_opacity(0.01, "onSurface"),
+                bgcolor=with_opacity(0.02, "primary") if is_signed else with_opacity(0.01, "onSurface"),
                 padding=10,
                 border_radius=8,
-                border=ft.border.all(1, ft.colors.with_opacity(0.05, "onSurface")),
+                border=ft.border.all(1, with_opacity(0.05, "onSurface")),
             )
             items.append(card)
         return items
@@ -432,7 +451,8 @@ class SignPage:
         self.progress_bar.value = 0
         self.page.update()
 
-        total = self._stats['total'] - self._stats['success']
+        # 修复：分母应为队列中所有贴吧的总数，因为 sign_all_forums 会遍历所有贴吧
+        total = self._stats['total']
         current = 0
         try:
             d_min = float(self.delay_min_input.value)
@@ -472,18 +492,16 @@ class SignPage:
         except:
             d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
-        total_accs = len(self._accounts)
-        current_acc_idx = 0
-        current_acc_id = -1
+        # 修复：矩阵模式下分母应为全矩阵任务总数，进度应按贴吧任务计数
+        total_tasks = len(self._matrix_tasks)
+        current_task_idx = 0
 
         try:
             async for result in sign_all_accounts(self.db, d_min, d_max, ad_min, ad_max):
-                if result.get("account_id", -1) != current_acc_id:
-                    current_acc_id = result.get("account_id", -1)
-                    current_acc_idx += 1
+                current_task_idx += 1
                     
-                self.progress_bar.value = current_acc_idx / total_accs
-                self.status_text.value = f"[账号: {result.get('account_name')}] 正在签到: {result.get('fname')} -> {result.get('message')}"
+                self.progress_bar.value = current_task_idx / total_tasks
+                self.status_text.value = f"[{current_task_idx}/{total_tasks}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
                 self.page.update()
             
             self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
@@ -529,7 +547,7 @@ class SignPage:
         color = "primary"
         if type == "error": color = "error"
         elif type == "success": color = ft.colors.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=ft.colors.with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
 
     async def _show_forum_history(self, forum_id: int, fname: str):
         """展示单独贴吧的签到日志记录弹窗"""

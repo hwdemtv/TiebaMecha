@@ -2,6 +2,7 @@
 
 import flet as ft
 import asyncio
+from ..utils import with_opacity
 from ...core.account import verify_account, add_account as core_add_account
 
 class WelcomePage:
@@ -44,7 +45,7 @@ class WelcomePage:
                         ft.TextButton("《手把手：Cookie 提取教程》", icon=ft.icons.HELP_OUTLINE),
                     ], spacing=10),
                     padding=15,
-                    bgcolor=ft.colors.with_opacity(0.03, "onSurface"),
+                    bgcolor=with_opacity(0.03, "onSurface"),
                     border_radius=10,
                 ),
                 ft.Divider(height=20, color="transparent"),
@@ -109,4 +110,4 @@ class WelcomePage:
         color = "primary"
         if type == "error": color = "error"
         elif type == "success": color = ft.colors.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=ft.colors.with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
