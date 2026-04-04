@@ -42,7 +42,7 @@ async def do_auto_monitor_task():
     if not creds:
         return
         
-    bduss, stoken, proxy_id, cuid, ua = creds
+    acc_id, bduss, stoken, proxy_id, cuid, ua = creds # 解构 6 元组
     async with await create_client(db, bduss, stoken, proxy_id, cuid, ua) as client:
         for fname in target_fnames:
             try:
@@ -172,7 +172,8 @@ class TiebaMechaDaemon:
             
             # 6. 每 12 小时执行一次应用更新检查 (已在 updater 实现逻辑，此处挂载)
             from .updater import get_update_manager
-            self.scheduler.add_job(get_update_manager().check_for_updates, 'interval', hours=12, id="update_check_job")
+            # 注意：updater.py 中的方法名是 check_update，不是 check_for_updates
+            self.scheduler.add_job(get_update_manager().check_update, 'interval', hours=12, id="update_check_job")
             
             # 7. 每 6 小时执行一次授权心跳
             self.scheduler.add_job(do_auth_check_task, 'interval', hours=6, id="auth_check_job")

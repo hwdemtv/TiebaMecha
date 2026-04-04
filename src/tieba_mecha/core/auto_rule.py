@@ -4,7 +4,7 @@ from typing import List
 from ..db.crud import Database
 from ..db.models import AutoRule, PostCache
 from .client_factory import create_client
-from .account import get_account_credentials
+from .logger import log_info, log_warn, log_error
 
 async def apply_rules_to_threads(db: Database, fname: str, threads: list):
     """将自动化规则应用到一组主题帖"""
@@ -33,11 +33,11 @@ async def apply_rules_to_threads(db: Database, fname: str, threads: list):
                 
                 if match:
                     if rule.action == "delete":
-                        print(f"[AutoRule] 正在删除匹配帖子: {thread.title} (Reason: {rule.pattern})")
+                        await log_info(f"[AutoRule] 正在删除匹配帖子: {thread.title} (Reason: {rule.pattern})")
                         success, msg = await client.del_thread(fname, thread.tid)
                         if success:
                             # 如果删除了，就不再应用后续规则
                             break
                     elif rule.action == "notify":
                         # 这里可以扩展通知逻辑
-                        print(f"[AutoRule] 发现匹配帖子(监控): {thread.title}")
+                        await log_info(f"[AutoRule] 发现匹配帖子(监控): {thread.title}")

@@ -61,6 +61,18 @@ class SignPage:
                 if hasattr(self, 'daemon_switch'):
                     self.daemon_switch.value = sched.get("enabled", False)
                     self.daemon_time.value = sched.get("sign_time", "08:00")
+                
+                # 智能格式化加载行为频率参数 (抹除不必要的 .0)
+                async def _get_fmt_val(key, default):
+                    raw = str(await self.db.get_setting(key, default))
+                    try:
+                        return str(int(float(raw))) if float(raw).is_integer() else raw
+                    except: return raw
+
+                self.delay_min_input.value = await _get_fmt_val("sign_delay_min", "5")
+                self.delay_max_input.value = await _get_fmt_val("sign_delay_max", "15")
+                self.acc_delay_min_input.value = await _get_fmt_val("sign_acc_delay_min", "30")
+                self.acc_delay_max_input.value = await _get_fmt_val("sign_acc_delay_max", "120")
             except Exception:
                 pass
             
@@ -207,11 +219,11 @@ class SignPage:
         self.list_view = ft.ListView(expand=True, spacing=8, padding=10)
         self.list_container = ft.Container(content=self.list_view, expand=True)
 
-        self.delay_min_input = ft.TextField(label="最小间隔", value="5.0", text_size=11, expand=True, suffix_text="秒")
-        self.delay_max_input = ft.TextField(label="最大间隔", value="15.0", text_size=11, expand=True, suffix_text="秒")
+        self.delay_min_input = ft.TextField(label="最小间隔", value="5", text_size=11, expand=True, suffix_text="秒")
+        self.delay_max_input = ft.TextField(label="最大间隔", value="15", text_size=11, expand=True, suffix_text="秒")
         
-        self.acc_delay_min_input = ft.TextField(label="最小延迟", value="30.0", text_size=11, expand=True, suffix_text="秒")
-        self.acc_delay_max_input = ft.TextField(label="最大延迟", value="120.0", text_size=11, expand=True, suffix_text="秒")
+        self.acc_delay_min_input = ft.TextField(label="最小延迟", value="30", text_size=11, expand=True, suffix_text="秒")
+        self.acc_delay_max_input = ft.TextField(label="最大延迟", value="120", text_size=11, expand=True, suffix_text="秒")
 
         self.matrix_settings = ft.Column([
             ft.Divider(height=5, color="transparent"),
@@ -530,6 +542,12 @@ class SignPage:
             "sign_time": self.daemon_time.value
         }
         await self.db.set_setting("schedule", json.dumps(schedule))
+        
+        # 保存行为频率参数
+        await self.db.set_setting("sign_delay_min", self.delay_min_input.value)
+        await self.db.set_setting("sign_delay_max", self.delay_max_input.value)
+        await self.db.set_setting("sign_acc_delay_min", self.acc_delay_min_input.value)
+        await self.db.set_setting("sign_acc_delay_max", self.acc_delay_max_input.value)
         
         try:
             from tieba_mecha.core.daemon import daemon_instance

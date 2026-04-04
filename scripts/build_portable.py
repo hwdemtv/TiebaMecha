@@ -105,9 +105,9 @@ if not exist .env (
     zip_path = dist_dir / "TiebaMecha-portable"
     shutil.make_archive(str(zip_path), "zip", dist_dir, "TiebaMecha")
 
-    print(f"\n✅ 打包完成！")
-    print(f"   输出: {zip_path}.zip")
-    print(f"   大小: {(zip_path.with_suffix('.zip')).stat().st_size / 1024 / 1024:.1f} MB")
+    print(f"\n[DONE] Build completed!")
+    print(f"   Output: {zip_path}.zip")
+    print(f"   Size: {(zip_path.with_suffix('.zip')).stat().st_size / 1024 / 1024:.1f} MB")
 
 
 if __name__ == "__main__":

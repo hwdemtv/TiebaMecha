@@ -19,25 +19,28 @@ from .auth import get_auth_manager, AuthStatus
 
 
 class RateLimiter:
-    """基于滑动时间窗的动态令牌限流器"""
+    """基于滑动时间窗的动态令牌限流器 (支持并发安全)"""
     def __init__(self, rpm: int = 15):
         self.rpm = rpm
         self.timestamps = []
+        self._lock = asyncio.Lock()
         
     async def wait_if_needed(self):
-        now = time.time()
-        # 淘汰一分钟之前的记录
-        self.timestamps = [t for t in self.timestamps if now - t < 60]
-        
-        if len(self.timestamps) >= self.rpm:
-            wait_time = 60 - (now - self.timestamps[0]) + 1
-            await log_warn(f"触发内部速率安全墙 (>{self.rpm}帖/分)，流控休眠 {wait_time:.1f} 秒...")
-            await asyncio.sleep(wait_time)
-            # 唤醒后刷新时间记录避免堆叠
+        async with self._lock:
             now = time.time()
+            # 淘汰一分钟之前的记录
             self.timestamps = [t for t in self.timestamps if now - t < 60]
             
-        self.timestamps.append(now)
+            if len(self.timestamps) >= self.rpm:
+                # 基于最早时间戳计算休眠时长
+                wait_time = 60 - (now - self.timestamps[0]) + 1
+                await log_warn(f"触发内部速率安全墙 (>{self.rpm}帖/分)，流控休眠 {wait_time:.1f} 秒...")
+                await asyncio.sleep(wait_time)
+                # 唤醒后刷新时间记录以修正窗口
+                now = time.time()
+                self.timestamps = [t for t in self.timestamps if now - t < 60]
+                
+            self.timestamps.append(now)
 
 
 class BionicDelay:

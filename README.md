@@ -3,9 +3,20 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-hwdemtv%2FTiebaMecha-black.svg)](https://github.com/hwdemtv/TiebaMecha)
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://hub.docker.com/r/hwdemtv/tieba-mecha)
 
 **赛博机甲风格的一站式百度贴吧自动化管理平台。**
-集成了 **拟人化风控引擎**、**矩阵发帖终端** 与 **智能自动回帖 (Auto-Bump)**，旨在为用户提供最安全、最高效的贴吧运营体验。
+
+集成了 **拟人化风控引擎 (BionicDelay™)**、**矩阵发帖终端**、**智能自动回帖 (Auto-Bump)** 与 **全域通知中心**，旨在为用户提供最安全、最高效的贴吧运营体验。
+
+> 💡 **核心优势**：通过高斯分布延迟、生理节律权重、零宽字符混淆等多重反风控技术，最大化降低被系统检测和封禁的风险。
+
+---
+
+### 📚 技术文档
+- 📦 **[桌面分发指南](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/deployment/distribution-guide.md)**：了解如何打包 `.exe` 或便携版。
+- 🐳 **[Docker 部署手册](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/deployment/linux-deployment.md)**：在 Linux 云服务器上实现 24h 挂机。
+- 🔐 **[集成技术细节](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/technical/licensing-and-broadcast-integration.md)**：深入了解 HWID 生成与授权校验逻辑。
 
 ---
 
@@ -37,31 +48,88 @@
 - **统计追踪**：记录签到历史、连续天数、等级变化
 - **自动同步**：从账号自动拉取关注的贴吧列表
 
-### 6. 拟人化养号 (BioWarming™) [NEW]
+### 6. 拟人化养号 (BioWarming™)
 - **深度模拟**：自动模拟真人进入贴吧浏览、翻页、停顿阅读
 - **随机互动**：在浏览过程中随机执行点赞（Agree）交互，建立健康活跃画像
 - **守护进程调度**：后台 4 小时周期性自动运行，全自动维护账号权重
+
+### 7. 全域通知中心
+- **本地通知**：任务完成、账号异常、代理失效等事件实时推送
+- **远程广播**：支持从授权中心接收全局公告和紧急通知
+- **多渠道展示**：Web 界面通知铃铛 + SnackBar 弹窗双重提醒
+- **智能同步**：自动去重，支持强制通知立即展示
+
+### 8. 自动更新检测
+- **版本检测**：基于 GitHub Releases API 自动检测新版本
+- **更新日志**：完整展示版本更新内容
+- **智能节流**：避免频繁请求 API（默认 24 小时检查一次）
+
+### 9. 自动化规则引擎
+- **关键词监控**：支持关键词匹配和正则表达式两种模式
+- **自动删帖**：监控目标贴吧，自动删除匹配规则的帖子
+- **通知模式**：可选择仅通知不删除，适合内容审核场景
 
 ---
 
 ## 🚀 快速开始
 
-### 方式一：便携版（推荐新手）
+### 方式一：便携版（推荐新手/Windows 用户）
 
-1. 下载 `TiebaMecha-portable.zip` 并解压
-2. 运行 `首次运行配置.bat` 设置加密密钥
-3. 运行 `启动Web界面.bat`
-4. 浏览器访问 http://localhost:9006
+1. 下载 `TiebaMecha-portable.zip` 并解压。
+2. 运行 `首次运行配置.bat` 生成安全加密密钥（仅需一次）。
+3. 运行 `启动Web界面.bat` 开启机甲。
+4. 浏览器访问 [http://localhost:9006](http://localhost:9006)。
 
-### 方式二：源码安装（开发者）
+### 方式二：Docker 部署（推荐服务器/挂机用户）
+
+确保已安装 Docker 和 Docker Compose，然后在项目根目录执行：
 
 ```bash
 # 克隆仓库
 git clone https://github.com/hwdemtv/TiebaMecha.git
 cd TiebaMecha
 
+# 创建 .env 文件（必须！）
+cp .env.example .env
+# 编辑 .env 填入加密密钥（参见下方安全配置章节）
+
+# 启动服务
+docker-compose up -d
+```
+
+**Docker 配置说明：**
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| 端口映射 | Web 服务端口 | `9006:9006` |
+| 数据卷 | 数据库持久化 | `./data:/app/data` |
+| 日志卷 | 运行日志 | `./logs:/app/logs` |
+| 时区 | 容器时区 | `Asia/Shanghai` |
+| 健康检查 | 每 30 秒检测一次 | 自动重启 |
+
+访问 `http://localhost:9006` 即可打开 Web 界面。
+
+详见 [Docker 部署手册](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/deployment/linux-deployment.md)。
+
+### 方式三：源码安装（开发者）
+
+```bash
+# 克隆仓库
+git clone https://github.com/hwdemtv/TiebaMecha.git
+cd TiebaMecha
+
+# 创建虚拟环境（推荐）
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
+source .venv/bin/activate
+
 # 安装依赖
 pip install -e .
+
+# 安装开发依赖（可选）
+pip install -e ".[dev]"
 ```
 
 ### 安全配置（必须）
@@ -129,9 +197,9 @@ tieba web --port 9006
 | **帖子管理** | 帖子搜索、删除、加精、置顶操作 |
 | **数据爬取** | 帖子爬取、用户画像、历史记录 |
 | **自动化规则** | 关键词监控、自动删帖、正则匹配 |
-| **拟人化养号** | 自动浏览、随性点赞、权重维护、定时调度 | ✅ |
-| **矩阵发帖** | 物料池管理、AI 改写、定时任务、自动回帖 | ✅ |
-| **插件系统** | 扩展功能加载与管理 | ✅ |
+| **拟人化养号** | 自动浏览、随性点赞、权重维护、定时调度 |
+| **矩阵发帖** | 物料池管理、AI 改写、定时任务、自动回帖 |
+| **插件系统** | 扩展功能加载与管理 |
 | **系统设置** | AI 配置、全局参数、安全选项 |
 
 ### 命令行工具（CLI）
@@ -176,6 +244,16 @@ tieba web --port 9006 --host 0.0.0.0
 
 ## 🔧 配置详解
 
+### 环境变量
+
+| 变量名 | 必填 | 说明 | 默认值 |
+|--------|:----:|------|--------|
+| `TIEBA_MECHA_SALT` | ✅ | 加密盐值（64 位十六进制） | 无 |
+| `TIEBA_MECHA_SECRET_KEY` | ✅ | 加密密钥（64 位十六进制） | 无 |
+| `TIEBA_MECHA_DB_PATH` | ❌ | 数据库路径 | `data/tieba_mecha.db` |
+| `TIEBA_MECHA_LOG_LEVEL` | ❌ | 日志级别 | `INFO` |
+| `TIEBA_MECHA_DEBUG` | ❌ | 调试模式 | `false` |
+
 ### AI 改写配置
 
 在 Web 界面的「系统设置」页面配置：
@@ -207,6 +285,18 @@ tieba web --port 9006 --host 0.0.0.0
 | `delay_min` | 最小延迟（秒） | 60 |
 | `delay_max` | 最大延迟（秒） | 300 |
 | 生理节律 | 凌晨 1-7 点延迟自动增加 1.5-2.2 倍 | 启用 |
+
+### 后台守护进程任务
+
+| 任务 | 执行频率 | 说明 |
+|------|----------|------|
+| 自动签到 | 可配置（如每天 08:30） | 按设定时间执行全域签到 |
+| 自动监控 | 每 10 分钟 | 扫描目标贴吧，执行自动化规则 |
+| 批量发帖轮询 | 每 30 分钟 | 检查并执行到期的定时发帖任务 |
+| 自动回帖 (Auto-Bump) | 每 20 分钟 | 维护已发帖子的热度 |
+| 拟人养号 (BioWarming) | 每 4 小时 | 模拟真人浏览互动 |
+| 授权心跳 | 每 6 小时 | 校验 Pro 授权状态 |
+| 更新检测 | 每 12 小时 | 检查新版本发布 |
 
 ---
 
@@ -258,6 +348,32 @@ TiebaMecha/
 
 ---
 
+## 🛡️ 反风控技术栈
+
+TiebaMecha 内置多重反检测机制，最大程度降低被平台风控的风险：
+
+### 1. 拟人化延迟 (BionicDelay™)
+- **高斯分布**：延迟时间遵循正态分布，拒绝机械的固定间隔
+- **生理节律**：凌晨 1-7 点自动增加 1.5-2.2 倍延迟，模拟真人作息
+- **边界保护**：自动裁剪异常值，避免极端延迟
+
+### 2. 零宽字符混淆 (Obfuscator)
+- **零宽注入**：在标题和正文中注入不可见零宽字符，绕过内容指纹检测
+- **间距人性化**：智能调整文本间距，模拟人工输入习惯
+- **密度可调**：支持自定义混淆密度（0.1-0.5）
+
+### 3. 内部速率墙 (RateLimiter)
+- **滑动窗口**：基于滑动时间窗的令牌限流
+- **动态阻塞**：超过阈值（默认 15 帖/分钟）自动休眠等待
+- **智能唤醒**：避免请求堆叠，平滑流量曲线
+
+### 4. 账号指纹隔离
+- **独立 CUID**：每个账号分配唯一设备标识
+- **独立 UA**：随机化 User-Agent 指纹
+- **代理绑定**：支持账号级代理 IP 隔离
+
+---
+
 ## 🔌 插件开发
 
 TiebaMecha 支持插件扩展。在 `plugins/` 目录下创建 Python 文件：
@@ -269,14 +385,42 @@ from tieba_mecha.core.plugin_loader import PluginBase
 class MyPlugin(PluginBase):
     name = "我的插件"
     description = "插件描述"
+    version = "1.0.0"
+    author = "Your Name"
 
     async def on_load(self):
+        """插件加载时调用"""
         print("插件已加载")
 
-    async def on_post_success(self, tid: int, fname: str):
+    async def on_unload(self):
+        """插件卸载时调用"""
+        print("插件已卸载")
+
+    async def on_post_success(self, tid: int, fname: str, account_id: int):
         """发帖成功后的回调"""
-        print(f"帖子发布成功: {tid} @ {fname}")
+        print(f"帖子发布成功: TID={tid} @ {fname} by Account#{account_id}")
+
+    async def on_post_failed(self, error: str, fname: str):
+        """发帖失败后的回调"""
+        print(f"发帖失败: {fname} - {error}")
+
+    async def on_sign_complete(self, fname: str, success: bool):
+        """签到完成后的回调"""
+        status = "成功" if success else "失败"
+        print(f"签到{status}: {fname}")
 ```
+
+### 可用钩子列表
+
+| 钩子函数 | 触发时机 | 参数 |
+|----------|----------|------|
+| `on_load()` | 插件加载 | 无 |
+| `on_unload()` | 插件卸载 | 无 |
+| `on_post_success()` | 发帖成功 | `tid`, `fname`, `account_id` |
+| `on_post_failed()` | 发帖失败 | `error`, `fname` |
+| `on_sign_complete()` | 签到完成 | `fname`, `success` |
+| `on_material_added()` | 物料添加 | `material_id`, `title` |
+| `on_account_expired()` | 账号失效 | `account_id`, `reason` |
 
 ---
 
@@ -286,18 +430,57 @@ class MyPlugin(PluginBase):
 - 检查账号是否被限流或封禁
 - 确认内容不含敏感词
 - 尝试更换 IP 或等待一段时间
+- 检查目标贴吧是否有发帖门槛（等级/会员限制）
 
 ### 账号验证失败？
 - BDUSS 可能已过期，重新登录获取
 - 检查网络连接和代理设置
+- 确认 BDUSS 格式正确（通常以 `FD...` 开头）
 
 ### AI 改写不生效？
 - 确认已在设置中配置 API Key
 - 检查 API 余额和网络连接
+- 确认 Base URL 正确（智谱/DeepSeek/OpenAI 格式不同）
+- 查看控制台日志确认错误原因
 
 ### 数据库迁移错误？
 - 程序启动时会自动迁移缺失的列
 - 如有问题，可删除 `data/tieba_mecha.db` 重新初始化
+- 重要数据请先备份
+
+### 如何获取 BDUSS 和 STOKEN？
+1. 登录 [百度贴吧](https://tieba.baidu.com)
+2. 按 F12 打开开发者工具
+3. 切换到 Application → Cookies
+4. 找到 `BDUSS` 和 `STOKEN` 的值
+
+### 代理设置不生效？
+- 确认代理格式正确（`http://ip:port` 或 `socks5://ip:port`）
+- 检查代理服务器是否在线
+- 认证代理需要填写用户名和密码
+- 测试代理连通性后再绑定账号
+
+### Docker 容器无法启动？
+- 检查 `.env` 文件是否存在且配置正确
+- 确认端口 9006 未被占用
+- 查看容器日志：`docker logs tieba-mecha`
+
+---
+
+## 🗺️ 功能路线图
+
+| 状态 | 功能 | 说明 |
+|:----:|------|------|
+| ✅ | 矩阵发帖终端 | 多账号、多贴吧、多策略 |
+| ✅ | 拟人化风控引擎 | 高斯延迟、生理节律 |
+| ✅ | AI 智能改写 | 智谱/DeepSeek/OpenAI |
+| ✅ | 自动回帖 (Auto-Bump) | 帖子热度维护 |
+| ✅ | 拟人化养号 | 浏览模拟、随机点赞 |
+| ✅ | 全域通知中心 | 本地 + 远程通知 |
+| ✅ | 自动更新检测 | GitHub Releases |
+| 🔜 | 云控中心 | 多节点统一管理 |
+| 🔜 | 数据分析仪表盘 | 可视化统计报表 |
+| 🔜 | 移动端适配 | 响应式 Web UI |
 
 ---
 
@@ -310,6 +493,39 @@ class MyPlugin(PluginBase):
 ## 📜 开源协议
 
 [MIT License](LICENSE)
+
+---
+
+## 🤝 贡献指南
+
+欢迎贡献代码、报告问题或提出建议！
+
+1. Fork 本仓库
+2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 创建 Pull Request
+
+### 开发环境设置
+
+```bash
+# 安装开发依赖
+pip install -e ".[dev]"
+
+# 运行测试
+pytest
+
+# 代码格式检查
+ruff check src/
+```
+
+---
+
+## 📞 支持与反馈
+
+- **问题反馈**：[GitHub Issues](https://github.com/hwdemtv/TiebaMecha/issues)
+- **功能建议**：[GitHub Discussions](https://github.com/hwdemtv/TiebaMecha/discussions)
+- **更新日志**：[GitHub Releases](https://github.com/hwdemtv/TiebaMecha/releases)
 
 ---
 

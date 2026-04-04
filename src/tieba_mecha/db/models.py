@@ -64,6 +64,7 @@ class Forum(Base):
     history_failed: Mapped[int] = mapped_column(Integer, default=0, comment="历史签到失败次数")
     account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
     is_post_target: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否允许作为发贴目标")
+    is_hidden: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否在 UI 中隐藏且跳过签到")
 
     __table_args__ = (
         UniqueConstraint("fid", "account_id", name="uq_forum_fid_account"),
@@ -281,4 +282,27 @@ class Notification(Base):
         Index("ix_notifications_is_read", "is_read"),
         Index("ix_notifications_created_at", "created_at"),
         Index("ix_notifications_source", "source"),
+    )
+
+
+class ThreadRecord(Base):
+    """帖子管理监控记录"""
+
+    __tablename__ = "thread_records"
+
+    tid: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主题帖ID")
+    title: Mapped[str] = mapped_column(String(500), nullable=False, comment="帖子标题")
+    author_name: Mapped[str] = mapped_column(String(100), default="", comment="作者名称")
+    author_id: Mapped[int] = mapped_column(Integer, default=0, comment="作者ID")
+    reply_num: Mapped[int] = mapped_column(Integer, default=0, comment="回复数")
+    text: Mapped[str] = mapped_column(Text, default="", comment="正文摘要")
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名称")
+    is_good: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否精品")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
+    )
+
+    __table_args__ = (
+        Index("ix_thread_records_fname", "fname"),
+        Index("ix_thread_records_updated_at", "updated_at"),
     )

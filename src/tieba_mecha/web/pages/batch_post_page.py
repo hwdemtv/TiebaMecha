@@ -47,7 +47,8 @@ class BatchPostPage:
             self._refresh_forum_pool()
             await self._refresh_material_table()
         except Exception as e:
-            print(f"[UI ERROR] load_data failed: {e}")
+            from ..core.logger import log_error
+            await log_error(f"[UI ERROR] load_data failed: {e}")
             self._show_snackbar(f"数据同步异常: {str(e)}", "error")
 
     def _refresh_task_list(self):
@@ -789,7 +790,8 @@ class BatchPostPage:
                         await self.db.update_material_ai(m.id, opt_title, opt_content)
                         success_count += 1
                 except Exception as ex:
-                    print(f"AI Batch error on ID {m.id}: {ex}")
+                    from ..core.logger import log_error
+                    await log_error(f"AI Batch error on ID {m.id}: {ex}")
                 
                 progress_bar.value = (i + 1) / total
                 self.page.update()
