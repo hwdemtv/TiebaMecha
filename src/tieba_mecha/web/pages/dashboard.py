@@ -153,7 +153,7 @@ class DashboardPage:
                 ft.Column(
                     controls=[
                         ft.Text("SYSTEM OVERVIEW", size=24, weight=ft.FontWeight.BOLD, color="primary", font_family="Consolas"),
-                        ft.Text("TIEBA MECHA CONTROL PANEL v2.0", size=11, color="onSurfaceVariant"),
+                        ft.Text("TIEBA MECHA CONTROL PANEL v1.1.0", size=11, color="onSurfaceVariant"),
                     ],
                     spacing=0,
                 ),

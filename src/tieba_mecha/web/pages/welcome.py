@@ -35,7 +35,7 @@ class WelcomePage:
         return ft.Container(
             content=ft.Column([
                 ft.Icon(ft.icons.SHIELD_ROUNDED, size=80, color="primary"),
-                ft.Text("欢迎使用 TIEBAMECHA v2.0", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text("欢迎使用 TIEBAMECHA v1.1.0", size=24, weight=ft.FontWeight.BOLD),
                 ft.Text("INITIALIZATION REQUIRED / 需要初始化", size=12, color="primary", weight=ft.FontWeight.W_300),
                 ft.Divider(height=40, color="transparent"),
                 ft.Container(

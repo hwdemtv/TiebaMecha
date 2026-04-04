@@ -353,7 +353,7 @@ class SettingsPage:
                     ft.Divider(height=10, color="transparent"),
                     # 底部：版本与保存
                     ft.Row([
-                        ft.Text("TiebaMecha v2.0.1 | Current Path: Cyber-Router", size=10, color="onSurfaceVariant"),
+                        ft.Text("TiebaMecha v1.1.0 | Current Path: Cyber-Router", size=10, color="onSurfaceVariant"),
                         ft.Container(expand=True),
                         save_btn,
                     ]),
