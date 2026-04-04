@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from ..components import create_gradient_button
+from ..components import create_gradient_button, icons
 from ..utils import with_opacity
 from ...core.crawl import crawl_threads, crawl_user, get_crawl_history, import_threads_to_materials
 
@@ -38,7 +38,7 @@ class CrawlPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=icons.ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -64,8 +64,8 @@ class CrawlPage:
             selected={"threads"},
             allow_multiple_selection=False,
             segments=[
-                ft.Segment(value="threads", label=ft.Text("贴吧帖子"), icon=ft.Icon(ft.icons.FORUM)),
-                ft.Segment(value="user", label=ft.Text("用户信息"), icon=ft.Icon(ft.icons.PERSON_SEARCH)),
+                ft.Segment(value="threads", label=ft.Text("贴吧帖子"), icon=ft.Icon(icons.FORUM)),
+                ft.Segment(value="user", label=ft.Text("用户信息"), icon=ft.Icon(icons.PERSON_SEARCH)),
             ],
             on_change=self._on_type_change,
         )
@@ -85,7 +85,7 @@ class CrawlPage:
             content=ft.Column([
                 # 配置标题
                 ft.Row([
-                    ft.Icon(ft.icons.SETTINGS_SUGGEST, color="primary", size=18),
+                    ft.Icon(icons.SETTINGS_SUGGEST, color="primary", size=18),
                     ft.Text("探测配置", size=14, weight=ft.FontWeight.BOLD),
                 ], spacing=8),
                 ft.Divider(height=5),
@@ -95,14 +95,14 @@ class CrawlPage:
 
                 # 贴吧帖子配置
                 ft.Row([
-                    ft.Icon(ft.icons.FORUM, size=16, color="onSurfaceVariant"),
+                    ft.Icon(icons.FORUM, size=16, color="onSurfaceVariant"),
                     self.forum_name,
                     self.pages_count,
                 ], spacing=8),
 
                 # 用户信息配置
                 ft.Row([
-                    ft.Icon(ft.icons.PERSON, size=16, color="onSurfaceVariant", visible=False),
+                    ft.Icon(icons.PERSON, size=16, color="onSurfaceVariant", visible=False),
                     self.user_target,
                 ], spacing=8),
                 self.with_posts,
@@ -118,7 +118,7 @@ class CrawlPage:
 
                 # 启动按钮
                 ft.Container(
-                    content=create_gradient_button("启动探测", icon=ft.icons.SENSORS, on_click=self._start_crawl),
+                    content=create_gradient_button("启动探测", icon=icons.SENSORS, on_click=self._start_crawl),
                     alignment=ft.alignment.center,
                 ),
             ], spacing=12),
@@ -137,12 +137,12 @@ class CrawlPage:
             content=ft.Column([
                 # 历史标题栏
                 ft.Row([
-                    ft.Icon(ft.icons.HISTORY, color="primary", size=18),
+                    ft.Icon(icons.HISTORY, color="primary", size=18),
                     ft.Text("探测历史", size=14, weight=ft.FontWeight.BOLD),
                     ft.Container(expand=True),
                     ft.TextButton(
                         text="清理",
-                        icon=ft.icons.DELETE_SWEEP,
+                        icon=icons.DELETE_SWEEP,
                         on_click=self._clear_old_records,
                         style=ft.ButtonStyle(color=ft.colors.ERROR),
                     ),
@@ -242,17 +242,17 @@ class CrawlPage:
             # 状态图标和颜色
             status = h.get("status", "")
             if status == "completed":
-                status_icon = ft.icons.CHECK_CIRCLE
+                status_icon = icons.CHECK_CIRCLE
                 status_color = "green"
             elif status == "partial":
-                status_icon = ft.icons.WARNING_AMBER
+                status_icon = icons.WARNING_AMBER
                 status_color = "orange"
             else:
-                status_icon = ft.icons.ERROR_OUTLINE
+                status_icon = icons.ERROR_OUTLINE
                 status_color = "error"
 
             # 类型图标
-            type_icon = ft.icons.FORUM if h.get("type") == "threads" else ft.icons.PERSON
+            type_icon = icons.FORUM if h.get("type") == "threads" else icons.PERSON
 
             # 操作按钮
             action_buttons = []
@@ -261,7 +261,7 @@ class CrawlPage:
             if h.get("result_path"):
                 action_buttons.append(
                     ft.IconButton(
-                        icon=ft.icons.FILE_OPEN,
+                        icon=icons.FILE_OPEN,
                         icon_size=18,
                         icon_color="primary",
                         tooltip="查看扫描结果",
@@ -273,7 +273,7 @@ class CrawlPage:
                 if h.get("type") == "threads":
                     action_buttons.append(
                         ft.IconButton(
-                            icon=ft.icons.ADD_TO_PHOTOS,
+                            icon=icons.ADD_TO_PHOTOS,
                             icon_size=18,
                             icon_color="teal",
                             tooltip="导入到物料库",
@@ -300,7 +300,7 @@ class CrawlPage:
                     *action_buttons,
                     # 删除按钮
                     ft.IconButton(
-                        icon=ft.icons.DELETE_OUTLINE,
+                        icon=icons.DELETE_OUTLINE,
                         icon_size=18,
                         icon_color="error",
                         tooltip="删除此记录",
@@ -340,18 +340,18 @@ class CrawlPage:
             await self.load_data()
 
         confirm_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.DELETE_SWEEP, color="error"), ft.Text("数据探针清理")]),
+            title=ft.Row([ft.Icon(icons.DELETE_SWEEP, color="error"), ft.Text("数据探针清理")]),
             content=ft.Text("请选择清理范围（此操作不可撤销）："),
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(confirm_dialog)),
                 ft.OutlinedButton(
                     "清理 30 天前", 
-                    icon=ft.icons.HISTORY,
+                    icon=icons.HISTORY,
                     on_click=lambda _: self.page.run_task(do_clear, 30)
                 ),
                 ft.FilledButton(
                     "全部清空", 
-                    icon=ft.icons.DELETE_FOREVER,
+                    icon=icons.DELETE_FOREVER,
                     style=ft.ButtonStyle(bgcolor=ft.colors.ERROR, color=ft.colors.ON_ERROR),
                     on_click=lambda _: self.page.run_task(do_clear, 0)
                 ),
@@ -518,7 +518,7 @@ class CrawlPage:
         # 预览对话框
         dialog = ft.AlertDialog(
             title=ft.Row([
-                ft.Icon(ft.icons.FILTER_LIST, color="primary"),
+                ft.Icon(icons.FILTER_LIST, color="primary"),
                 ft.Text("筛选导入物料", size=16),
             ], spacing=10),
             content=ft.Column([
@@ -537,7 +537,7 @@ class CrawlPage:
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
                 ft.FilledButton(
                     "导入选中项",
-                    icon=ft.icons.ADD_TO_PHOTOS,
+                    icon=icons.ADD_TO_PHOTOS,
                     on_click=do_import,
                 ),
             ],

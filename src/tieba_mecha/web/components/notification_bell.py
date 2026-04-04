@@ -5,6 +5,12 @@ from typing import TYPE_CHECKING, Optional, Callable
 
 import flet as ft
 from ..utils import with_opacity
+from .icons import (
+    NOTIFICATIONS_OUTLINED, NOTIFICATIONS, REFRESH_ROUNDED, 
+    DELETE_SWEEP_OUTLINED, NOTIFICATIONS_NONE, CHECK_CIRCLE, 
+    ERROR, NEW_RELEASES, WARNING, WARNING_AMBER, INFO, 
+    OPEN_IN_NEW, CHECK, DELETE_OUTLINE
+)
 
 if TYPE_CHECKING:
     from ...core.notification import NotificationManager
@@ -30,8 +36,8 @@ class NotificationBell(ft.Container):
         # 创建铃铛图标（带徽章）
         self._badge = ft.Badge(
             content=ft.IconButton(
-                icon=ft.icons.NOTIFICATIONS_OUTLINED,
-                selected_icon=ft.icons.NOTIFICATIONS,
+                icon=NOTIFICATIONS_OUTLINED,
+                selected_icon=NOTIFICATIONS,
                 icon_color="white",
                 tooltip="通知中心",
                 on_click=self._on_bell_click,
@@ -118,13 +124,13 @@ class NotificationPanel(ft.AlertDialog):
             controls=[
                 ft.Text("通知中心", size=18, weight=ft.FontWeight.BOLD, expand=True),
                 ft.IconButton(
-                    icon=ft.icons.REFRESH_ROUNDED,
+                    icon=REFRESH_ROUNDED,
                     tooltip="同步系统远程通知",
                     on_click=self._on_refresh_remote,
                     icon_size=18,
                 ),
                 ft.IconButton(
-                    icon=ft.icons.DELETE_SWEEP_OUTLINED,
+                    icon=DELETE_SWEEP_OUTLINED,
                     tooltip="清理所有已读通知",
                     on_click=self._on_clear_read,
                     icon_size=18,
@@ -167,7 +173,7 @@ class NotificationPanel(ft.AlertDialog):
             self._list_container.controls = [
                 ft.Container(
                     content=ft.Column([
-                        ft.Icon(ft.icons.NOTIFICATIONS_NONE, size=48, color="grey"),
+                        ft.Icon(NOTIFICATIONS_NONE, size=48, color="grey"),
                         ft.Text("暂无通知", color="grey"),
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=40,
@@ -191,17 +197,17 @@ class NotificationPanel(ft.AlertDialog):
         """构建单条通知项"""
         # 根据类型选择图标和颜色
         icon_map = {
-            "post_success": (ft.icons.CHECK_CIRCLE, "green"),
-            "post_failed": (ft.icons.ERROR, "red"),
-            "update_available": (ft.icons.NEW_RELEASES, "blue"),
-            "account_expired": (ft.icons.WARNING, "red"),
-            "proxy_failed": (ft.icons.WARNING_AMBER, "orange"),
-            "warning": (ft.icons.WARNING_AMBER, "orange"),
-            "error": (ft.icons.ERROR, "red"),
-            "info": (ft.icons.INFO, "blue"),
+            "post_success": (CHECK_CIRCLE, "green"),
+            "post_failed": (ERROR, "red"),
+            "update_available": (NEW_RELEASES, "blue"),
+            "account_expired": (WARNING, "red"),
+            "proxy_failed": (WARNING_AMBER, "orange"),
+            "warning": (WARNING_AMBER, "orange"),
+            "error": (ERROR, "red"),
+            "info": (INFO, "blue"),
         }
 
-        icon, color = icon_map.get(notification.type, (ft.icons.NOTIFICATIONS, "grey"))
+        icon, color = icon_map.get(notification.type, (NOTIFICATIONS, "grey"))
 
         # 未读标记
         unread_indicator = ft.Container(
@@ -241,14 +247,14 @@ class NotificationPanel(ft.AlertDialog):
                     ),
                     ft.Row([
                         ft.IconButton(
-                            icon=ft.icons.OPEN_IN_NEW if notification.action_url else ft.icons.CHECK,
+                            icon=OPEN_IN_NEW if notification.action_url else CHECK,
                             icon_size=16,
                             tooltip="查看/标记已读",
                             visible=bool(notification.action_url or not notification.is_read),
                             on_click=lambda e, n=notification: self.page.run_task(self._on_item_click, n),
                         ),
                         ft.IconButton(
-                            icon=ft.icons.DELETE_OUTLINE,
+                            icon=DELETE_OUTLINE,
                             icon_size=16,
                             icon_color=ft.colors.ERROR,
                             tooltip="删除通知",

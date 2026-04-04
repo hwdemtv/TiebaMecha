@@ -4,7 +4,7 @@ import asyncio
 import flet as ft
 from typing import List, Optional
 
-from ..components import create_gradient_button
+from ..components import create_gradient_button, icons
 from ..utils import with_opacity
 from ...core.account import add_account, list_accounts, switch_account, remove_account, parse_cookie, verify_account, refresh_account
 from ...core.logger import log_info, log_warn, log_error
@@ -51,7 +51,7 @@ class AccountsPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=icons.ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -71,7 +71,7 @@ class AccountsPage:
                 ft.Container(expand=True),
                 create_gradient_button(
                     text="添加账号",
-                    icon=ft.icons.PERSON_ADD_ROUNDED,
+                    icon=icons.PERSON_ADD_ROUNDED,
                     on_click=self._show_add_dialog,
                 ),
             ],
@@ -82,7 +82,7 @@ class AccountsPage:
         # 搜索与过滤栏
         search_field = ft.TextField(
             hint_text="搜索账号、用户名或UID...",
-            prefix_icon=ft.icons.SEARCH,
+            prefix_icon=icons.SEARCH,
             border_radius=10,
             text_size=13,
             on_change=self._on_search_change,
@@ -110,8 +110,8 @@ class AccountsPage:
 
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
-            ft.TextButton("批量验证", icon=ft.icons.VERIFIED_USER, on_click=self._bulk_verify_accounts, visible=False),
-            ft.TextButton("批量删除", icon=ft.icons.DELETE_SWEEP, on_click=self._bulk_delete_accounts, style=ft.ButtonStyle(color="error"), visible=False),
+            ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=self._bulk_verify_accounts, visible=False),
+            ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=self._bulk_delete_accounts, style=ft.ButtonStyle(color="error"), visible=False),
         ], spacing=10, visible=True)
 
         # 账号列表容器
@@ -147,7 +147,7 @@ class AccountsPage:
                 ft.Container(
                     content=ft.Column(
                         controls=[
-                            ft.Icon(ft.icons.PERSON_OFF, size=50, color="onSurfaceVariant"),
+                            ft.Icon(icons.PERSON_OFF, size=50, color="onSurfaceVariant"),
                             ft.Text("暂无账号，请点击右上角添加", color="onSurfaceVariant"),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -208,7 +208,7 @@ class AccountsPage:
                         # 头像/图标
                         ft.Container(
                             content=ft.Icon(
-                                ft.icons.ACCOUNT_CIRCLE,
+                                icons.ACCOUNT_CIRCLE,
                                 color="primary" if is_active else "onSurfaceVariant",
                                 size=36,
                             ),
@@ -233,13 +233,13 @@ class AccountsPage:
                                     ),
                                 ], spacing=8),
                                 ft.Row([
-                                    ft.Icon(ft.icons.FINGERPRINT, size=12, color="onSurfaceVariant"),
+                                    ft.Icon(icons.FINGERPRINT, size=12, color="onSurfaceVariant"),
                                     ft.Text(f"UID: {acc.user_id}", color="onSurfaceVariant", size=11),
                                     ft.Container(width=10),
-                                    ft.Icon(ft.icons.PHONELINK_LOCK_ROUNDED, size=12, color="onSurfaceVariant"),
+                                    ft.Icon(icons.PHONELINK_LOCK_ROUNDED, size=12, color="onSurfaceVariant"),
                                     ft.Text(f"标识: {getattr(acc, 'cuid', '')[:8]}...", color="onSurfaceVariant", size=11, tooltip=f"完整指纹: {getattr(acc, 'cuid', '')}"),
                                     ft.Container(width=10),
-                                    ft.Icon(ft.icons.LANGUAGE, size=12, color="onSurfaceVariant"),
+                                    ft.Icon(icons.LANGUAGE, size=12, color="onSurfaceVariant"),
                                     ft.Text(f"代理: {proxy_info}", color="onSurfaceVariant", size=11),
                                 ], spacing=4),
                             ],
@@ -272,26 +272,26 @@ class AccountsPage:
                         ft.Row(
                             controls=[
                                 ft.IconButton(
-                                    icon=ft.icons.CHECK if not is_active else ft.icons.RADIO_BUTTON_CHECKED,
+                                    icon=icons.CHECK if not is_active else icons.RADIO_BUTTON_CHECKED,
                                     tooltip="切换为此账号",
                                     icon_color="primary" if is_active else "onSurfaceVariant",
                                     disabled=is_active,
                                     on_click=lambda e, aid=acc.id: self.page.run_task(self._switch_account, aid)
                                 ),
                                 ft.IconButton(
-                                    icon=ft.icons.REFRESH_ROUNDED,
+                                    icon=icons.REFRESH_ROUNDED,
                                     tooltip="刷新账号信息",
                                     icon_color="primary",
                                     on_click=lambda e, aid=acc.id: self.page.run_task(self._refresh_account_info, aid)
                                 ),
                                 ft.IconButton(
-                                    icon=ft.icons.EDIT_DOCUMENT,
+                                    icon=icons.EDIT_DOCUMENT,
                                     tooltip="编辑账号信息",
                                     icon_color="primary",
                                     on_click=lambda e, a=acc: self.page.run_task(self._show_edit_dialog, a)
                                 ),
                                 ft.IconButton(
-                                    icon=ft.icons.DELETE_OUTLINE,
+                                    icon=icons.DELETE_OUTLINE,
                                     tooltip="删除账号",
                                     icon_color="error",
                                     on_click=lambda e, aid=acc.id: self.page.run_task(self._show_delete_confirm, aid)
@@ -417,10 +417,10 @@ class AccountsPage:
                 submit_btn.text = "验证并添加"
                 self.page.update()
 
-        submit_btn = ft.FilledButton("验证并添加", icon=ft.icons.CHECK, on_click=on_submit)
+        submit_btn = ft.FilledButton("验证并添加", icon=icons.CHECK, on_click=on_submit)
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.PERSON_ADD_ROUNDED, color="primary"), ft.Text("添加百度账号")]),
+            title=ft.Row([ft.Icon(icons.PERSON_ADD_ROUNDED, color="primary"), ft.Text("添加百度账号")]),
             content=ft.Container(
                 content=ft.Column(
                     controls=[
@@ -545,10 +545,10 @@ class AccountsPage:
                 save_btn.text = "保存修改"
                 self.page.update()
 
-        save_btn = ft.FilledButton("保存修改", icon=ft.icons.SAVE_ROUNDED, on_click=on_save)
+        save_btn = ft.FilledButton("保存修改", icon=icons.SAVE_ROUNDED, on_click=on_save)
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.EDIT_DOCUMENT, color="primary"), ft.Text("修改账号信息")]),
+            title=ft.Row([ft.Icon(icons.EDIT_DOCUMENT, color="primary"), ft.Text("修改账号信息")]),
             content=ft.Container(
                 content=ft.Column(
                     controls=[
@@ -603,7 +603,7 @@ class AccountsPage:
             content=ft.Text("此操作仅从本地数据库移除凭据，不会影响贴吧账号本身状态。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.close(dialog)),
-                ft.TextButton("确认移除", icon=ft.icons.DELETE_FOREVER, icon_color="error", on_click=do_delete),
+                ft.TextButton("确认移除", icon=icons.DELETE_FOREVER, icon_color="error", on_click=do_delete),
             ],
         )
         self.page.open(dialog)
@@ -691,7 +691,7 @@ class AccountsPage:
             content=ft.Text(f"将注销锁定的 {len(self._selected_ids)} 个账号及其所有的登录凭据。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
-                ft.FilledButton("确认注销", icon=ft.icons.DELETE_FOREVER, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_delete),
+                ft.FilledButton("确认注销", icon=icons.DELETE_FOREVER, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_delete),
             ]
         )
         self.page.open(dialog)

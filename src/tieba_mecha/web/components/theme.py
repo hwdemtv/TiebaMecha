@@ -13,21 +13,22 @@ def get_dark_theme() -> ft.Theme:
     护眼赛博机甲风 (Cyber-Mecha Dark)
     采用极光底色提亮技术，脱离纯黑，消除长时间凝视产生的高对比度残影
     """
-    return ft.Theme(
-        color_scheme=ft.ColorScheme(
-            # 核心色彩（background 已在 Flet 0.84+ 中废弃，原值 #13161A 通过 Page.bgcolor 设置）
-            surface="#1C2028",  # 深渊钢板 - 与背景轻微拉开厚度感
-            primary="#00BFA5",  # 玉石青 - 高明度荧光态的主操色
-            secondary="#E8C361",  # 明亮金 - 告别暗沉的高价值回馈色
-            error="#EF5350",  # 柔和红 - 消除荧光刺眼的危险警示
-            outline="#242A35",  # 幽蓝灰 - 区分块面，不喧宾夺主
-            on_surface="#F2F5F9",  # 星尘白 - 极高明度的主文防模糊色
-            on_surface_variant="#A3AAB8",  # 冷峻亮灰 - 专门解决眯眼看小字的痛点
-            surface_container_highest="#252B36",
-            outline_variant="#2D3440",
-            tertiary="#FF9800",  # 警告色
-        ),
+    # 兼容不同 Flet 版本的参数
+    kwargs = dict(
+        surface="#1C2028",  # 深渊钢板 - 与背景轻微拉开厚度感
+        primary="#00BFA5",  # 玉石青 - 高明度荧光态的主操色
+        secondary="#E8C361",  # 明亮金 - 告别暗沉的高价值回馈色
+        error="#EF5350",  # 柔和红 - 消除荧光刺眼的危险警示
+        outline="#242A35",  # 幽蓝灰 - 区分块面，不喧宾夺主
+        on_surface="#F2F5F9",  # 星尘白 - 极高明度的主文防模糊色
+        on_surface_variant="#A3AAB8",  # 冷峻亮灰 - 专门解决眯眼看小字的痛点
+        outline_variant="#2D3440",
+        tertiary="#FF9800",  # 警告色
     )
+    # Flet 0.83+ 支持 surface_container_highest
+    if hasattr(ft.ColorScheme, "surface_container_highest"):
+        kwargs["surface_container_highest"] = "#252B36"
+    return ft.Theme(color_scheme=ft.ColorScheme(**kwargs))
 
 
 def get_light_theme() -> ft.Theme:
@@ -35,21 +36,22 @@ def get_light_theme() -> ft.Theme:
     实验舱风 (Lab-Clinic Light)
     适用于强光差环境，追求类医疗软件或精密仪器的极简、专业、清晰感
     """
-    return ft.Theme(
-        color_scheme=ft.ColorScheme(
-            # background 已在 Flet 0.84+ 中废弃，原值 #F5F7FA 通过 Page.bgcolor 设置
-            surface="#FFFFFF",  # 纯净白 - 让操作卡片像悬浮在纸面上
-            primary="#009688",  # 沉稳青 - 稍降明度，防止在白底上糊成一片
-            secondary="#C49B27",  # 古铜金 - 在高亮环境下依然能看清的深色金
-            error="#D32F2F",  # 警灯红 - 经典的无歧义错误色
-            outline="#E5E8EB",  # 素雅灰 - 像细铅笔划过的微痕边框
-            on_surface="#1A1A1A",  # 主文本
-            on_surface_variant="#6B7280",  # 中性石灰 - 恰到好处的降噪副文
-            surface_container_highest="#F0F2F5",
-            outline_variant="#D1D5DB",
-            tertiary="#F59E0B",  # 警告色
-        ),
+    # 兼容不同 Flet 版本的参数
+    kwargs = dict(
+        surface="#FFFFFF",  # 纯净白 - 让操作卡片像悬浮在纸面上
+        primary="#009688",  # 沉稳青 - 稍降明度，防止在白底上糊成一片
+        secondary="#C49B27",  # 古铜金 - 在高亮环境下依然能看清的深色金
+        error="#D32F2F",  # 警灯红 - 经典的无歧义错误色
+        outline="#E5E8EB",  # 素雅灰 - 像细铅笔划过的微痕边框
+        on_surface="#1A1A1A",  # 主文本
+        on_surface_variant="#6B7280",  # 中性石灰 - 恰到好处的降噪副文
+        outline_variant="#D1D5DB",
+        tertiary="#F59E0B",  # 警告色
     )
+    # Flet 0.83+ 支持 surface_container_highest
+    if hasattr(ft.ColorScheme, "surface_container_highest"):
+        kwargs["surface_container_highest"] = "#F0F2F5"
+    return ft.Theme(color_scheme=ft.ColorScheme(**kwargs))
 
 
 # 渐变色配置

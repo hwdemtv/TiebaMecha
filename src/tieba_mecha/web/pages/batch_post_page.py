@@ -5,6 +5,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from ..utils import with_opacity
+from ..components import icons
 from ...core.account import get_account_credentials
 from ...core.batch_post import BatchPostTask, BatchPostManager
 from ...core.link_manager import SmartLinkConnector
@@ -164,7 +165,7 @@ class BatchPostPage:
             self.page.update()
 
         self.forum_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.RADAR_ROUNDED, color="red"), ft.Text("配置火力抛射靶场")]),
+            title=ft.Row([ft.Icon(icons.RADAR_ROUNDED, color="red"), ft.Text("配置火力抛射靶场")]),
             content=ft.Container(
                 content=ft.Tabs(
                     selected_index=0,
@@ -172,17 +173,17 @@ class BatchPostPage:
                     tabs=[
                         ft.Tab(
                             text="🟢 本地自留区",
-                            icon=ft.icons.SHIELD_ROUNDED,
+                            icon=icons.SHIELD_ROUNDED,
                             content=ft.Column([
                                 ft.Row([
                                     ft.TextField(
                                         hint_text="过滤本地吧...",
-                                        prefix_icon=ft.icons.SEARCH,
+                                        prefix_icon=icons.SEARCH,
                                         height=35, text_size=11, expand=True,
                                         on_change=lambda e: self._filter_checkboxes(self.forum_pool_column, e.control.value)
                                     ),
                                     ft.Checkbox(label="全选", on_change=lambda e: self._toggle_select_all(self.forum_pool_column, e.control.value)),
-                                    ft.IconButton(ft.icons.SETTINGS, on_click=self._open_native_forum_config, icon_color="green", tooltip="配置安全本营")
+                                    ft.IconButton(icons.SETTINGS, on_click=self._open_native_forum_config, icon_color="green", tooltip="配置安全本营")
                                 ], spacing=5),
                                 ft.Container(
                                     content=self.forum_pool_column if self._native_forums else ft.Container(content=ft.Text("尚无任何贴吧被赋予原生保护权限\n请点击右上方按钮开启防线", color="onSurfaceVariant", text_align="center", size=11), alignment=ft.alignment.center, height=180),
@@ -193,17 +194,17 @@ class BatchPostPage:
                         ),
                         ft.Tab(
                             text="🔥 全域轰炸组",
-                            icon=ft.icons.LOCAL_FIRE_DEPARTMENT_ROUNDED,
+                            icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED,
                             content=ft.Column([
                                 ft.Row([
                                     ft.TextField(
                                         hint_text="过滤靶场组...",
-                                        prefix_icon=ft.icons.SEARCH,
+                                        prefix_icon=icons.SEARCH,
                                         height=35, text_size=11, expand=True,
                                         on_change=lambda e: self._filter_checkboxes(self.global_group_column, e.control.value)
                                     ),
                                     ft.Checkbox(label="全选", on_change=lambda e: self._toggle_select_all(self.global_group_column, e.control.value)),
-                                    ft.IconButton(ft.icons.ADD_BOX, on_click=self._open_add_target_pool_dialog, icon_color="error", tooltip="录入新靶群")
+                                    ft.IconButton(icons.ADD_BOX, on_click=self._open_add_target_pool_dialog, icon_color="error", tooltip="录入新靶群")
                                 ], spacing=5),
                                 ft.Container(
                                     content=self.global_group_column,
@@ -219,7 +220,7 @@ class BatchPostPage:
             ),
             actions=[
                 ft.TextButton("关闭", on_click=lambda _: self.page.close(self.forum_dialog)),
-                ft.FilledButton("锁定发射坐标", icon=ft.icons.CHECK, on_click=confirm_selection),
+                ft.FilledButton("锁定发射坐标", icon=icons.CHECK, on_click=confirm_selection),
             ],
         )
         self.page.open(self.forum_dialog)
@@ -268,7 +269,7 @@ class BatchPostPage:
 
         search_field = ft.TextField(
             hint_text="搜索贴吧名...",
-            prefix_icon=ft.icons.SEARCH,
+            prefix_icon=icons.SEARCH,
             on_change=on_search,
             expand=True,
             height=40,
@@ -288,7 +289,7 @@ class BatchPostPage:
                 self.page.close(self.forum_dialog)
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
+            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
             content=ft.Column([
                 ft.Row([
                     search_field,
@@ -303,7 +304,7 @@ class BatchPostPage:
                 )
             ], tight=True, width=450, spacing=10),
             actions=[
-                ft.FilledButton("防抽网络编织完毕锁定", icon=ft.icons.SECURITY, on_click=close_dialog, style=ft.ButtonStyle(bgcolor="green", color="white"))
+                ft.FilledButton("防抽网络编织完毕锁定", icon=icons.SECURITY, on_click=close_dialog, style=ft.ButtonStyle(bgcolor="green", color="white"))
             ]
         )
         self.page.open(dialog)
@@ -330,7 +331,7 @@ class BatchPostPage:
             self.page.run_task(_bg_task)
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.LIBRARY_ADD, color="error"), ft.Text("录入全新靶场目标群")]),
+            title=ft.Row([ft.Icon(icons.LIBRARY_ADD, color="error"), ft.Text("录入全新靶场目标群")]),
             content=ft.Column([
                 group_input,
                 forums_input,
@@ -338,7 +339,7 @@ class BatchPostPage:
             ], tight=True, width=400, spacing=10),
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
-                ft.FilledButton("封存入库", icon=ft.icons.SAVE, on_click=save, style=ft.ButtonStyle(bgcolor="error", color="white"))
+                ft.FilledButton("封存入库", icon=icons.SAVE, on_click=save, style=ft.ButtonStyle(bgcolor="error", color="white"))
             ]
         )
         self.page.open(dialog)
@@ -411,7 +412,7 @@ class BatchPostPage:
             content=ft.Text(f"将永久删除选中的 {len(self._selected_material_ids)} 条物料，不可撤回。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
-                ft.FilledButton("确认爆炸", icon=ft.icons.DELETE_FOREVER, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_delete),
+                ft.FilledButton("确认爆炸", icon=icons.DELETE_FOREVER, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_delete),
             ]
         )
         self.page.open(dialog)
@@ -457,7 +458,7 @@ class BatchPostPage:
             
             if m.status in ("pending", "failed"):
                 status_color = "onSurfaceVariant" if m.status == "pending" else "error"
-                status_icon = ft.icons.SCHEDULE if m.status == "pending" else ft.icons.ERROR
+                status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
                 status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
                 
                 pending_rows.append(
@@ -471,12 +472,12 @@ class BatchPostPage:
                             ft.DataCell(ft.Row([ft.Icon(status_icon, color=status_color, size=14), ft.Text(status_text, color=status_color, size=12)], spacing=4)),
                             ft.DataCell(ft.Row([
                                 ft.Text(ai_text, color=ai_color, size=12),
-                                ft.IconButton(ft.icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
+                                ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
                             ], spacing=2)),
                             ft.DataCell(ft.Row([
-                                ft.IconButton(ft.icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
-                                ft.IconButton(ft.icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
-                                ft.IconButton(ft.icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
+                                ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
+                                ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
+                                ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
                             ], spacing=0)),
                             ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8)),
                         ]
@@ -495,10 +496,10 @@ class BatchPostPage:
                             ft.DataCell(ft.Text(m.last_used_at.strftime("%y-%m-%d %H:%M") if m.last_used_at else "-")),
                             ft.DataCell(ft.Row([
                                 ft.IconButton(
-                                    ft.icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
+                                    icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
                                     on_click=lambda e, tid=m.posted_tid: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}") if tid else self._show_snackbar("该贴被系统吞没或未传回TID", "warning")
                                 ),
-                                ft.IconButton(ft.icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="该贴被干了？重新回炉排期"),
+                                ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="该贴被干了？重新回炉排期"),
                             ], spacing=0)),
                             ft.DataCell(ft.Row([
                                 ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
@@ -592,7 +593,7 @@ class BatchPostPage:
             self.page.close(dialog)
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.EDIT_DOCUMENT, color="blue"), ft.Text("人工干预弹药库")]),
+            title=ft.Row([ft.Icon(icons.EDIT_DOCUMENT, color="blue"), ft.Text("人工干预弹药库")]),
             content=ft.Column([
                 ft.Text("⚠ 若该物料已经过 AI 魔法改写，二次修改将会覆盖当前的缓存值。"),
                 edit_title,
@@ -600,7 +601,7 @@ class BatchPostPage:
             ], tight=True, spacing=15),
             actions=[
                 ft.TextButton("算了吧", on_click=close_dialog),
-                ft.FilledButton("保存干预修剪", icon=ft.icons.SAVE, on_click=save_changes),
+                ft.FilledButton("保存干预修剪", icon=icons.SAVE, on_click=save_changes),
             ]
         )
         self.page.open(dialog)
@@ -758,7 +759,7 @@ class BatchPostPage:
         status_text = ft.Text(f"正在准备 AI 精调 (0/{len(pending_m)})...", size=12)
         
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.AUTO_AWESOME, color="primary"), ft.Text("AI 批量文案精调中")], spacing=10),
+            title=ft.Row([ft.Icon(icons.AUTO_AWESOME, color="primary"), ft.Text("AI 批量文案精调中")], spacing=10),
             content=ft.Column([
                 ft.Text("系统将对所有 [待发] 物料进行 SEO 优化和敏感词防御处理。此过程可能消耗 API 额度，请确认。", size=14),
                 ft.Divider(),
@@ -858,7 +859,7 @@ class BatchPostPage:
                 ft.Container(content=ft.Text(m.content, size=11), padding=10, bgcolor=with_opacity(0.1, "primary"), border_radius=5),
             ], scroll=ft.ScrollMode.ADAPTIVE, width=500, tight=True),
             actions=[
-                ft.TextButton("使用原文回退", icon=ft.icons.UNDO, on_click=rollback),
+                ft.TextButton("使用原文回退", icon=icons.UNDO, on_click=rollback),
                 ft.FilledButton("保持现状", on_click=lambda _: self.page.close(preview_dialog)),
             ]
         )
@@ -888,7 +889,7 @@ class BatchPostPage:
         # 3. UI 组件
         self._search_field = ft.TextField(
             label="搜索短码或标题...",
-            prefix_icon=ft.icons.SEARCH,
+            prefix_icon=icons.SEARCH,
             on_change=self._on_shortlink_search_change,
             text_size=13,
             dense=True,
@@ -991,7 +992,7 @@ class BatchPostPage:
 
         # 5. 构建对话框
         self.link_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.LINK_ROUNDED, color="primary"), ft.Text("短链资产库精华选取")]),
+            title=ft.Row([ft.Icon(icons.LINK_ROUNDED, color="primary"), ft.Text("短链资产库精华选取")]),
             content=ft.Container(
                 content=ft.Column([
                     ft.Row([self._search_field]),
@@ -1005,7 +1006,7 @@ class BatchPostPage:
             ),
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(self.link_dialog)),
-                ft.FilledButton("确认并注入子弹袋", icon=ft.icons.BOLT, on_click=on_confirm),
+                ft.FilledButton("确认并注入子弹袋", icon=icons.BOLT, on_click=on_confirm),
             ],
         )
 
@@ -1093,7 +1094,7 @@ class BatchPostPage:
         """独立构建物料池 Tab 内容 - 增加搜索与批量控制"""
         material_search = ft.TextField(
             hint_text="搜索标题或内容...",
-            prefix_icon=ft.icons.SEARCH,
+            prefix_icon=icons.SEARCH,
             on_change=self._on_material_search_change,
             height=40, text_size=12, content_padding=10,
             width=250 # 给搜索框固定宽度，防止在 Row 中挤压操作栏
@@ -1102,11 +1103,11 @@ class BatchPostPage:
         return ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Icon(ft.icons.FORMAT_ALIGN_LEFT_OUTLINED, size=16),
+                    ft.Icon(icons.FORMAT_ALIGN_LEFT_OUTLINED, size=16),
                     ft.Text("全域物料弹药库 (Pending Rows)", size=12, weight=ft.FontWeight.BOLD),
                     ft.Container(expand=True),
                     self._stats_text or ft.Text(""),
-                    ft.IconButton(ft.icons.REFRESH, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新物料库"),
+                    ft.IconButton(icons.REFRESH, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新物料库"),
                 ], spacing=10),
                 ft.Row([self._quick_title, self._quick_content, self._add_btn], spacing=10),
                 ft.Row([
@@ -1132,7 +1133,7 @@ class BatchPostPage:
         """独立构建已发记录归档库 Tab 内容 - 增加搜索与批量重置"""
         archive_search = ft.TextField(
             hint_text="搜索标题或着陆贴吧...",
-            prefix_icon=ft.icons.SEARCH,
+            prefix_icon=icons.SEARCH,
             on_change=self._on_archive_search_change,
             height=40, text_size=12, content_padding=10,
             width=250 # 固定宽度
@@ -1141,10 +1142,10 @@ class BatchPostPage:
         return ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Icon(ft.icons.ARCHIVE_OUTLINED, size=16),
+                    ft.Icon(icons.ARCHIVE_OUTLINED, size=16),
                     ft.Text("发帖档案室 (Historical Archive Rows)", size=12, weight=ft.FontWeight.BOLD),
                     ft.Container(expand=True),
-                    ft.IconButton(ft.icons.REFRESH, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新档案"),
+                    ft.IconButton(icons.REFRESH, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新档案"),
                 ], spacing=10),
                 ft.Row([
                     archive_search,
@@ -1170,7 +1171,7 @@ class BatchPostPage:
             self.page.overlay.append(self._file_picker)
             
         header = ft.Row([
-            ft.IconButton(ft.icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._navigate("dashboard")),
+            ft.IconButton(icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._navigate("dashboard")),
             ft.Column([
                 ft.Text("矩阵发帖终端 / MATRIX POST TERMINAL", size=20, weight=ft.FontWeight.BOLD, color="primary"),
                 ft.Text("多账号轮换、多内容池混淆及多贴吧矩阵发布引擎", size=11, color="onSurfaceVariant"),
@@ -1183,7 +1184,7 @@ class BatchPostPage:
         self.forum_pool_column = ft.Column(spacing=2, height=120, scroll=ft.ScrollMode.ADAPTIVE)
         self.forum_select_btn = ft.OutlinedButton(
             "点击选择目标贴吧",
-            icon=ft.icons.TOUCH_APP_ROUNDED,
+            icon=icons.TOUCH_APP_ROUNDED,
             on_click=self._open_forum_dialog,
             style=ft.ButtonStyle(color="onSurfaceVariant"),
         )
@@ -1198,13 +1199,13 @@ class BatchPostPage:
         # 批量操作 UI 容器
         self._material_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._material_bulk_actions = ft.Row([
-            ft.FilledButton("批量删除", icon=ft.icons.DELETE_SWEEP,
+            ft.FilledButton("批量删除", icon=icons.DELETE_SWEEP,
                             style=ft.ButtonStyle(bgcolor="error", color="white"), 
                             on_click=self._bulk_delete_materials),
-            ft.FilledButton("批量自顶", icon=ft.icons.BOLT,
+            ft.FilledButton("批量自顶", icon=icons.BOLT,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
-            ft.FilledButton("AI 批量改写", icon=ft.icons.AUTO_AWESOME,
+            ft.FilledButton("AI 批量改写", icon=icons.AUTO_AWESOME,
                             style=ft.ButtonStyle(bgcolor="teal", color="white"), 
                             on_click=self._on_batch_ai_rewrite_click),
             self._material_selected_count_text,
@@ -1212,7 +1213,7 @@ class BatchPostPage:
 
         self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._archive_bulk_actions = ft.Row([
-            ft.FilledButton("批量回炉", icon=ft.icons.RESTORE_PAGE,
+            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
             self._archive_selected_count_text,
@@ -1221,7 +1222,7 @@ class BatchPostPage:
         # 2. 物料录入与表格
         self._quick_title = ft.TextField(label="快速配置标题(可选)", expand=1, text_size=12, dense=True)
         self._quick_content = ft.TextField(label="正文主段落 (尽量带引流信息) *", expand=2, text_size=12, dense=True)
-        self._add_btn = ft.IconButton(icon=ft.icons.ADD_BOX, icon_color="primary", on_click=self._add_material_row, tooltip="写好就塞进去")
+        self._add_btn = ft.IconButton(icon=icons.ADD_BOX, icon_color="primary", on_click=self._add_material_row, tooltip="写好就塞进去")
         
         self._material_table = ft.DataTable(
             columns=[
@@ -1280,7 +1281,7 @@ class BatchPostPage:
         )
         self.account_pool_column = ft.Column(spacing=5, height=150, scroll=ft.ScrollMode.ADAPTIVE)
         self.start_btn = ft.ElevatedButton(
-            "启动矩阵任务", icon=ft.icons.PLAY_CIRCLE_FILL_ROUNDED,
+            "启动矩阵任务", icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
             on_click=self._on_start_click,
             style=ft.ButtonStyle(color="white", bgcolor="primary")
         )
@@ -1294,10 +1295,10 @@ class BatchPostPage:
             selected_index=0,
             animation_duration=300,
             tabs=[
-                ft.Tab(text="物料排期池", icon=ft.icons.LIST_ALT_ROUNDED, content=self._build_material_view()),
-                ft.Tab(text="已发归档库", icon=ft.icons.ARCHIVE_ROUNDED, content=self._build_archive_view()),
-                ft.Tab(text="实时任务流水", icon=ft.icons.STREAM_ROUNDED, content=self._build_log_view()),
-                ft.Tab(text="全域任务队列", icon=ft.icons.UPDATE_ROUNDED, content=self._build_task_queue_view()),
+                ft.Tab(text="物料排期池", icon=icons.LIST_ALT_ROUNDED, content=self._build_material_view()),
+                ft.Tab(text="已发归档库", icon=icons.ARCHIVE_ROUNDED, content=self._build_archive_view()),
+                ft.Tab(text="实时任务流水", icon=icons.STREAM_ROUNDED, content=self._build_log_view()),
+                ft.Tab(text="全域任务队列", icon=icons.UPDATE_ROUNDED, content=self._build_task_queue_view()),
             ],
             expand=True,
         )
@@ -1314,10 +1315,10 @@ class BatchPostPage:
                         ft.Row([
                             ft.Text("全局指令集", size=14, weight=ft.FontWeight.W_500),
                             ft.Row([
-                                ft.IconButton(ft.icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
-                                ft.IconButton(ft.icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
-                                ft.IconButton(ft.icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant"),
-                                ft.IconButton(ft.icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
+                                ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
+                                ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
+                                ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant"),
+                                ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
                             ], spacing=0),
                         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         # 目标贴吧选择区
@@ -1401,7 +1402,7 @@ class BatchPostPage:
         return ft.Column([
             ft.Row([
                 ft.Text("近期任务记录", size=12, weight=ft.FontWeight.BOLD),
-                ft.IconButton(ft.icons.REFRESH, on_click=lambda e: self.page.run_task(self.load_data)),
+                ft.IconButton(icons.REFRESH, on_click=lambda e: self.page.run_task(self.load_data)),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(
                 content=ft.ListView([self.task_table], expand=True), expand=True,
@@ -1416,7 +1417,7 @@ class BatchPostPage:
         return ft.DataRow(cells=[
             ft.DataCell(ft.Text(str(t.id))),
             ft.DataCell(ft.Text(fnames_disp[:15] + ("..." if len(fnames_disp)>15 else ""))),
-            ft.DataCell(ft.Icon(ft.icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
+            ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(t.schedule_time.strftime("%m-%d %H:%M") if t.schedule_time else "即时")),
             ft.DataCell(ft.Text(t.status.upper(), color=status_color, weight=ft.FontWeight.BOLD)),
@@ -1459,7 +1460,7 @@ class BatchPostPage:
         if self._is_running:
             self._is_running = False
             self.start_btn.text = "启动矩阵任务"
-            self.start_btn.icon = ft.icons.PLAY_CIRCLE_FILL_ROUNDED
+            self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
             self.page.update()
             return
 
@@ -1518,7 +1519,7 @@ class BatchPostPage:
 
         self._is_running = True
         self.start_btn.text = "停止任务"
-        self.start_btn.icon = ft.icons.STOP_CIRCLE_ROUNDED
+        self.start_btn.icon = icons.STOP_CIRCLE_ROUNDED
         self.start_btn.bgcolor = "error"
         self.progress_bar.visible = True
         self.progress_bar.value = 0
@@ -1563,7 +1564,7 @@ class BatchPostPage:
         finally:
             self._is_running = False
             self.start_btn.text = "启动矩阵任务"
-            self.start_btn.icon = ft.icons.PLAY_CIRCLE_FILL_ROUNDED
+            self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
             self.start_btn.bgcolor = "primary"
             self.progress_bar.visible = False
             self.page.update()

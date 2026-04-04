@@ -4,33 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import flet as ft
 
 from .utils import with_opacity
-
 from .components import get_dark_theme, get_light_theme, icons
-from .pages.dashboard import DashboardPage
-from .pages.accounts import AccountsPage
-from .pages.welcome import WelcomePage
-from .pages.sign import SignPage
-from .pages.posts import PostsPage
-from .pages.crawl import CrawlPage
-from .pages.proxy import ProxyPage
-from .pages.rules import RulesPage
-from .pages.batch_post_page import BatchPostPage
-from .pages.plugins_page import PluginsPage
-from .pages.settings import SettingsPage
-from ..db.crud import get_db
-from ..core.account import verify_account, decrypt_value
-from ..core.logger import log_info, log_warn, log_error
-from ..core.notification import init_notification_manager, get_notification_manager
-from ..core.updater import get_update_manager
-from .components.notification_bell import NotificationBell, show_notification_dialog
 
 if TYPE_CHECKING:
     from tieba_mecha.db.crud import Database
+
+# 页面懒加载映射（避免启动时导入所有模块）
+PAGE_MODULES = {
+    "dashboard": ("dashboard", "DashboardPage"),
+    "accounts": ("accounts", "AccountsPage"),
+    "welcome": ("welcome", "WelcomePage"),
+    "sign": ("sign", "SignPage"),
+    "posts": ("posts", "PostsPage"),
+    "crawl": ("crawl", "CrawlPage"),
+    "proxy": ("proxy", "ProxyPage"),
+    "rules": ("rules", "RulesPage"),
+    "batch_post": ("batch_post_page", "BatchPostPage"),
+    "plugins": ("plugins_page", "PluginsPage"),
+    "settings": ("settings", "SettingsPage"),
+}
 
 
 class TiebaMechaApp:
@@ -124,12 +121,11 @@ class TiebaMechaApp:
             on_change=self._on_nav_change,
         )
 
-        # 通知铃铛
+        # 通知铃铛（延迟绑定 on_click）
+        from .components.notification_bell import NotificationBell
         self.notification_bell = NotificationBell(
             page=self.page,
-            on_click=lambda _: self.page.run_task(
-                show_notification_dialog, self.page, get_notification_manager()
-            )
+            on_click=lambda _: self.page.run_task(self._show_notifications)
         )
 
         # 将铃铛设置为侧边栏头部
@@ -164,6 +160,12 @@ class TiebaMechaApp:
         """初始化数据库和其他异步资源"""
         self.db = db
 
+        # 延迟导入重模块
+        from ..core.logger import log_info, log_warn, log_error
+        from ..core.notification import init_notification_manager, get_notification_manager
+        from ..core.updater import get_update_manager
+        from .components.notification_bell import show_notification_dialog
+
         # 初始化通知管理器
         nm = init_notification_manager(db=db, page=self.page)
         self.notification_bell.set_notification_manager(nm)
@@ -192,6 +194,12 @@ class TiebaMechaApp:
 
         await log_info("TiebaMecha 系统内聚核动力引擎已启动")
 
+    async def _show_notifications(self, _):
+        """显示通知对话框（延迟导入）"""
+        from ..core.notification import get_notification_manager
+        from .components.notification_bell import show_notification_dialog
+        await show_notification_dialog(self.page, get_notification_manager())
+
     async def _is_quiet_hour(self) -> bool:
         """检查当前是否处于静默时间窗"""
         from datetime import datetime
@@ -213,6 +221,9 @@ class TiebaMechaApp:
 
     async def _account_heartbeat(self):
         """账号心跳检测后台循环"""
+        from ..core.logger import log_info, log_warn, log_error
+        from ..core.account import verify_account, decrypt_value
+
         while True:
             try:
                 # 检查静默期
@@ -224,30 +235,30 @@ class TiebaMechaApp:
                 # 获取检测间隔 (默认 2 小时)
                 interval_str = await self.db.get_setting("heartbeat_interval", "2")
                 interval = max(1, int(interval_str)) # 最少 1 小时
-                
+
                 await log_info(f"开启账号状态全域扫描 (计划周期: {interval}h)")
-                
+
                 accounts = await self.db.get_accounts()
                 for acc in accounts:
                     try:
                         bduss = decrypt_value(acc.bduss)
                         stoken = decrypt_value(acc.stoken) if acc.stoken else ""
-                        
+
                         is_valid, uid, uname, msg = await verify_account(bduss, stoken)
                         status = "active" if is_valid else "expired"
                         if not is_valid and "network" in msg.lower():
                             status = "error" # 网络问题不代表过期
-                            
+
                         await self.db.update_account_status(acc.id, status)
-                        
+
                         if not is_valid:
                             await log_warn(f"账号 [{acc.name}] 验证失败: {msg}")
                     except Exception as e:
                         await log_error(f"扫描账号 [{acc.name}] 时发生异常: {str(e)}")
-                
+
                 await log_info("账号巡回检查完毕")
                 await asyncio.sleep(interval * 3600)
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -256,6 +267,7 @@ class TiebaMechaApp:
 
     async def _batch_scheduler(self):
         """批量任务后台扫描调度引擎"""
+        from ..core.logger import log_info, log_warn, log_error
         from ..core.batch_post import BatchPostManager, BatchPostTask
         manager = BatchPostManager(self.db)
         import json
@@ -346,6 +358,7 @@ class TiebaMechaApp:
 
     async def _proxy_monitor(self):
         """代理池智能监控与自动维护引擎（含账号联动挂起/恢复）"""
+        from ..core.logger import log_info, log_warn, log_error
         from ..core.proxy import test_proxy
 
         while True:
@@ -402,6 +415,9 @@ class TiebaMechaApp:
 
     async def _notification_sync(self):
         """通知同步后台任务 - 定期从 hw-license-center 拉取远程通知"""
+        from ..core.logger import log_error
+        from ..core.notification import get_notification_manager
+
         nm = get_notification_manager()
         if not nm:
             return
@@ -425,6 +441,8 @@ class TiebaMechaApp:
 
     async def _perform_notification_sync(self, nm):
         """执行具体的通知同步逻辑"""
+        from ..core.logger import log_info
+
         # 加载许可证配置
         license_key = await self.db.get_setting("license_key", "")
         device_id = await self.db.get_setting("device_id", "")
@@ -439,6 +457,10 @@ class TiebaMechaApp:
 
     async def _update_checker(self):
         """更新检测后台任务 - 定期检查 GitHub Releases"""
+        from ..core.logger import log_info, log_error
+        from ..core.notification import get_notification_manager
+        from ..core.updater import get_update_manager
+
         updater = get_update_manager()
 
         while True:
@@ -495,27 +517,16 @@ class TiebaMechaApp:
             return
 
         self.current_page = page_name
-        
-        # 路由映射表
-        pages = {
-            "dashboard": DashboardPage,
-            "accounts": AccountsPage,
-            "welcome": WelcomePage,
-            "sign": SignPage,
-            "posts": PostsPage,
-            "crawl": CrawlPage,
-            "proxy": ProxyPage,
-            "rules": RulesPage,
-            "batch_post": BatchPostPage,
-            "plugins": PluginsPage,
-            "settings": SettingsPage,
-        }
 
-        page_class = pages.get(page_name, DashboardPage)
-        
+        # 懒加载页面模块
+        module_name, class_name = PAGE_MODULES.get(page_name, ("dashboard", "DashboardPage"))
+        from importlib import import_module
+        module = import_module(f".pages.{module_name}", package=__name__.rsplit(".", 1)[0])
+        page_class = getattr(module, class_name)
+
         page_obj = page_class(self.page, self.db, self._navigate_sync)
         self.content_area.content = page_obj.build()
-        # 先刷新框架，再异步加载数据（_navigate 本身是 async，直接 await 即可）
+        # 先刷新框架，再异步加载数据
         self.page.update()
         if hasattr(page_obj, "load_data"):
             await page_obj.load_data()

@@ -3,6 +3,7 @@
 import flet as ft
 
 from .theme import create_stream_list_item
+from .icons import FORUM, CHECK_CIRCLE, ERROR
 
 
 class StreamList(ft.Container):
@@ -79,10 +80,10 @@ class ForumList(StreamList):
                 {
                     "title": f.get("fname", ""),
                     "subtitle": f"ID: {f.get('fid', 0)}",
-                    "icon": ft.icons.FORUM,
+                    "icon": FORUM,
                     "trailing": [
                         ft.Icon(
-                            ft.icons.CHECK_CIRCLE,
+                            CHECK_CIRCLE,
                             color="primary",
                             size=16,
                             visible=f.get("is_sign_today", False),
@@ -104,7 +105,7 @@ class SignResultList(StreamList):
                 {
                     "title": r.get("fname", ""),
                     "subtitle": r.get("message", ""),
-                    "icon": ft.icons.CHECK_CIRCLE if r.get("success") else ft.icons.ERROR,
+                    "icon": CHECK_CIRCLE if r.get("success") else ERROR,
                     "trailing": [],
                 }
                 for r in results
