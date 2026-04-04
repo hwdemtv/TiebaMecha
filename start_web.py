@@ -36,7 +36,7 @@ async def main(page: ft.Page):
 
 def run_app(port: int = 9006):
     """启动 Flet 应用，已在 app.py 中通过 logging.addLevelName 修复 uvicorn 日志级别问题"""
-    ft.app(
+    ft.run(
         target=main,
         port=port,
         view=ft.AppView.WEB_BROWSER,

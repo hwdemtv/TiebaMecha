@@ -538,7 +538,7 @@ def run_app(port: int = 9006):
         db = await get_db()
         await app.initialize(db)
 
-    ft.app(target=main, port=port, view=ft.AppView.WEB_BROWSER)
+    ft.run(target=main, port=port, view=ft.AppView.WEB_BROWSER)
 
 
 if __name__ == "__main__":
