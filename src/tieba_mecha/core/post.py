@@ -64,7 +64,7 @@ async def get_threads(
     if not creds:
         return []
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
     threads = []
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
@@ -109,7 +109,7 @@ async def get_posts(
     if not creds:
         return []
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
     posts = []
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
@@ -151,7 +151,7 @@ async def delete_thread(
     if not creds:
         return False, "未找到账号凭证"
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         result = await client.del_thread(fname, tid)
@@ -207,7 +207,7 @@ async def set_good(
     if not creds:
         return False, "未找到账号凭证"
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         if is_good:
@@ -243,7 +243,7 @@ async def set_top(
     if not creds:
         return False, "未找到账号凭证"
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         result = await client.top(fname, tid, is_top)
@@ -273,7 +273,7 @@ async def search_threads(
     if not creds:
         return []
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
     threads = []
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
@@ -323,7 +323,7 @@ async def add_thread(
     if not creds:
         return False, "未找到账号凭证", 0
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         try:
@@ -425,7 +425,7 @@ async def add_post(
     if not creds:
         return False, "未找到账号凭证"
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         try:

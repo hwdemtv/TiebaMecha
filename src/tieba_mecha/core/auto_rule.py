@@ -18,7 +18,7 @@ async def apply_rules_to_threads(db: Database, fname: str, threads: list):
     if not creds:
         return
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
     
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for thread in threads:

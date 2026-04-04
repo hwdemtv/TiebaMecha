@@ -42,31 +42,56 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
     if not creds:
         return []
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
     forums = []
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
-        user_info = await client.get_self_info()
+        # 重试机制：针对获取基础信息和贴吧列表增加指数退避
+        max_retries = 3
+        user_info = None
+        for attempt in range(max_retries):
+            try:
+                user_info = await client.get_self_info()
+                if user_info: break
+            except Exception as e:
+                if attempt == max_retries - 1: raise
+                wait = (attempt + 1) * 2
+                await log_warn(f"获取用户信息失败 (尝试 {attempt+1}/{max_retries})，{wait}s 后重试: {e}")
+                await asyncio.sleep(wait)
+
         if not user_info:
+            await log_error(f"无法获取用户信息 (账户ID: {account_id})，流程终止")
             return []
 
         pn = 1
         while True:
-            result = await client.get_follow_forums(user_info.user_id, pn=pn, rn=50)
-            if result.err:
-                await log_warn(f"获取关注列表失败 (账户ID: {account_id}, 第 {pn} 页): {result.err}")
+            result = None
+            for attempt in range(max_retries):
+                try:
+                    result = await client.get_follow_forums(user_info.user_id, pn=pn, rn=50)
+                    if not result.err: break
+                except Exception as e:
+                    if attempt == max_retries - 1: break
+                    wait = (attempt + 1) * 2
+                    await log_warn(f"获取贴吧列表失败 (第 {pn} 页, 尝试 {attempt+1}/{max_retries})，{wait}s 后重试: {e}")
+                    await asyncio.sleep(wait)
+
+            if not result or result.err:
+                await log_warn(f"获取关注列表失败 (账户ID: {account_id}, 第 {pn} 页): {result.err if result else '未知错误'}")
                 break
 
             for forum in result.objs:
-                forums.append(
-                    ForumInfo(
-                        fid=forum.fid,
-                        fname=forum.fname,
-                        is_sign_today=False,
-                        sign_count=0,
-                        level=getattr(forum, "level", 0),
+                # 过滤无效贴吧 (fid=0 表示贴吧已删除/封禁)
+                if forum.fid and forum.fid > 0:
+                    forums.append(
+                        ForumInfo(
+                            fid=forum.fid,
+                            fname=forum.fname,
+                            is_sign_today=False,
+                            sign_count=0,
+                            level=getattr(forum, "level", 0),
+                        )
                     )
-                )
 
             if not result.has_more:
                 break
@@ -88,10 +113,15 @@ async def sync_forums_to_db(db: Database) -> int:
 
     for account in accounts:
         try:
+            # 获取服务器最新的关注列表
             forums = await get_follow_forums(db, account.id)
+            server_fids = {f.fid for f in forums}
+            
+            # 获取本地数据库已有的贴吧
             existing = await db.get_forums(account.id)
             existing_fids = {f.fid for f in existing}
 
+            # 1. 处理新增与更新
             added = 0
             for forum in forums:
                 if forum.fid not in existing_fids:
@@ -111,10 +141,16 @@ async def sync_forums_to_db(db: Database) -> int:
                         level=forum.level,
                     )
             
+            # 2. 处理删除 (逻辑镜像同步)：移除已经不再关注的贴吧
+            stale_fids = existing_fids - server_fids
+            if stale_fids:
+                await db.delete_forums_by_fids(account.id, list(stale_fids))
+                await log_info(f"账号 [{account.name}] 清理了 {len(stale_fids)} 个失效贴吧")
+            
             total_added += added
-            await log_info(f"账号 [{account.name}] 同步完毕 | 新增 {added} 个")
+            await log_info(f"账号 [{account.name}] 同博完毕 | 新增 {added} 个")
         except Exception as e:
-            await log_error(f"同步账号 [{account.name}] 时发生背刺: {str(e)}")
+            await log_error(f"同步账号 [{account.name}] 时发生异常: {str(e)}")
 
     return total_added
 
@@ -134,25 +170,44 @@ async def sign_forum(db: Database, fname: str) -> SignResult:
     if not creds:
         return SignResult(fname=fname, success=False, message="未找到账号凭证")
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
-    async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid) as client:
+    async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         result = await client.sign_forum(fname)
 
-        if result:
-            await log_info(f"手动签到成功: {fname}")
-            return SignResult(
-                fname=fname,
-                success=True,
-                message="签到成功",
-            )
+        # 160002 为"已签到"，在业务逻辑上视为成功
+        is_already_signed = hasattr(result, 'err') and result.err and result.err.code == 160002
+        # 340006/340001 表示贴吧已删除/封禁
+        is_forum_invalid = hasattr(result, 'err') and result.err and result.err.code in (340006, 340001)
+
+        if result or is_already_signed:
+            msg = "签到成功" if not is_already_signed else "今日已签到"
+            success = True
+            await log_info(f"手动签到成功: {fname} ({msg})")
+        elif is_forum_invalid:
+            msg = f"贴吧已失效 ({result.err.code})"
+            success = False
+            await log_warn(f"手动签到失败: {fname} | {msg}")
         else:
-            await log_warn(f"手动签到失败: {fname}")
-            return SignResult(
-                fname=fname,
-                success=False,
-                message="签到失败",
-            )
+            msg = str(result.err) if hasattr(result, 'err') else "未知错误"
+            success = False
+            await log_warn(f"手动签到失败: {fname} | 原因: {msg}")
+
+        # 更新数据库状态
+        account = await db.get_active_account()
+        if account:
+            forums = await db.get_forums(account.id)
+            forum = next((f for f in forums if f.fname == fname), None)
+            if forum:
+                if is_forum_invalid:
+                    # 自动删除无效贴吧
+                    await db.delete_forum(forum.id)
+                    await log_warn(f"[{fname}] 贴吧已失效，已自动从数据库移除")
+                else:
+                    await db.add_sign_log(forum_id=forum.id, fname=fname, success=success, message=msg)
+                    await db.update_forum_sign(forum.id, success)
+
+        return SignResult(fname=fname, success=success, message=msg)
 
 
 async def sign_all_forums(
@@ -172,6 +227,7 @@ async def sign_all_forums(
     """
     import random
     import asyncio
+    import concurrent.futures
     from aiotieba.exception import TiebaServerError
 
     account = await db.get_active_account()
@@ -184,22 +240,49 @@ async def sign_all_forums(
         yield SignResult(fname="", success=False, message="未找到账号凭证")
         return
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
     forums = await db.get_forums(account.id)
 
     # N+1 优化: 在外层建立单一持久化连接池
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for forum in forums:
             try:
-                sign_res = await client.sign_forum(forum.fname)
-                if sign_res:
-                    result = SignResult(fname=forum.fname, success=True, message="签到成功", sign_count=forum.sign_count + 1)
+                # 针对底层网络抖动（如 Can not write request body）增加一次自动重试
+                try:
+                    sign_res = await client.sign_forum(forum.fname)
+                except Exception:
+                    await asyncio.sleep(1)
+                    sign_res = await client.sign_forum(forum.fname)
+                
+                # 特殊逻辑：160002 代表已签到，在自动化任务中应视作成功
+                is_already_signed = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code == 160002
+                # 340006/340001 表示贴吧已删除/封禁，需要标记为无效
+                is_forum_invalid = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code in (340006, 340001)
+
+                if sign_res or is_already_signed:
+                    msg = "签到成功" if not is_already_signed else "今日已签到"
+                    result = SignResult(
+                        fname=forum.fname,
+                        success=True,
+                        message=msg,
+                        sign_count=forum.sign_count + (0 if is_already_signed else 1)
+                    )
+                elif is_forum_invalid:
+                    msg = f"贴吧已失效 ({sign_res.err.code})"
+                    result = SignResult(fname=forum.fname, success=False, message=msg)
+                    # 自动删除无效贴吧
+                    await db.delete_forum(forum.id)
+                    await log_warn(f"[{forum.fname}] 贴吧已失效，已自动从数据库移除")
                 else:
-                    result = SignResult(fname=forum.fname, success=False, message="签到请求被拒或未命中判定")
+                    err_msg = str(sign_res.err) if hasattr(sign_res, 'err') else "请求被拒或未命中判定"
+                    result = SignResult(fname=forum.fname, success=False, message=err_msg)
             except TiebaServerError as e:
                 await log_warn(f"[{forum.fname}] 触发风控或 API 阻隔 ({e.code})，系统静默退避休眠 60 秒...")
                 await asyncio.sleep(60)
                 result = SignResult(fname=forum.fname, success=False, message=f"被风控限流: {e.msg}")
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                # 优雅处理 Flet 任务取消
+                raise
             except Exception as e:
                 result = SignResult(fname=forum.fname, success=False, message=str(e))
 
@@ -335,12 +418,27 @@ async def sign_all_accounts(
                 if not creds:
                     continue
 
-                bduss, stoken, proxy_id, cuid, ua = creds
-                async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid) as client:
+                _, bduss, stoken, proxy_id, cuid, ua = creds
+                async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
                     result_raw = await client.sign_forum(forum.fname)
 
-                success = bool(result_raw)
-                message = "签到成功" if success else "签到失败或已签过"
+                # 判定逻辑：支持 160002 已签到状态，检测无效贴吧
+                is_already_signed = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code == 160002
+                is_forum_invalid = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code in (340006, 340001)
+                success = bool(result_raw) or is_already_signed
+
+                if is_forum_invalid:
+                    # 自动删除无效贴吧
+                    await db.delete_forum(forum.id)
+                    message = f"贴吧已失效 ({result_raw.err.code})，已自动移除"
+                    success = False
+                    await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
+                elif is_already_signed:
+                    message = "今日已签到"
+                elif success:
+                    message = "签到成功"
+                else:
+                    message = str(result_raw.err) if hasattr(result_raw, 'err') else "签到失败"
 
                 # 写入日志与数据库
                 await db.add_sign_log(
