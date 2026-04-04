@@ -80,6 +80,17 @@
 3. 运行 `启动Web界面.bat` 开启机甲。
 4. 浏览器访问 [http://localhost:9006](http://localhost:9006)。
 
+**📦 便携版更新流程：**
+
+1. 下载新版本 `TiebaMecha-portable.zip`
+2. **保留旧版本的以下文件**：
+   - `data/` 目录（含数据库 `tieba_mecha.db`）
+   - `.env` 文件（加密密钥配置）
+3. 解压新版本覆盖旧文件
+4. 将保留的 `data/` 目录和 `.env` 文件放回
+
+> ⚠️ **注意**：丢失 `data/` 或 `.env` 将导致所有账号数据和加密凭证无法恢复。
+
 ### 方式二：Docker 部署（推荐服务器/挂机用户）
 
 确保已安装 Docker 和 Docker Compose，然后在项目根目录执行：
