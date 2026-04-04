@@ -10,7 +10,7 @@ import flet as ft
 
 from .utils import with_opacity
 
-from .components import get_dark_theme, get_light_theme
+from .components import get_dark_theme, get_light_theme, icons
 from .pages.dashboard import DashboardPage
 from .pages.accounts import AccountsPage
 from .pages.welcome import WelcomePage
@@ -66,58 +66,58 @@ class TiebaMechaApp:
             destinations=[
                 # --- 📊 监控中心 ---
                 ft.NavigationRailDestination(
-                    icon=ft.icons.RADAR,
-                    selected_icon=ft.icons.RADAR,
+                    icon=icons.RADAR,
+                    selected_icon=icons.RADAR,
                     label="指挥中心",
                 ),
                 # --- 👤 账号管理 ---
                 ft.NavigationRailDestination(
-                    icon=ft.icons.ACCOUNT_CIRCLE_OUTLINED,
-                    selected_icon=ft.icons.ACCOUNT_CIRCLE,
+                    icon=icons.ACCOUNT_CIRCLE_OUTLINED,
+                    selected_icon=icons.ACCOUNT_CIRCLE,
                     label="账号列表",
                 ),
                 ft.NavigationRailDestination(
-                    icon=ft.icons.VPN_LOCK_OUTLINED,
-                    selected_icon=ft.icons.VPN_LOCK,
+                    icon=icons.VPN_LOCK_OUTLINED,
+                    selected_icon=icons.VPN_LOCK,
                     label="代理池",
                 ),
 
                 # --- 📝 内容管理 ---
                 ft.NavigationRailDestination(
-                    icon=ft.icons.BOLT_OUTLINED,
-                    selected_icon=ft.icons.BOLT,
+                    icon=icons.BOLT_OUTLINED,
+                    selected_icon=icons.BOLT,
                     label="全域签到",
                 ),
                 ft.NavigationRailDestination(
-                    icon=ft.icons.FORUM_OUTLINED,
-                    selected_icon=ft.icons.FORUM,
+                    icon=icons.FORUM_OUTLINED,
+                    selected_icon=icons.FORUM,
                     label="帖子管理",
                 ),
                 ft.NavigationRailDestination(
-                    icon=ft.icons.TRAVEL_EXPLORE_OUTLINED,
-                    selected_icon=ft.icons.TRAVEL_EXPLORE,
+                    icon=icons.TRAVEL_EXPLORE_OUTLINED,
+                    selected_icon=icons.TRAVEL_EXPLORE,
                     label="数据爬取",
                 ),
                 # --- 🤖 自动化 ---
                 ft.NavigationRailDestination(
-                    icon=ft.icons.SHIELD_OUTLINED,
-                    selected_icon=ft.icons.SHIELD,
+                    icon=icons.SHIELD_OUTLINED,
+                    selected_icon=icons.SHIELD,
                     label="自动化规则",
                 ),
                 ft.NavigationRailDestination(
-                    icon=ft.icons.SEND_ROUNDED,
-                    selected_icon=ft.icons.SEND_ROUNDED,
+                    icon=icons.SEND_ROUNDED,
+                    selected_icon=icons.SEND_ROUNDED,
                     label="批量发帖",
                 ),
                 # --- ⚙️ 系统 ---
                 ft.NavigationRailDestination(
-                    icon=ft.icons.EXTENSION_OUTLINED,
-                    selected_icon=ft.icons.EXTENSION,
+                    icon=icons.EXTENSION_OUTLINED,
+                    selected_icon=icons.EXTENSION,
                     label="插件中心",
                 ),
                 ft.NavigationRailDestination(
-                    icon=ft.icons.SETTINGS_OUTLINED,
-                    selected_icon=ft.icons.SETTINGS,
+                    icon=icons.SETTINGS_OUTLINED,
+                    selected_icon=icons.SETTINGS,
                     label="全局设置",
                 ),
             ],

@@ -16,7 +16,13 @@ from ...core.sign import get_sign_stats
 from ...core.logger import get_log_queue
 from ..components.icons import (
     ACCOUNT_CIRCLE, VPN_LOCK, FORUM, SETTINGS, 
-    EDIT_NOTE_ROUNDED, OPEN_IN_NEW, AUTO_AWESOME
+    EDIT_NOTE_ROUNDED, OPEN_IN_NEW, AUTO_AWESOME,
+    RADAR, CHECK_CIRCLE_ROUNDED, SYNC_PROBLEM_ROUNDED,
+    AUTO_AWESOME_MOTION_ROUNDED, SCHEDULE_ROUNDED,
+    TERMINAL_ROUNDED, SIGNAL_CELLULAR_ALT, NETWORK_CHECK_ROUNDED,
+    GROUP, FLASH_ON_ROUNDED, POWER_SETTINGS_NEW_ROUNDED,
+    VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, MEMORY_ROUNDED,
+    WARNING_AMBER_ROUNDED
 )
 
 
@@ -113,20 +119,8 @@ class DashboardPage:
             self.sys_hud.left_value = str(self._sys_stats["accounts"])
             self.sys_hud.right_value = str(self._sys_stats["pending_batch"])
             
-        if hasattr(self, "forum_list"):
-            self.forum_list.items = [
-                {
-                    "title": f.fname,
-                    "subtitle": f"连续签到 {f.sign_count} 天",
-                    "icon": ft.icons.VERIFIED_ROUNDED if f.is_sign_today else ft.icons.RADIO_BUTTON_UNCHECKED,
-                }
-                for f in self._recent_forums
-            ]
-        
-        # 更新 AI 状态横幅
-        if hasattr(self, "ai_status_icon"):
             ai_configured = bool(self._ai_api_key_set)
-            self.ai_status_icon.name = ft.icons.MEMORY_ROUNDED if ai_configured else ft.icons.WARNING_AMBER_ROUNDED
+            self.ai_status_icon.name = MEMORY_ROUNDED if ai_configured else WARNING_AMBER_ROUNDED
             self.ai_status_icon.color = "#4CAF50" if ai_configured else "#FF6B35"
             self.ai_status_text_val.value = "ONLINE · API Key 已配置" if ai_configured else "OFFLINE · 请前往设置配置 API Key"
             self.ai_status_text_val.color = "#4CAF50" if ai_configured else "#FF6B35"
@@ -134,6 +128,16 @@ class DashboardPage:
             self.ai_banner_outer.bgcolor = with_opacity(0.05, "#4CAF50" if ai_configured else "#FF6B35")
             self.ai_banner_outer.border = ft.border.all(1, with_opacity(0.2, "#4CAF50" if ai_configured else "#FF6B35"))
             self.ai_nav_btn.visible = not ai_configured
+            
+        if hasattr(self, "forum_list"):
+            self.forum_list.items = [
+                {
+                    "title": f.fname,
+                    "subtitle": f"连续签到 {f.sign_count} 天",
+                    "icon": VERIFIED_ROUNDED if f.is_sign_today else RADIO_BUTTON_UNCHECKED,
+                }
+                for f in self._recent_forums
+            ]
             
         self.page.update()
 
@@ -149,7 +153,7 @@ class DashboardPage:
         header = ft.Row(
             controls=[
                 ft.Container(
-                    content=ft.Icon(ft.icons.TERMINAL_ROUNDED, color="primary", size=28),
+                    content=ft.Icon(TERMINAL_ROUNDED, color="primary", size=28),
                     padding=10,
                     bgcolor=with_opacity(0.1, "primary"),
                     border_radius=10,
@@ -163,7 +167,7 @@ class DashboardPage:
                 ),
                 ft.Container(expand=True),
                 ft.Row([
-                    ft.Icon(ft.icons.SIGNAL_CELLULAR_ALT, size=16, color="primary"),
+                    ft.Icon(SIGNAL_CELLULAR_ALT, size=16, color="primary"),
                     ft.Text("ONLINE", size=11, weight=ft.FontWeight.BOLD, color="primary"),
                 ], spacing=5),
             ],
@@ -174,19 +178,19 @@ class DashboardPage:
         self.hud = DualHUD(
             left_title="SUCCESS / 签到成功",
             left_value=str(self._stats["success"]),
-            left_icon=ft.icons.CHECK_CIRCLE_ROUNDED,
+            left_icon=CHECK_CIRCLE_ROUNDED,
             right_title="FAILED / 签到失败",
             right_value=str(self._stats.get("failure", 0)),
-            right_icon=ft.icons.SYNC_PROBLEM_ROUNDED,
+            right_icon=SYNC_PROBLEM_ROUNDED,
         )
         
         self.sys_hud = DualHUD(
             left_title="UNITS / 账号矩阵",
             left_value=str(self._sys_stats["accounts"]),
-            left_icon=ft.icons.AUTO_AWESOME_MOTION_ROUNDED,
+            left_icon=AUTO_AWESOME_MOTION_ROUNDED,
             right_title="JOBS / 待执行批量",
             right_value=str(self._sys_stats["pending_batch"]),
-            right_icon=ft.icons.SCHEDULE_ROUNDED,
+            right_icon=SCHEDULE_ROUNDED,
         )
 
         hud_section = ft.Row([
@@ -198,7 +202,7 @@ class DashboardPage:
         ai_configured = bool(self._ai_api_key_set)
         ai_status_color = "#4CAF50" if ai_configured else "#FF6B35"
         ai_status_text = "ONLINE · API Key 已配置" if ai_configured else "OFFLINE · 请前往设置配置 API Key"
-        ai_status_icon_name = ft.icons.MEMORY_ROUNDED if ai_configured else ft.icons.WARNING_AMBER_ROUNDED
+        ai_status_icon_name = MEMORY_ROUNDED if ai_configured else WARNING_AMBER_ROUNDED
 
         self.ai_status_icon = ft.Icon(ai_status_icon_name, color=ai_status_color, size=18)
         self.ai_status_text_val = ft.Text(ai_status_text, size=12, weight=ft.FontWeight.BOLD, color=ai_status_color)
@@ -242,14 +246,14 @@ class DashboardPage:
             tiles=[
                 {
                     "title": "账号列表",
-                    "icon": ft.icons.GROUP,
+                    "icon": GROUP,
                     "subtitle": "MULTI-ACCOUNT",
                     "tooltip": "管理矩阵账号资产，配置凭证与会话属性。",
                     "on_click": lambda e: self._navigate("accounts"),
                 },
                 {
                     "title": "全域签到",
-                    "icon": ft.icons.FLASH_ON_ROUNDED,
+                    "icon": FLASH_ON_ROUNDED,
                     "subtitle": "GLOBAL SIGN",
                     "tooltip": "执行全贴吧自动化签到，维持账号稳健度。",
                     "on_click": lambda e: self._navigate("sign"),
@@ -263,7 +267,7 @@ class DashboardPage:
                 },
                 {
                     "title": "数据爬取",
-                    "icon": ft.icons.RADAR,
+                    "icon": RADAR,
                     "subtitle": "DATA PROBE",
                     "tooltip": "采集目标贴吧数据，探测竞品或提取目标用户。",
                     "on_click": lambda e: self._navigate("crawl"),
@@ -274,7 +278,7 @@ class DashboardPage:
         # --- 中央控制按钮 ---
         self.core_btn = CoreButtonWithLabel(
             label="开始同步全域签到",
-            icon=ft.icons.POWER_SETTINGS_NEW_ROUNDED,
+            icon=POWER_SETTINGS_NEW_ROUNDED,
             on_click=lambda e: self._navigate("sign"),
             size=100,
         )
@@ -285,7 +289,7 @@ class DashboardPage:
                 {
                     "title": f.fname,
                     "subtitle": f"连续签到 {f.sign_count} 天",
-                    "icon": ft.icons.VERIFIED_ROUNDED if f.is_sign_today else ft.icons.RADIO_BUTTON_UNCHECKED,
+                    "icon": VERIFIED_ROUNDED if f.is_sign_today else RADIO_BUTTON_UNCHECKED,
                 }
                 for f in self._recent_forums
             ],
@@ -306,7 +310,7 @@ class DashboardPage:
                     
                     # 第 1.5 层：关键状态条
                     ft.Row([
-                        ft.Icon(ft.icons.NETWORK_CHECK_ROUNDED, size=14, color="secondary"),
+                        ft.Icon(NETWORK_CHECK_ROUNDED, size=14, color="secondary"),
                         ft.Text(f"当前活跃代理节点: {self._sys_stats['active_proxies']} UNIT(S)", size=12, weight=ft.FontWeight.W_500),
                         ft.Container(expand=True),
                         ft.Text("SYSTEM CLOCK: ACTIVE", size=10, font_family="Consolas"),
