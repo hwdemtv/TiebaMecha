@@ -91,6 +91,33 @@
 
 > ⚠️ **注意**：丢失 `data/` 或 `.env` 将导致所有账号数据和加密凭证无法恢复。
 
+**🔧 .env 文件配置说明：**
+
+首次运行需要配置加密密钥，编辑 `.env` 文件，填入以下内容：
+
+```bash
+# 必须修改：加密密钥（各 64 位十六进制字符）
+TIEBA_MECHA_SALT=your_salt_here_64_hex_chars
+TIEBA_MECHA_SECRET_KEY=your_secret_key_here_64_hex_chars
+```
+
+**生成密钥方法：**
+
+运行 `首次运行配置.bat` 会自动生成，或手动执行：
+
+```python
+# Python 生成
+import secrets
+print(f"TIEBA_MECHA_SALT={secrets.token_hex(32)}")
+print(f"TIEBA_MECHA_SECRET_KEY={secrets.token_hex(32)}")
+```
+
+生成的密钥示例：
+```bash
+TIEBA_MECHA_SALT=a1b2c3d4e5f6...（共64个字符）
+TIEBA_MECHA_SECRET_KEY=1a2b3c4d5e6f...（共64个字符）
+```
+
 ### 方式二：Docker 部署（推荐服务器/挂机用户）
 
 确保已安装 Docker 和 Docker Compose，然后在项目根目录执行：
