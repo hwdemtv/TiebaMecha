@@ -538,7 +538,11 @@ def run_app(port: int = 9006):
         db = await get_db()
         await app.initialize(db)
 
-    ft.run(target=main, port=port, view=ft.AppView.WEB_BROWSER)
+    # 兼容不同 Flet 版本：优先使用 ft.run()，否则回退到 ft.app()
+    if hasattr(ft, 'run'):
+        ft.run(target=main, port=port, view=ft.AppView.WEB_BROWSER)
+    else:
+        ft.app(target=main, port=port, view=ft.AppView.WEB_BROWSER)
 
 
 if __name__ == "__main__":
