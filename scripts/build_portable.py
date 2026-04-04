@@ -63,16 +63,80 @@ def build_portable():
         capture_output=True
     )
 
+    # 创建加固型启动入口 launcher.py
+    print(f"[6.1/6] 创建加固型启动入口 launcher.py...")
+    launcher_py = portable_dir / "launcher.py"
+    launcher_py.write_text("""import os
+import sys
+import logging
+
+# 强制环境编码为 UTF-8，防止 Windows 处理中文日志崩溃
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["PYTHONUTF8"] = "1"
+
+# Uvicorn 日志级别补丁 (修复 Flet 传参 'warn' 导致的 KeyError)
+try:
+    import uvicorn.config as _uvc
+    _orig_configure_logging = _uvc.Config.configure_logging
+    def _patched_configure_logging(self):
+        if getattr(self, "log_level", None) == "warn":
+            self.log_level = "warning"
+        return _orig_configure_logging(self)
+    _uvc.Config.configure_logging = _patched_configure_logging
+except (ImportError, AttributeError):
+    pass
+
+# 恢复标准日志级别名称以便 Flet/Uvicorn 兼容
+logging.addLevelName(logging.WARNING, "WARNING")
+
+# 确保能加载当前目录下的 tieba_mecha 包
+sys.path.insert(0, os.getcwd())
+
+import flet as ft
+from tieba_mecha.web.app import TiebaMechaApp, get_db
+
+async def main(page: ft.Page):
+    \"\"\"应用主函数\"\"\"
+    app = TiebaMechaApp(page)
+    db = await get_db()
+    await app.initialize(db)
+
+if __name__ == "__main__":
+    port = 9006
+    print("========================================")
+    print("   TiebaMecha 启动中...")
+    print("========================================")
+    print(f"访问地址: http://localhost:{port}")
+    
+    try:
+        ft.app(
+            target=main,
+            port=port,
+            view=ft.AppView.WEB_BROWSER,
+        )
+    except Exception as e:
+        print(f"启动失败: {e}")
+        import traceback
+        traceback.print_exc()
+        input("按任意键退出...")
+""", encoding="utf-8")
+
     # 创建启动脚本
-    print(f"[6/6] 创建启动脚本...")
+    print(f"[6.2/6] 创建启动脚本...")
 
     # Windows 启动脚本
     start_bat = portable_dir / "启动Web界面.bat"
     start_bat.write_text(f"""@echo off
+title TiebaMecha - Launching
 cd /d "%~dp0"
+echo 正在进入虚拟环境...
 call _python\\Scripts\\activate.bat
-python -m tieba_mecha.web.app
-pause
+echo 正在启动主程序，请稍候...
+python launcher.py
+if %ERRORLEVEL% neq 0 (
+    echo 程序异常退出，请检查上述错误信息。
+    pause
+)
 """, encoding="utf-8")
 
     # 首次运行配置脚本

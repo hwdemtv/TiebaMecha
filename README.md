@@ -385,7 +385,7 @@ from tieba_mecha.core.plugin_loader import PluginBase
 class MyPlugin(PluginBase):
     name = "我的插件"
     description = "插件描述"
-    version = "1.0.0"
+    version = "1.1.0"
     author = "Your Name"
 
     async def on_load(self):
