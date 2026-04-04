@@ -1428,7 +1428,7 @@ class BatchPostPage:
         self.interval_hours.visible = e.control.value
         self.page.update()
 
-    async def _on_file_result(self, e: ft.FilePickerResultEvent):
+    async def _on_file_result(self, e):
         if not e.files: return
         file_path = e.files[0].path
         pairs = []
