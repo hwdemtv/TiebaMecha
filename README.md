@@ -118,6 +118,16 @@ TIEBA_MECHA_SALT=a1b2c3d4e5f6...（共64个字符）
 TIEBA_MECHA_SECRET_KEY=1a2b3c4d5e6f...（共64个字符）
 ```
 
+**编辑 .env 文件方法：**
+
+| 方式 | 操作步骤 |
+|------|----------|
+| **记事本** | 右键 `.env` → 打开方式 → 记事本 |
+| **VS Code** | 右键 `.env` → 通过 Code 打开 |
+| **命令行** | 在项目目录执行 `notepad .env` |
+
+编辑完成后保存文件即可。
+
 ### 方式二：Docker 部署（推荐服务器/挂机用户）
 
 确保已安装 Docker 和 Docker Compose，然后在项目根目录执行：
