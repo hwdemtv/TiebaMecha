@@ -6,6 +6,10 @@ from typing import List, Optional
 
 from ..components import create_gradient_button
 from ..utils import with_opacity
+from ..components.icons import (
+    ARROW_BACK_IOS_NEW, RULE_ROUNDED, NO_ENCRYPTION_ROUNDED,
+    TERMINAL, KEYBOARD, DELETE_OUTLINE, CHECK
+)
 
 
 class RulesPage:
@@ -34,7 +38,7 @@ class RulesPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -54,7 +58,7 @@ class RulesPage:
                 ft.Container(expand=True),
                 create_gradient_button(
                     text="添加新规则",
-                    icon=ft.icons.RULE_ROUNDED,
+                    icon=RULE_ROUNDED,
                     on_click=self._show_add_dialog,
                 ),
             ],
@@ -93,7 +97,7 @@ class RulesPage:
                 ft.Container(
                     content=ft.Column(
                         controls=[
-                            ft.Icon(ft.icons.NO_ENCRYPTION_ROUNDED, size=50, color="onSurfaceVariant"),
+                            ft.Icon(NO_ENCRYPTION_ROUNDED, size=50, color="onSurfaceVariant"),
                             ft.Text("暂无自动化规则", color="onSurfaceVariant"),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -113,7 +117,7 @@ class RulesPage:
                         # 类型图标
                         ft.Container(
                             content=ft.Icon(
-                                ft.icons.TERMINAL if r.rule_type == "regex" else ft.icons.KEYBOARD,
+                                TERMINAL if r.rule_type == "regex" else KEYBOARD,
                                 color="primary" if is_active else "onSurfaceVariant",
                                 size=24,
                             ),
@@ -145,7 +149,7 @@ class RulesPage:
                         ),
                         # 删除按钮
                         ft.IconButton(
-                            icon=ft.icons.DELETE_OUTLINE,
+                            icon=DELETE_OUTLINE,
                             icon_color="error",
                             on_click=lambda e, rid=r.id: self.page.run_task(self._delete_rule, rid),
                         ),
@@ -189,14 +193,14 @@ class RulesPage:
                 self._show_snackbar(f"已添加 {len(fnames)} 条自动化规则", "success")
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.RULE_ROUNDED, color="primary"), ft.Text("新建防御规则")]),
+            title=ft.Row([ft.Icon(RULE_ROUNDED, color="primary"), ft.Text("新建防御规则")]),
             content=ft.Column([
                 ft.Text("配置自动化执行脚本:", size=12, color="onSurfaceVariant"),
                 fname_f, rule_type_f, pattern_f, action_f
             ], tight=True, spacing=15, width=450),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.close(dialog)),
-                ft.FilledButton("创建规则", icon=ft.icons.CHECK, on_click=on_submit),
+                ft.FilledButton("创建规则", icon=CHECK, on_click=on_submit),
             ],
         )
         self.page.open(dialog)

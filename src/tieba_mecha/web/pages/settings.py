@@ -9,6 +9,12 @@ from ..utils import with_opacity
 from ...core.ai_optimizer import AIOptimizer
 from ...core.link_manager import SmartLinkConnector
 from ...core.auth import get_auth_manager, AuthStatus
+from ..components.icons import (
+    GPP_GOOD_ROUNDED, ARROW_BACK_IOS_NEW, SAVE_ROUNDED,
+    VPN_KEY_ROUNDED, MEMORY_ROUNDED, NETWORK_CHECK,
+    LINK_ROUNDED, TIMER_OUTLINED, AUTO_AWESOME,
+    OPEN_IN_NEW, WIFI_TETHERING_ROUNDED, LOGIN_ROUNDED
+)
 
 
 class SettingsPage:
@@ -148,7 +154,7 @@ class SettingsPage:
         self.hwid_field = ft.Text("HWID: 未识别", size=10, color="onSurfaceVariant", weight=ft.FontWeight.W_300)
         self.verify_auth_btn = ft.FilledTonalButton(
             "立即验证授权",
-            icon=ft.icons.GPP_GOOD_ROUNDED,
+            icon=GPP_GOOD_ROUNDED,
             on_click=self._verify_license_online,
         )
 
@@ -157,7 +163,7 @@ class SettingsPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -181,11 +187,11 @@ class SettingsPage:
         # 快速跳转导航栏
         nav_bar = ft.Container(
             content=ft.Row([
-                ft.TextButton("授权", icon=ft.icons.VPN_KEY_ROUNDED, on_click=lambda e: self._scroll_to("license")),
-                ft.TextButton("AI", icon=ft.icons.MEMORY_ROUNDED, on_click=lambda e: self._scroll_to("ai")),
-                ft.TextButton("网络", icon=ft.icons.NETWORK_CHECK, on_click=lambda e: self._scroll_to("network")),
-                ft.TextButton("短链", icon=ft.icons.LINK_ROUNDED, on_click=lambda e: self._scroll_to("link")),
-                ft.TextButton("自动化", icon=ft.icons.TIMER_OUTLINED, on_click=lambda e: self._scroll_to("auto")),
+                ft.TextButton("授权", icon=VPN_KEY_ROUNDED, on_click=lambda e: self._scroll_to("license")),
+                ft.TextButton("AI", icon=MEMORY_ROUNDED, on_click=lambda e: self._scroll_to("ai")),
+                ft.TextButton("网络", icon=NETWORK_CHECK, on_click=lambda e: self._scroll_to("network")),
+                ft.TextButton("短链", icon=LINK_ROUNDED, on_click=lambda e: self._scroll_to("link")),
+                ft.TextButton("自动化", icon=TIMER_OUTLINED, on_click=lambda e: self._scroll_to("auto")),
             ], spacing=5, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=with_opacity(0.05, "primary"),
             border_radius=8,
@@ -196,7 +202,7 @@ class SettingsPage:
         self.license_section = ft.Container(
             key="license",
             content=ft.Column([
-                self._create_section_title("软件授权 / LICENSING", ft.icons.VPN_KEY_ROUNDED),
+                self._create_section_title("软件授权 / LICENSING", VPN_KEY_ROUNDED),
                 ft.Container(
                     content=ft.Column([
                         ft.Row([
@@ -222,20 +228,20 @@ class SettingsPage:
         self.ai_section = ft.Container(
             key="ai",
             content=ft.Column([
-                self._create_section_title("智谱神经网络 / AI CORE", ft.icons.MEMORY_ROUNDED),
+                self._create_section_title("智谱神经网络 / AI CORE", MEMORY_ROUNDED),
                 ft.Container(
                     content=ft.Column([
                         # 智谱 AI 注册引导横幅
                         ft.Container(
                             content=ft.Row([
-                                ft.Icon(ft.icons.AUTO_AWESOME, color="#FFD700", size=20),
+                                ft.Icon(AUTO_AWESOME, color="#FFD700", size=20),
                                 ft.Column([
                                     ft.Text("使用智谱 GLM-4-Flash 模型（免费额度充足）", size=13, weight=ft.FontWeight.BOLD, color="#FFD700"),
                                     ft.Text("点击右侧链接注册，复制 API Key 后粘贴到下方字段", size=11, color="#E0E0E0"),
                                 ], spacing=2, expand=True),
                                 ft.ElevatedButton(
                                     "立即注册智谱 AI →",
-                                    icon=ft.icons.OPEN_IN_NEW,
+                                    icon=OPEN_IN_NEW,
                                     on_click=lambda _: self.page.launch_url("https://www.bigmodel.cn/invite?icode=SQx7axFjnOGhwGsnmgUpHGczbXFgPRGIalpycrEwJ28%3D"),
                                     style=ft.ButtonStyle(
                                         color="#1A1A2E",
@@ -254,7 +260,7 @@ class SettingsPage:
                             ft.Container(expand=True),
                             ft.FilledTonalButton(
                                 "测试 AI 连通性",
-                                icon=ft.icons.WIFI_TETHERING_ROUNDED,
+                                icon=WIFI_TETHERING_ROUNDED,
                                 on_click=self._test_ai_connection,
                             ),
                         ], spacing=15),
@@ -268,7 +274,7 @@ class SettingsPage:
         self.network_section = ft.Container(
             key="network",
             content=ft.Column([
-                self._create_section_title("网络容灾 / CONNECTIVITY", ft.icons.NETWORK_CHECK),
+                self._create_section_title("网络容灾 / CONNECTIVITY", NETWORK_CHECK),
                 ft.Container(
                     content=ft.Column([
                         self.proxy_fallback_switch,
@@ -281,7 +287,7 @@ class SettingsPage:
         self.link_section = ft.Container(
             key="link",
             content=ft.Column([
-                self._create_section_title("短链系统 API 模式 / SMART LINK API", ft.icons.LINK_ROUNDED),
+                self._create_section_title("短链系统 API 模式 / SMART LINK API", LINK_ROUNDED),
                 ft.Container(
                     content=ft.Column([
                         ft.Text("通过 REST API (https://s.hubinwei.top) 与智链管理项目联动。", size=12, color="onSurfaceVariant"),
@@ -290,7 +296,7 @@ class SettingsPage:
                             self.slm_api_key_field,
                             ft.FilledTonalButton(
                                 "测试 API 连通性",
-                                icon=ft.icons.LOGIN_ROUNDED,
+                                icon=LOGIN_ROUNDED,
                                 on_click=self._test_slm_connection,
                             ),
                         ], spacing=15),
@@ -304,7 +310,7 @@ class SettingsPage:
         self.auto_section = ft.Container(
             key="auto",
             content=ft.Column([
-                self._create_section_title("自动化与行为模拟 / AUTO & BEHAVIOR", ft.icons.TIMER_OUTLINED),
+                self._create_section_title("自动化与行为模拟 / AUTO & BEHAVIOR", TIMER_OUTLINED),
                 ft.Container(
                     content=ft.Column([
                         ft.Row([
@@ -329,7 +335,7 @@ class SettingsPage:
         # 保存按钮
         save_btn = create_gradient_button(
             text="保存所有更改",
-            icon=ft.icons.SAVE_ROUNDED,
+            icon=SAVE_ROUNDED,
             on_click=self._do_save,
         )
 

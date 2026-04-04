@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import List, Optional
 
 from ..components import create_gradient_button, CoreButtonWithLabel
+from ..components.icons import (
+    GROUP_WORK, PERSON, SWAP_HORIZ, ARROW_BACK_IOS_NEW,
+    SYNC_ROUNDED, PLAY_ARROW_ROUNDED
+)
 from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
 
@@ -110,7 +114,7 @@ class SignPage:
             
         self._mode = "matrix" if self._mode == "single" else "single"
         self.mode_text.value = "矩阵全扫模式" if self._mode == "matrix" else "单账号模式"
-        self.mode_icon.name = ft.icons.GROUP_WORK if self._mode == "matrix" else "PERSON"
+        self.mode_icon.name = GROUP_WORK if self._mode == "matrix" else PERSON
         self.mode_icon.color = ft.colors.ERROR if self._mode == "matrix" else ft.colors.PRIMARY
         
         # 切换设置面板可见性
@@ -132,7 +136,7 @@ class SignPage:
             content=ft.Row([
                 self.mode_icon,
                 self.mode_text,
-                ft.Icon(ft.icons.SWAP_HORIZ, size=16, color="onSurfaceVariant")
+                ft.Icon(SWAP_HORIZ, size=16, color="onSurfaceVariant")
             ], spacing=5),
             on_click=self._toggle_mode,
             ink=True,  # 替代 cursor 作为可点击反馈
@@ -147,7 +151,7 @@ class SignPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -194,14 +198,14 @@ class SignPage:
         )
 
         # 操作区
-        self.sync_btn = create_gradient_button("同步贴吧", icon=ft.icons.SYNC, on_click=lambda e: self.page.run_task(self._do_sync, e))
+        self.sync_btn = create_gradient_button("同步贴吧", icon=SYNC_ROUNDED, on_click=lambda e: self.page.run_task(self._do_sync, e))
         
         self.main_action = ft.Container(
             content=ft.Column([
                 ft.Text("执行主控", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
                 CoreButtonWithLabel(
                     label="启动签到流",
-                    icon=ft.icons.PLAY_ARROW_ROUNDED,
+                    icon=PLAY_ARROW_ROUNDED,
                     on_click=lambda e: self.page.run_task(self._do_sign, e),
                     size=70,
                 ),
@@ -257,12 +261,12 @@ class SignPage:
             value="08:00", 
             text_size=12, 
             width=260,
-            prefix_icon=ft.icons.ACCESS_TIME_ROUNDED,
+            prefix_icon=ACCESS_TIME_ROUNDED,
             hint_text="HH:MM (如 08:30)",
         )
         self.daemon_save_btn = ft.FilledButton(
             "保存设置并热部署", 
-            icon=ft.icons.BOLT, 
+            icon=BOLT, 
             on_click=self._save_daemon_config, 
             width=260, 
             style=ft.ButtonStyle(

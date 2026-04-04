@@ -17,7 +17,7 @@ def get_project_root() -> Path:
 def build_portable():
     project_root = get_project_root()
     dist_dir = project_root / "dist"
-    portable_dir = dist_dir / "TiebaMecha"
+    portable_dir = dist_dir / "TiebaMecha_v110_Stable"
 
     # 清理旧的构建目录
     if portable_dir.exists():
@@ -127,6 +127,7 @@ if __name__ == "__main__":
     # Windows 启动脚本
     start_bat = portable_dir / "启动Web界面.bat"
     start_bat.write_text(f"""@echo off
+chcp 65001 >nul
 title TiebaMecha - Launching
 cd /d "%~dp0"
 echo 正在进入虚拟环境...
@@ -142,6 +143,8 @@ if %ERRORLEVEL% neq 0 (
     # 首次运行配置脚本
     setup_bat = portable_dir / "首次运行配置.bat"
     setup_bat.write_text(f"""@echo off
+chcp 65001 >nul
+title TiebaMecha - Initial Setup
 cd /d "%~dp0"
 echo ========================================
 echo   TiebaMecha 首次运行配置
