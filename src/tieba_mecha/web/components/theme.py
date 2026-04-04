@@ -15,8 +15,7 @@ def get_dark_theme() -> ft.Theme:
     """
     return ft.Theme(
         color_scheme=ft.ColorScheme(
-            # 核心色彩
-            background="#13161A",  # 极光暗蓝 - 适度提亮的防眩晕底色
+            # 核心色彩（background 已在 Flet 0.84+ 中废弃，原值 #13161A 通过 Page.bgcolor 设置）
             surface="#1C2028",  # 深渊钢板 - 与背景轻微拉开厚度感
             primary="#00BFA5",  # 玉石青 - 高明度荧光态的主操色
             secondary="#E8C361",  # 明亮金 - 告别暗沉的高价值回馈色
@@ -24,7 +23,7 @@ def get_dark_theme() -> ft.Theme:
             outline="#242A35",  # 幽蓝灰 - 区分块面，不喧宾夺主
             on_surface="#F2F5F9",  # 星尘白 - 极高明度的主文防模糊色
             on_surface_variant="#A3AAB8",  # 冷峻亮灰 - 专门解决眯眼看小字的痛点
-            surface_variant="#252B36",
+            surface_container_highest="#252B36",
             outline_variant="#2D3440",
             tertiary="#FF9800",  # 警告色
         ),
@@ -38,7 +37,7 @@ def get_light_theme() -> ft.Theme:
     """
     return ft.Theme(
         color_scheme=ft.ColorScheme(
-            background="#F5F7FA",  # 无菌灰白 - 过滤掉传统纯白的刺眼感
+            # background 已在 Flet 0.84+ 中废弃，原值 #F5F7FA 通过 Page.bgcolor 设置
             surface="#FFFFFF",  # 纯净白 - 让操作卡片像悬浮在纸面上
             primary="#009688",  # 沉稳青 - 稍降明度，防止在白底上糊成一片
             secondary="#C49B27",  # 古铜金 - 在高亮环境下依然能看清的深色金
@@ -46,7 +45,7 @@ def get_light_theme() -> ft.Theme:
             outline="#E5E8EB",  # 素雅灰 - 像细铅笔划过的微痕边框
             on_surface="#1A1A1A",  # 主文本
             on_surface_variant="#6B7280",  # 中性石灰 - 恰到好处的降噪副文
-            surface_variant="#F0F2F5",
+            surface_container_highest="#F0F2F5",
             outline_variant="#D1D5DB",
             tertiary="#F59E0B",  # 警告色
         ),
