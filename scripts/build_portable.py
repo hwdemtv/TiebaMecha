@@ -226,7 +226,8 @@ if not exist .env (
     # 打包 ZIP
     print(f"\n[打包] 创建 ZIP 压缩包...")
     zip_path = dist_dir / "TiebaMecha-portable"
-    shutil.make_archive(str(zip_path), "zip", dist_dir, "TiebaMecha")
+    # 使用正确的目录名称
+    shutil.make_archive(str(zip_path), "zip", dist_dir, portable_dir.name)
 
     print(f"\n[DONE] Build completed!")
     print(f"   Output: {zip_path}.zip")
