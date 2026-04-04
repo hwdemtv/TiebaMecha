@@ -36,14 +36,26 @@ async def main(page: ft.Page):
 
 def run_app(port: int = 9006):
     """启动 Flet 应用"""
-    # 兼容不同 Flet 版本：优先使用 ft.run()，否则回退到 ft.app()
-    try:
-        ft.run(
-            target=main,
-            port=port,
-            view=ft.AppView.WEB_BROWSER,
-        )
-    except AttributeError:
+    # 兼容不同 Flet 版本
+    # Flet >= 0.80.0: ft.run()
+    # Flet >= 0.85.0: ft.run(main, ...) - 第一个参数是位置参数
+    # Flet < 0.80.0: ft.app()
+    if hasattr(ft, 'run'):
+        try:
+            # 尝试新版本 API (第一个参数是位置参数)
+            ft.run(
+                main,
+                port=port,
+                view=ft.AppView.WEB_BROWSER,
+            )
+        except TypeError:
+            # 回退到关键字参数 (旧版本 ft.run)
+            ft.run(
+                target=main,
+                port=port,
+                view=ft.AppView.WEB_BROWSER,
+            )
+    else:
         # Flet < 0.80.0 使用 ft.app()
         ft.app(
             target=main,

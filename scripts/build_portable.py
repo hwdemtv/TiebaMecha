@@ -26,7 +26,8 @@ def build_portable():
         result = subprocess.run(
             [sys.executable, str(check_script)],
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
         )
         print(result.stdout)
         if result.returncode != 0:
@@ -136,11 +137,31 @@ if __name__ == "__main__":
     print(f"访问地址: http://localhost:{port}")
 
     try:
-        # 兼容不同 Flet 版本：优先使用 ft.run()，否则回退到 ft.app()
+        # 兼容不同 Flet 版本
+        # Flet >= 0.80.0: ft.run(target=main, ...)
+        # Flet >= 0.85.0: ft.run(main, ...)  # 参数名改变
+        # Flet < 0.80.0: ft.app(target=main, ...)
         if hasattr(ft, 'run'):
-            ft.run(
+            try:
+                # 尝试新版本 API (positional argument)
+                ft.run(
+                    main,
+                    port=port,
+                    view=ft.AppView.WEB_BROWSER,
+                )
+            except TypeError:
+                # 回退到关键字参数 (旧版本)
+                ft.run(
+                    target=main,
+                    port=port,
+                    view=ft.AppView.WEB_BROWSER,
+                )
+        else:
+            ft.app(
                 target=main,
                 port=port,
+                view=ft.AppView.WEB_BROWSER,
+            )
                 view=ft.AppView.WEB_BROWSER,
             )
         else:
