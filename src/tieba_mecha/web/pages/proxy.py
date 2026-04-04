@@ -7,6 +7,11 @@ from typing import List, Optional
 from ..components import create_gradient_button
 from ..utils import with_opacity
 from ...core.proxy import test_proxy
+from ..components.icons import (
+    ARROW_BACK_IOS_NEW, ADD_LINK_ROUNDED, SEARCH, SPEED, 
+    DELETE_SWEEP, LINK_OFF, VPN_LOCK, HTTP, SPEED_ROUNDED, 
+    EDIT_NOTE_ROUNDED, DELETE_OUTLINE
+)
 
 
 class ProxyPage:
@@ -37,7 +42,7 @@ class ProxyPage:
             controls=[
                 ft.Container(
                     content=ft.IconButton(
-                        icon=ft.icons.ARROW_BACK_IOS_NEW,
+                        icon=ARROW_BACK_IOS_NEW,
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
@@ -57,7 +62,7 @@ class ProxyPage:
                 ft.Container(expand=True),
                 create_gradient_button(
                     text="添加代理",
-                    icon=ft.icons.ADD_LINK_ROUNDED,
+                    icon=ADD_LINK_ROUNDED,
                     on_click=self._show_add_dialog,
                 ),
             ],
@@ -67,7 +72,7 @@ class ProxyPage:
         # 搜索栏
         search_field = ft.TextField(
             hint_text="搜索 IP、端口或协议...",
-            prefix_icon=ft.icons.SEARCH,
+            prefix_icon=SEARCH,
             border_radius=10,
             text_size=13,
             on_change=self._on_search_change,
@@ -78,8 +83,8 @@ class ProxyPage:
         )
 
         bulk_actions = ft.Row([
-            ft.TextButton("批量测速", icon=ft.icons.SPEED, on_click=self._bulk_test_proxies, visible=False),
-            ft.TextButton("批量删除", icon=ft.icons.DELETE_SWEEP, style=ft.ButtonStyle(color="error"), on_click=self._bulk_delete_proxies, visible=False),
+            ft.TextButton("批量测速", icon=SPEED, on_click=self._bulk_test_proxies, visible=False),
+            ft.TextButton("批量删除", icon=DELETE_SWEEP, style=ft.ButtonStyle(color="error"), on_click=self._bulk_delete_proxies, visible=False),
         ], spacing=10)
         self.bulk_bar = bulk_actions
 
@@ -116,7 +121,7 @@ class ProxyPage:
                 ft.Container(
                     content=ft.Column(
                         controls=[
-                            ft.Icon(ft.icons.LINK_OFF, size=50, color="onSurfaceVariant"),
+                            ft.Icon(LINK_OFF, size=50, color="onSurfaceVariant"),
                             ft.Text("暂无可用代理节点", color="onSurfaceVariant"),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -148,7 +153,7 @@ class ProxyPage:
                         # 协议图标
                         ft.Container(
                             content=ft.Icon(
-                                ft.icons.VPN_LOCK if p.protocol == "socks5" else ft.icons.HTTP,
+                                VPN_LOCK if p.protocol == "socks5" else HTTP,
                                 color="primary" if is_active else "onSurfaceVariant",
                                 size=24,
                             ),
@@ -179,19 +184,19 @@ class ProxyPage:
                         # 操作按钮
                         ft.Row([
                             ft.IconButton(
-                                icon=ft.icons.SPEED_ROUNDED,
+                                icon=SPEED_ROUNDED,
                                 icon_color="primary",
                                 tooltip="测试连通性",
                                 on_click=lambda e, pr=p: self.page.run_task(self._on_test_click, pr, e),
                             ),
                             ft.IconButton(
-                                icon=ft.icons.EDIT_NOTE_ROUNDED,
+                                icon=EDIT_NOTE_ROUNDED,
                                 icon_color="primary",
                                 tooltip="编辑节点信息",
                                 on_click=lambda e, pr=p: self._show_edit_dialog(pr),
                             ),
                             ft.IconButton(
-                                icon=ft.icons.DELETE_OUTLINE,
+                                icon=DELETE_OUTLINE,
                                 icon_color="error",
                                 tooltip="移除节点",
                                 on_click=lambda e, pid=p.id: self.page.run_task(self._delete_proxy, pid),
@@ -236,7 +241,7 @@ class ProxyPage:
                     self._show_snackbar(f"添加失败: {str(ex)}", "error")
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.icons.ADD_LINK_ROUNDED, color="primary"), ft.Text("部署新代理节点")]),
+            title=ft.Row([ft.Icon(ADD_LINK_ROUNDED, color="primary"), ft.Text("部署新代理节点")]),
             content=ft.Column([
                 ft.Text("输入远程代理服务器参数:", size=12, color="onSurfaceVariant"),
                 ft.Row([host_f, port_f], spacing=10),

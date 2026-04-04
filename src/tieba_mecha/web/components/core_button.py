@@ -3,6 +3,7 @@
 import flet as ft
 
 from .theme import GRADIENT_CYAN, create_core_button
+from .icons import PLAY_ARROW
 
 
 class CoreButton(ft.Container):
@@ -14,7 +15,7 @@ class CoreButton(ft.Container):
 
     def __init__(
         self,
-        icon: str = "play_arrow",
+        icon: str = PLAY_ARROW,
         on_click=None,
         size: float = 100,
         **kwargs,

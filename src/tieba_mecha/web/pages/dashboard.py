@@ -14,6 +14,10 @@ from ..components import (
 from ..utils import with_opacity
 from ...core.sign import get_sign_stats
 from ...core.logger import get_log_queue
+from ..components.icons import (
+    ACCOUNT_CIRCLE, VPN_LOCK, FORUM, SETTINGS, 
+    EDIT_NOTE_ROUNDED, OPEN_IN_NEW, AUTO_AWESOME
+)
 
 
 class DashboardPage:
@@ -220,7 +224,7 @@ class DashboardPage:
                 self.ai_nav_btn,
                 ft.TextButton(
                     "注册智谱 AI",
-                    icon=ft.icons.OPEN_IN_NEW,
+                    icon=ACCOUNT_CIRCLE,
                     style=ft.ButtonStyle(color="secondary"),
                     on_click=lambda _: self.page.launch_url("https://www.bigmodel.cn/invite?icode=SQx7axFjnOGhwGsnmgUpHGczbXFgPRGIalpycrEwJ28%3D"),
                 ),
@@ -252,7 +256,7 @@ class DashboardPage:
                 },
                 {
                     "title": "贴子管理",
-                    "icon": ft.icons.EDIT_NOTE,
+                    "icon": EDIT_NOTE_ROUNDED,
                     "subtitle": "CONTENT OPS",
                     "tooltip": "管理云端贴子、历史发布的引流软文等物料储备。",
                     "on_click": lambda e: self._navigate("posts"),
