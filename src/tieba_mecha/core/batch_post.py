@@ -1,5 +1,6 @@
 """批量发帖核心逻辑：反风控 + AI 变体 + 三种账号调度策略 + 多贴吧支持"""
 
+import asyncio
 import random
 import time
 from dataclasses import dataclass, field
@@ -280,10 +281,8 @@ class BatchPostManager:
                 await log_warn(f"账号 [{account_id}] 凭证获取失败，跳过")
                 continue
 
-            bduss, stoken, proxy_id, cuid, ua = creds
+            _, bduss, stoken, proxy_id, cuid, ua = creds
 
-            bduss, stoken, proxy_id, cuid, ua = creds
-            
             # 使用数据库物料实体
             current_material = pending_materials[i]
             title = current_material.title
@@ -425,8 +424,8 @@ class BatchPostManager:
         
         creds = await get_account_credentials(self.db, account_id)
         if not creds: return False
-            
-        bduss, stoken, proxy_id, cuid, ua = creds
+
+        _, bduss, stoken, proxy_id, cuid, ua = creds
         async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
             await client.get_self_info()
             if not getattr(client.account, 'tbs', None): return False

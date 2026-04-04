@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator
@@ -17,6 +18,11 @@ from .client_factory import create_client
 # 默认输出目录
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent.parent.parent.parent / "output"
 
+# 爬取配置
+MAX_RETRIES = 3  # 最大重试次数
+RETRY_DELAY = 2  # 重试延迟（秒）
+REQUEST_DELAY = 1  # 请求间隔（秒）
+
 
 @dataclass
 class CrawlProgress:
@@ -29,6 +35,7 @@ class CrawlProgress:
     total: int = 0
     status: str = "running"
     message: str = ""
+    retries: int = 0  # 当前重试次数
 
 
 @dataclass
@@ -48,6 +55,13 @@ class ThreadData:
     is_good: bool
     is_top: bool
     fname: str = ""
+
+    def to_material(self) -> tuple[str, str]:
+        """转换为物料格式 (title, content)"""
+        content = self.text
+        if self.title:
+            content = f"{self.title}\n\n{self.text}" if self.text else self.title
+        return (self.title or f"帖子_{self.tid}", content.strip())
 
 
 @dataclass
@@ -70,6 +84,7 @@ async def crawl_threads(
     fname: str,
     pages: int = 5,
     output_dir: Path | None = None,
+    retry_on_fail: bool = True,
 ) -> AsyncGenerator[CrawlProgress, None]:
     """
     爬取贴吧帖子
@@ -79,6 +94,7 @@ async def crawl_threads(
         fname: 贴吧名称
         pages: 爬取页数
         output_dir: 输出目录
+        retry_on_fail: 是否启用失败重试
 
     Yields:
         CrawlProgress: 爬取进度
@@ -88,7 +104,7 @@ async def crawl_threads(
         yield CrawlProgress(0, "threads", fname, status="failed", message="未找到账号凭证")
         return
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     # 创建任务记录
     account = await db.get_active_account()
@@ -102,59 +118,102 @@ async def crawl_threads(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     threads_data: list[ThreadData] = []
+    seen_tids: set[int] = set()  # 去重用
     total_expected = pages * 50  # 每页约50条
+    failed_pages: list[int] = []  # 记录失败页码
+    total_retries = 0
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for pn in range(1, pages + 1):
-            try:
-                result = await client.get_threads(fname, pn=pn, rn=50)
+            retries = 0
+            success = False
 
-                for thread in result:
-                    threads_data.append(
-                        ThreadData(
-                            tid=thread.tid,
-                            pid=thread.pid,
-                            title=thread.title,
-                            text=thread.text,
-                            author_id=thread.author_id,
-                            author_name=thread.user.user_name if thread.user else "",
-                            reply_num=thread.reply_num,
-                            agree=thread.agree,
-                            create_time=thread.create_time,
-                            last_time=thread.last_time,
-                            is_good=thread.is_good,
-                            is_top=thread.is_top,
-                            fname=fname,
+            while retries < MAX_RETRIES and not success:
+                try:
+                    result = await client.get_threads(fname, pn=pn, rn=50)
+                    page_count = 0
+
+                    for thread in result:
+                        # 基于tid去重
+                        if thread.tid in seen_tids:
+                            continue
+                        seen_tids.add(thread.tid)
+
+                        threads_data.append(
+                            ThreadData(
+                                tid=thread.tid,
+                                pid=thread.pid,
+                                title=thread.title,
+                                text=thread.text,
+                                author_id=thread.author_id,
+                                author_name=thread.user.user_name if thread.user else "",
+                                reply_num=thread.reply_num,
+                                agree=thread.agree,
+                                create_time=thread.create_time,
+                                last_time=thread.last_time,
+                                is_good=thread.is_good,
+                                is_top=thread.is_top,
+                                fname=fname,
+                            )
                         )
+                        page_count += 1
+
+                    success = True
+                    progress = CrawlProgress(
+                        task_id=task.id,
+                        task_type="threads",
+                        target=fname,
+                        current=len(threads_data),
+                        total=total_expected,
+                        status="running",
+                        message=f"第 {pn}/{pages} 页完成，本页 {page_count} 条",
+                        retries=total_retries,
                     )
 
-                progress = CrawlProgress(
-                    task_id=task.id,
-                    task_type="threads",
-                    target=fname,
-                    current=len(threads_data),
-                    total=total_expected,
-                    status="running",
-                )
+                    await db.update_crawl_task(task.id, total_count=len(threads_data))
+                    yield progress
 
-                await db.update_crawl_task(task.id, total_count=len(threads_data))
-                yield progress
+                    # 请求间隔，避免触发限制
+                    if pn < pages:
+                        await asyncio.sleep(REQUEST_DELAY)
 
-            except Exception as e:
-                yield CrawlProgress(
-                    task_id=task.id,
-                    task_type="threads",
-                    target=fname,
-                    current=len(threads_data),
-                    status="error",
-                    message=str(e),
-                )
+                except Exception as e:
+                    retries += 1
+                    total_retries += 1
+
+                    if retry_on_fail and retries < MAX_RETRIES:
+                        yield CrawlProgress(
+                            task_id=task.id,
+                            task_type="threads",
+                            target=fname,
+                            current=len(threads_data),
+                            status="retrying",
+                            message=f"第 {pn} 页失败，第 {retries} 次重试中... ({str(e)[:30]})",
+                            retries=retries,
+                        )
+                        await asyncio.sleep(RETRY_DELAY * retries)
+                    else:
+                        failed_pages.append(pn)
+                        yield CrawlProgress(
+                            task_id=task.id,
+                            task_type="threads",
+                            target=fname,
+                            current=len(threads_data),
+                            status="error",
+                            message=f"第 {pn} 页失败: {str(e)[:50]}",
+                            retries=retries,
+                        )
 
     # 保存结果
+    status = "completed" if not failed_pages else "partial"
+    status_msg = f"共获取 {len(threads_data)} 条帖子"
+    if failed_pages:
+        status_msg += f"，{len(failed_pages)} 页失败"
+
     output_file = output_dir / f"threads_{fname}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(
-            [t.__dict__ for t in threads_data],
+            [asdict(t) for t in threads_data],
             f,
             ensure_ascii=False,
             indent=2,
@@ -162,7 +221,7 @@ async def crawl_threads(
 
     await db.update_crawl_task(
         task.id,
-        status="completed",
+        status=status,
         result_path=str(output_file),
         total_count=len(threads_data),
     )
@@ -172,8 +231,9 @@ async def crawl_threads(
         task_type="threads",
         target=fname,
         current=len(threads_data),
-        status="completed",
-        message=f"已保存到 {output_file}",
+        status=status,
+        message=f"{status_msg}，已保存到 {output_file.name}",
+        retries=total_retries,
     )
 
 
@@ -200,7 +260,7 @@ async def crawl_user(
         yield CrawlProgress(0, "user", str(user_id), status="failed", message="未找到账号凭证")
         return
 
-    bduss, stoken, proxy_id, cuid, ua = creds
+    _, bduss, stoken, proxy_id, cuid, ua = creds
 
     account = await db.get_active_account()
     task = await db.add_crawl_task(
@@ -277,7 +337,7 @@ async def crawl_user(
     # 保存结果
     output_file = output_dir / f"user_{user_data.user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(user_data.__dict__, f, ensure_ascii=False, indent=2, default=str)
+        json.dump(asdict(user_data), f, ensure_ascii=False, indent=2, default=str)
 
     await db.update_crawl_task(
         task.id,
@@ -292,7 +352,7 @@ async def crawl_user(
         target=str(user_id),
         current=1 + len(user_data.posts),
         status="completed",
-        message=f"已保存到 {output_file}",
+        message=f"用户 {user_data.user_name}，发帖 {len(user_data.posts)} 条",
     )
 
 
@@ -311,3 +371,65 @@ async def get_crawl_history(db: Database, limit: int = 20) -> list[dict]:
         }
         for t in tasks
     ]
+
+
+async def import_threads_to_materials(db: Database, result_path: str) -> tuple[int, str]:
+    """
+    将爬取的帖子数据导入到物料库
+
+    Args:
+        db: 数据库实例
+        result_path: JSON结果文件路径
+
+    Returns:
+        (成功导入数量, 消息)
+    """
+    try:
+        path = Path(result_path)
+        if not path.exists():
+            return 0, f"文件不存在: {result_path}"
+
+        with open(path, "r", encoding="utf-8") as f:
+            threads_data = json.load(f)
+
+        if not threads_data:
+            return 0, "文件中没有数据"
+
+        # 转换为物料格式
+        pairs = []
+        for t in threads_data:
+            title = t.get("title", "") or f"帖子_{t.get('tid', 'unknown')}"
+            text = t.get("text", "")
+            # 组合标题和内容
+            content = f"{title}\n\n{text}" if text else title
+            pairs.append((title, content.strip()))
+
+        # 批量导入，自动去重
+        added = await db.add_materials_bulk(pairs)
+        return added, f"成功导入 {added} 条物料（跳过 {len(pairs) - added} 条重复）"
+
+    except json.JSONDecodeError:
+        return 0, "JSON 文件格式错误"
+    except Exception as e:
+        return 0, f"导入失败: {str(e)}"
+
+
+async def load_crawl_result(result_path: str) -> list[dict] | None:
+    """
+    加载爬取结果文件
+
+    Args:
+        result_path: JSON结果文件路径
+
+    Returns:
+        数据列表或None
+    """
+    try:
+        path = Path(result_path)
+        if not path.exists():
+            return None
+
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
