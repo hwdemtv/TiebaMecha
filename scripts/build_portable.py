@@ -138,38 +138,16 @@ if __name__ == "__main__":
 
     try:
         # 兼容不同 Flet 版本
-        # Flet >= 0.80.0: ft.run(target=main, ...)
-        # Flet >= 0.85.0: ft.run(main, ...)  # 参数名改变
-        # Flet < 0.80.0: ft.app(target=main, ...)
         if hasattr(ft, 'run'):
             try:
                 # 尝试新版本 API (positional argument)
-                ft.run(
-                    main,
-                    port=port,
-                    view=ft.AppView.WEB_BROWSER,
-                )
+                ft.run(main, port=port, view=ft.AppView.WEB_BROWSER)
             except TypeError:
                 # 回退到关键字参数 (旧版本)
-                ft.run(
-                    target=main,
-                    port=port,
-                    view=ft.AppView.WEB_BROWSER,
-                )
+                ft.run(target=main, port=port, view=ft.AppView.WEB_BROWSER)
         else:
-            ft.app(
-                target=main,
-                port=port,
-                view=ft.AppView.WEB_BROWSER,
-            )
-                view=ft.AppView.WEB_BROWSER,
-            )
-        else:
-            ft.app(
-                target=main,
-                port=port,
-                view=ft.AppView.WEB_BROWSER,
-            )
+            # Flet < 0.80.0 使用 ft.app()
+            ft.app(target=main, port=port, view=ft.AppView.WEB_BROWSER)
     except Exception as e:
         print(f"启动失败: {e}")
         import traceback
