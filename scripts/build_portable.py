@@ -19,6 +19,21 @@ def build_portable():
     dist_dir = project_root / "dist"
     portable_dir = dist_dir / "TiebaMecha_v110_Final"
 
+    # 运行兼容性检查
+    print(f"[0/6] 运行兼容性检查...")
+    check_script = project_root / "scripts" / "check_compatibility.py"
+    if check_script.exists():
+        result = subprocess.run(
+            [sys.executable, str(check_script)],
+            capture_output=True,
+            text=True
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print("⚠️ 兼容性检查发现问题，但仍继续打包...")
+    else:
+        print("  跳过兼容性检查（脚本不存在）")
+
     # 清理旧的构建目录
     if portable_dir.exists():
         print(f"[1/6] 清理旧构建目录...")
