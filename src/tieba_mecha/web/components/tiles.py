@@ -3,6 +3,7 @@
 import flet as ft
 
 from .theme import create_function_tile
+from .icons import APPS
 
 
 class FunctionTiles(ft.Container):
@@ -27,7 +28,7 @@ class FunctionTiles(ft.Container):
             self.controls.append(
                 create_function_tile(
                     title=tile.get("title", ""),
-                    icon=tile.get("icon", ft.icons.APPS),
+                    icon=tile.get("icon", APPS),
                     subtitle=tile.get("subtitle", ""),
                     tooltip=tile.get("tooltip", None),
                     on_click=tile.get("on_click"),
@@ -65,7 +66,7 @@ class TileGrid(ft.Container):
                 controls=[
                     create_function_tile(
                         title=t.get("title", ""),
-                        icon=t.get("icon", ft.icons.APPS),
+                        icon=t.get("icon", APPS),
                         subtitle=t.get("subtitle", ""),
                         tooltip=t.get("tooltip", None),
                         on_click=t.get("on_click"),

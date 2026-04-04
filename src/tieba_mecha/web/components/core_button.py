@@ -14,7 +14,7 @@ class CoreButton(ft.Container):
 
     def __init__(
         self,
-        icon: str = ft.icons.PLAY_ARROW,
+        icon: str = "play_arrow",
         on_click=None,
         size: float = 100,
         **kwargs,
@@ -44,7 +44,7 @@ class CoreButtonWithLabel(ft.Container):
     def __init__(
         self,
         label: str,
-        icon: str = ft.icons.PLAY_ARROW,
+        icon: str = PLAY_ARROW,
         on_click=None,
         size: float = 100,
         **kwargs,
