@@ -1,6 +1,7 @@
 """Theme configuration - Cyber-Mecha style"""
 
 import flet as ft
+from ..utils import with_opacity
 
 # ============================================================
 # 赛博机甲风格配色方案
@@ -88,11 +89,11 @@ def create_gradient_button(
         content=content,
         gradient=ft.LinearGradient(colors=colors),
         border_radius=12,
-        border=ft.border.all(1, ft.colors.with_opacity(0.12, "onSurface")),
+        border=ft.border.all(1, with_opacity(0.12, "onSurface")),
         shadow=ft.BoxShadow(
             spread_radius=1,
             blur_radius=20,
-            color=ft.colors.with_opacity(0.2, colors[0]),
+            color=with_opacity(0.2, colors[0]),
         ),
         padding=ft.padding.symmetric(horizontal=20, vertical=12),
         width=width,
@@ -151,7 +152,7 @@ def create_hud_panel(
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
         ),
-        bgcolor=ft.colors.with_opacity(0.05, "onSurface"),
+        bgcolor=with_opacity(0.05, "onSurface"),
         border_radius=border_radius,
         border=border,
         padding=15,
@@ -226,9 +227,9 @@ def create_stream_list_item(
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        bgcolor=ft.colors.with_opacity(0.05, "onSurface"),
+        bgcolor=with_opacity(0.05, "onSurface"),
         border_radius=8,
-        border=ft.border.all(1, ft.colors.with_opacity(0.1, "outline")),
+        border=ft.border.all(1, with_opacity(0.1, "outline")),
         padding=ft.padding.symmetric(horizontal=12, vertical=10),
         on_click=on_click,
     )
@@ -256,7 +257,7 @@ def create_core_button(
         shadow=ft.BoxShadow(
             spread_radius=3,
             blur_radius=30,
-            color=ft.colors.with_opacity(0.3, GRADIENT_CYAN[0]),
+            color=with_opacity(0.3, GRADIENT_CYAN[0]),
         ),
         ink=True,
         on_click=on_click,

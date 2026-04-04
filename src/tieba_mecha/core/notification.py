@@ -8,8 +8,36 @@ from enum import Enum
 from typing import Callable, Optional
 
 import aiohttp
+import flet as ft
 
 from ..db.crud import Database
+
+
+def _with_opacity(opacity: float, color: str) -> str:
+    """将颜色转换为带透明度的格式 (#AARRGGBB)"""
+    alpha = int(opacity * 255)
+    alpha_hex = f"{alpha:02X}"
+    color = color.strip()
+    if color.startswith("#"):
+        hex_color = color[1:]
+        if len(hex_color) == 6:
+            return f"#{alpha_hex}{hex_color}"
+        elif len(hex_color) == 8:
+            return f"#{alpha_hex}{hex_color[2:]}"
+        return color
+    # 颜色名称映射
+    color_map = {
+        "grey": "#9E9E9E",
+        "green": "#4CAF50",
+        "red": "#F44336",
+        "blue": "#2196F3",
+        "orange": "#FF9800",
+        "yellow": "#FFEB3B",
+        "white": "#FFFFFF",
+        "black": "#000000",
+    }
+    hex_color = color_map.get(color.lower(), "#9E9E9E")
+    return f"#{alpha_hex}{hex_color[1:]}"
 
 
 class NotificationType(Enum):
@@ -84,8 +112,8 @@ class NotificationManager:
         """设置数据库引用"""
         self.db = db
 
-    def set_license_config(self, license_key: str, device_id: str, server_url: str, product_id: str = "tieba_mecha"):
-        """设置许可证配置（用于获取远程通知）"""
+    def set_license_config(self, license_key: str = "", device_id: str = "", server_url: str = "", product_id: str = "tieba_mecha"):
+        """设置许可证配置（用于获取远程通知，参数可为空）"""
         self._license_config = {
             "license_key": license_key,
             "device_id": device_id,
@@ -167,7 +195,7 @@ class NotificationManager:
             "error": ft.icons.ERROR,
         }
 
-        bg_color = ft.colors.with_opacity(0.9, color_map.get(type, "grey"))
+        bg_color = _with_opacity(0.9, color_map.get(type, "grey"))
         icon = icon_map.get(type, ft.icons.NOTIFICATIONS)
 
         try:
@@ -186,49 +214,63 @@ class NotificationManager:
 
     async def fetch_remote_notifications(self) -> list[dict]:
         """
-        从 hw-license-center 服务获取远程通知
-
-        Returns:
-            远程通知列表
+        从授权中心获取远程通知（支持无授权模式）
         """
-        if not self._license_config:
-            return []
+        # 获取候选服务器列表
+        servers = []
+        custom_server = self._license_config.get("server_url", "")
+        if custom_server:
+            servers.extend([s.strip() for s in custom_server.split(",") if s.strip()])
+        
+        # 引入默认服务器作为兜底
+        from .auth import DEFAULT_LICENSE_SERVERS
+        for ds in DEFAULT_LICENSE_SERVERS:
+            if ds not in servers:
+                servers.append(ds)
 
-        if not self._license_config.get("license_key") or not self._license_config.get("server_url"):
-            return []
+        license_key = self._license_config.get("license_key", "")
+        device_id = self._license_config.get("device_id", "")
+        
+        # 如果没有 device_id，尝试获取本地 HWID
+        if not device_id:
+            from .auth import get_auth_manager
+            am = get_auth_manager()
+            device_id = await am.get_hwid()
 
-        try:
-            server_url = self._license_config["server_url"].rstrip("/")
-            payload = {
-                "license_key": self._license_config["license_key"],
-                "device_id": self._license_config["device_id"],
-                "product_id": self._license_config.get("product_id", "tieba_mecha"),
-                "mode": "silent",  # 静默模式，不触发设备绑定
-            }
+        # 添加浏览器风格请求头以通过 Cloudflare 边缘防护
+        cf_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        }
+        async with aiohttp.ClientSession(headers=cf_headers) as session:
+            for server in servers:
+                try:
+                    url = f"{server.rstrip('/')}/api/v1/auth/verify"
+                    payload = {
+                        "license_key": license_key,
+                        "device_id": device_id,
+                        "product_id": self._license_config.get("product_id", "tieba_mecha"),
+                        "mode": "silent",  # 静默模式
+                    }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{server_url}/api/v1/auth/verify",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status != 200:
-                        return []
+                    async with session.post(
+                        url,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
 
-                    data = await resp.json()
-                    if not data.get("success"):
-                        return []
-
-                    # 提取通知
-                    notification = data.get("notification")
-                    if notification:
-                        return [notification]
-
-                    return []
-
-        except Exception as e:
-            print(f"[NotificationManager] Failed to fetch remote notifications: {e}")
-            return []
+                        data = await resp.json()
+                        # 即使 success 为 False（如 key 无效），如果返回了广播内容亦可使用
+                        notification = data.get("notification")
+                        if notification:
+                            return [notification]
+                except Exception as e:
+                    # 某个节点失败，尝试下一个
+                    continue
+        
+        return []
 
     async def sync_remote_notifications(self):
         """
@@ -320,16 +362,64 @@ class NotificationManager:
         ]
 
     async def mark_read(self, notification_id: int) -> bool:
-        """标记为已读"""
+        """标记为已读并通知监听器"""
         if not self.db:
             return False
-        return await self.db.mark_notification_read(notification_id)
+        success = await self.db.mark_notification_read(notification_id)
+        if success:
+            await self._notify_listeners(None) # None 表示状态变更而非新消息
+        return success
 
     async def mark_all_read(self) -> int:
-        """全部标记已读"""
+        """全部标记已读并通知监听器"""
         if not self.db:
             return 0
-        return await self.db.mark_all_notifications_read()
+        count = await self.db.mark_all_notifications_read()
+        if count > 0:
+            await self._notify_listeners(None)
+        return count
+
+    async def delete_notification(self, notification_id: int) -> bool:
+        """删除通知并通知监听器"""
+        if not self.db:
+            return False
+        success = await self.db.delete_notification(notification_id)
+        if success:
+            await self._notify_listeners(None)
+        return success
+
+    async def clear_all_read(self) -> int:
+        """清除所有已读通知并通知监听器"""
+        if not self.db:
+            return 0
+        # 这里直接调用 DB 清除记录 (days=0 且已读)
+        # 注意：Database.clear_old_notifications 默认只清 30 天前的
+        # 我们这里定义一个清空所有已读的逻辑
+        from sqlalchemy import delete
+        from .auth import Database
+        from ..db.models import Notification
+        
+        async with self.db.async_session() as session:
+            result = await session.execute(
+                delete(Notification).where(Notification.is_read == True)
+            )
+            deleted_count = result.rowcount or 0
+            await session.commit()
+            
+        if deleted_count > 0:
+            await self._notify_listeners(None)
+        return deleted_count
+
+    async def _notify_listeners(self, notification=None):
+        """统一触发监听器回调"""
+        for listener in self._listeners:
+            try:
+                if asyncio.iscoroutinefunction(listener):
+                    await listener(notification)
+                else:
+                    listener(notification)
+            except Exception as e:
+                print(f"[NotificationManager] Listener error: {e}")
 
     async def get_unread_count(self) -> int:
         """获取未读数量"""

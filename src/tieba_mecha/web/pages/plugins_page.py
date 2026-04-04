@@ -5,6 +5,7 @@ import flet as ft
 from typing import List, Optional
 
 from ..components import create_gradient_button
+from ..utils import with_opacity
 from ...core.plugin_loader import get_plugin_manager
 
 
@@ -39,7 +40,7 @@ class PluginsPage:
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
                             color=ft.colors.PRIMARY,
-                            bgcolor={"": ft.colors.with_opacity(0.1, ft.colors.PRIMARY)},
+                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -73,7 +74,7 @@ class PluginsPage:
             content=ft.Column(
                 controls=[
                     header,
-                    ft.Divider(color=ft.colors.with_opacity(0.1, "primary"), height=20),
+                    ft.Divider(color=with_opacity(0.1, "primary"), height=20),
                     ft.Text("已加载的增强模块", size=14, weight=ft.FontWeight.W_500),
                     ft.Container(
                         content=self.plugins_list,
@@ -112,7 +113,7 @@ class PluginsPage:
                         ft.Container(
                             content=ft.Icon(ft.icons.EXTENSION, color="primary", size=24),
                             padding=10,
-                            bgcolor=ft.colors.with_opacity(0.05, "primary"),
+                            bgcolor=with_opacity(0.05, "primary"),
                             border_radius=8,
                         ),
                         # 插件信息
@@ -133,8 +134,8 @@ class PluginsPage:
                         ),
                     ],
                 ),
-                bgcolor=ft.colors.with_opacity(0.02, "onSurface"),
-                border=ft.border.all(1, ft.colors.with_opacity(0.05, "onSurface")),
+                bgcolor=with_opacity(0.02, "onSurface"),
+                border=ft.border.all(1, with_opacity(0.05, "onSurface")),
                 border_radius=10,
                 padding=10,
             )
@@ -164,4 +165,4 @@ class PluginsPage:
         color = "primary"
         if type == "error": color = "error"
         elif type == "success": color = ft.colors.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=ft.colors.with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))

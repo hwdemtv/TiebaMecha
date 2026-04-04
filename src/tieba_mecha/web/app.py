@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 import flet as ft
 
+from .utils import with_opacity
+
 from .components import get_dark_theme, get_light_theme
 from .pages.dashboard import DashboardPage
 from .pages.accounts import AccountsPage
@@ -60,7 +62,7 @@ class TiebaMechaApp:
             label_type=ft.NavigationRailLabelType.ALL,
             min_width=80,
             min_extended_width=160,
-            bgcolor=ft.colors.with_opacity(0.1, "surface"),
+            bgcolor=with_opacity(0.1, "surface"),
             destinations=[
                 # --- 📊 监控中心 ---
                 ft.NavigationRailDestination(
@@ -150,7 +152,7 @@ class TiebaMechaApp:
             ft.Row(
                 controls=[
                     self.nav_rail,
-                    ft.VerticalDivider(width=1, color=ft.colors.with_opacity(0.1, "onSurface")),
+                    ft.VerticalDivider(width=1, color=with_opacity(0.1, "onSurface")),
                     self.content_area,
                 ],
                 expand=True,
@@ -404,28 +406,36 @@ class TiebaMechaApp:
         if not nm:
             return
 
+        # 启动时立即尝试执行一次同步
+        try:
+            await self._perform_notification_sync(nm)
+        except Exception as e:
+            await log_error(f"程序启动初始通知同步异常: {str(e)}")
+
         while True:
             try:
-                # 每小时同步一次远程通知
+                # 每小时定期同步一次远程通知
                 await asyncio.sleep(3600)
-
-                # 加载许可证配置
-                license_key = await self.db.get_setting("license_key", "")
-                device_id = await self.db.get_setting("device_id", "")
-                server_url = await self.db.get_setting("license_server_url", "")
-
-                if license_key and server_url:
-                    nm.set_license_config(license_key, device_id, server_url)
-                    added = await nm.sync_remote_notifications()
-                    if added > 0:
-                        await log_info(f"同步远程通知: 新增 {added} 条")
-                        await self.notification_bell.refresh()
-
+                await self._perform_notification_sync(nm)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                await log_error(f"通知同步异常: {str(e)}")
+                await log_error(f"周期性通知同步异常: {str(e)}")
                 await asyncio.sleep(1800)
+
+    async def _perform_notification_sync(self, nm):
+        """执行具体的通知同步逻辑"""
+        # 加载许可证配置
+        license_key = await self.db.get_setting("license_key", "")
+        device_id = await self.db.get_setting("device_id", "")
+        server_url = await self.db.get_setting("license_server_url", "")
+
+        # 配置并触发同步
+        nm.set_license_config(license_key, device_id, server_url)
+        added = await nm.sync_remote_notifications()
+        if added > 0:
+            await log_info(f"同步远程通知: 新增 {added} 条")
+            await self.notification_bell.refresh()
 
     async def _update_checker(self):
         """更新检测后台任务 - 定期检查 GitHub Releases"""

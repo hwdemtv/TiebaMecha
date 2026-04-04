@@ -4,6 +4,7 @@ import flet as ft
 import asyncio
 import json
 from datetime import datetime, timedelta
+from ..utils import with_opacity
 from ...core.account import get_account_credentials
 from ...core.batch_post import BatchPostTask, BatchPostManager
 from ...core.link_manager import SmartLinkConnector
@@ -184,7 +185,7 @@ class BatchPostPage:
                                 ], spacing=5),
                                 ft.Container(
                                     content=self.forum_pool_column if self._native_forums else ft.Container(content=ft.Text("尚无任何贴吧被赋予原生保护权限\n请点击右上方按钮开启防线", color="onSurfaceVariant", text_align="center", size=11), alignment=ft.alignment.center, height=180),
-                                    height=180, border=ft.border.all(1, ft.colors.with_opacity(0.1, "green")),
+                                    height=180, border=ft.border.all(1, with_opacity(0.1, "green")),
                                     border_radius=8, padding=10,
                                 ),
                             ], tight=True, spacing=5),
@@ -205,7 +206,7 @@ class BatchPostPage:
                                 ], spacing=5),
                                 ft.Container(
                                     content=self.global_group_column,
-                                    height=180, border=ft.border.all(1, ft.colors.with_opacity(0.1, "error")),
+                                    height=180, border=ft.border.all(1, with_opacity(0.1, "error")),
                                     border_radius=8, padding=10,
                                 ),
                             ], tight=True, spacing=5),
@@ -295,7 +296,7 @@ class BatchPostPage:
                 ft.Text("开启专属保护开关后，会强制优先调用原生关注小号出战：", size=11, color="onSurfaceVariant"),
                 ft.Container(
                     content=forum_list_container,
-                    border=ft.border.all(1, ft.colors.with_opacity(0.1, "green")),
+                    border=ft.border.all(1, with_opacity(0.1, "green")),
                     border_radius=8,
                     padding=5
                 )
@@ -341,19 +342,47 @@ class BatchPostPage:
         )
         self.page.open(dialog)
 
-    def _on_material_row_select(self, mid, selected):
-        if selected:
-            self._selected_material_ids.add(mid)
-        else:
-            self._selected_material_ids.discard(mid)
-        self.page.update()
+    def _update_bulk_visibility(self):
+        """统一同步批量操作栏的可见性与计数"""
+        if hasattr(self, "_material_bulk_actions"):
+            self._material_bulk_actions.visible = bool(self._selected_material_ids)
+            self._material_selected_count_text.value = f"已选 {len(self._selected_material_ids)} 项"
 
-    def _on_archive_row_select(self, mid, selected):
-        if selected:
-            self._selected_archive_ids.add(mid)
-        else:
-            self._selected_archive_ids.discard(mid)
-        self.page.update()
+        if hasattr(self, "_archive_bulk_actions"):
+            self._archive_bulk_actions.visible = bool(self._selected_archive_ids)
+            self._archive_selected_count_text.value = f"已选 {len(self._selected_archive_ids)} 项"
+
+    async def _bulk_toggle_auto_bump(self, e):
+        """批量开关自动回帖监控"""
+        if not self._selected_material_ids: return
+        
+        # 以第一个选中的状态取反作为目标
+        target_val = True
+        first_id = list(self._selected_material_ids)[0]
+        for m in self._materials:
+            if m.id == first_id:
+                target_val = not m.is_auto_bump
+                break
+        
+        from sqlalchemy import update
+        from ..db.models import MaterialPool
+        async with self.db.async_session() as session:
+            await session.execute(
+                update(MaterialPool)
+                .where(MaterialPool.id.in_(list(self._selected_material_ids)))
+                .values(is_auto_bump=target_val)
+            )
+            await session.commit()
+            
+        # 同步内存
+        for m in self._materials:
+            if m.id in self._selected_material_ids:
+                m.is_auto_bump = target_val
+        
+        num = len(self._selected_material_ids)
+        self._selected_material_ids.clear()
+        await self._refresh_material_table()
+        self._show_snackbar(f"成功批量{'开启' if target_val else '关闭'} {num} 条物料的监控", "success")
 
     async def _on_material_search_change(self, e):
         self._material_search_text = e.control.value
@@ -433,7 +462,7 @@ class BatchPostPage:
                 pending_rows.append(
                     ft.DataRow(
                         selected=m.id in self._selected_material_ids,
-                        on_select_changed=lambda e, mid=m.id: self._on_material_row_select(mid, e.data),
+                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
                         cells=[
                             ft.DataCell(ft.Text(str(m.id))),
                             ft.DataCell(ft.Text(display_t, tooltip=m.title)),
@@ -457,7 +486,7 @@ class BatchPostPage:
                 archive_rows.append(
                     ft.DataRow(
                         selected=m.id in self._selected_archive_ids,
-                        on_select_changed=lambda e, mid=m.id: self._on_archive_row_select(mid, e.data),
+                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
                         cells=[
                             ft.DataCell(ft.Text(str(m.id))),
                             ft.DataCell(ft.Text(display_t, tooltip=m.title)),
@@ -492,6 +521,9 @@ class BatchPostPage:
                 self.bottom_tabs.update()
         except Exception:
             pass
+        # 同步更新批量操作栏
+        self._update_bulk_visibility()
+        
         try:
             self.page.update()
         except Exception:
@@ -616,8 +648,10 @@ class BatchPostPage:
             if m.status in ("pending", "failed"):
                 if not self._material_search_text or self._material_search_text.lower() in m.title.lower() or self._material_search_text.lower() in m.content.lower():
                     visible_ids.append(m.id)
-        
-        if e.data:
+
+        # e.data 是字符串 "true"/"false"，需要转换
+        is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
+        if is_select:
             self._selected_material_ids.update(visible_ids)
         else:
             for vid in visible_ids:
@@ -630,8 +664,10 @@ class BatchPostPage:
             if m.status == "success":
                 if not self._archive_search_text or self._archive_search_text.lower() in m.title.lower() or self._archive_search_text.lower() in (m.posted_fname or "").lower():
                     visible_ids.append(m.id)
-        
-        if e.data:
+
+        # e.data 是字符串 "true"/"false"，需要转换
+        is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
+        if is_select:
             self._selected_archive_ids.update(visible_ids)
         else:
             for vid in visible_ids:
@@ -665,17 +701,27 @@ class BatchPostPage:
         self._show_snackbar(f"已批量{'开启' if target_val else '关闭'} {len(self._selected_material_ids)} 项自动回帖", "success")
 
     async def _on_material_row_select(self, mid, selected):
-        if selected:
+        # Flet e.data 为字符串 "true"/"false"
+        is_selected = selected == "true" if isinstance(selected, str) else bool(selected)
+
+        if is_selected:
             self._selected_material_ids.add(mid)
         else:
             self._selected_material_ids.discard(mid)
+
+        self._update_bulk_visibility()
         await self._refresh_material_table()
 
     async def _on_archive_row_select(self, mid, selected):
-        if selected:
+        # Flet e.data 为字符串 "true"/"false"
+        is_selected = selected == "true" if isinstance(selected, str) else bool(selected)
+
+        if is_selected:
             self._selected_archive_ids.add(mid)
         else:
             self._selected_archive_ids.discard(mid)
+
+        self._update_bulk_visibility()
         await self._refresh_material_table()
 
     async def _sync_shortlinks(self, e):
@@ -695,11 +741,17 @@ class BatchPostPage:
         self.page.update()
 
     async def _on_batch_ai_rewrite_click(self, e):
-        """触发所有待发物料的批量 AI 改写"""
-        pending_m = [m for m in self._materials if m.status == "pending"]
-        if not pending_m:
-            self._show_snackbar("没有发现处于 [待发] 状态的物料，无法改写", "warning")
-            return
+        """触发选中物料或所有待发物料的批量 AI 改写"""
+        if self._selected_material_ids:
+            pending_m = [m for m in self._materials if m.id in self._selected_material_ids and m.status == "pending"]
+            if not pending_m:
+                self._show_snackbar("选中的物料中没有处于 [待发] 状态的项，或者它们已经是成功/失败状态，无法改写", "warning")
+                return
+        else:
+            pending_m = [m for m in self._materials if m.status == "pending"]
+            if not pending_m:
+                self._show_snackbar("没有发现处于 [待发] 状态的物料，无法改写", "warning")
+                return
             
         progress_bar = ft.ProgressBar(value=0, width=400, color="primary")
         status_text = ft.Text(f"正在准备 AI 精调 (0/{len(pending_m)})...", size=12)
@@ -797,11 +849,11 @@ class BatchPostPage:
             content=ft.Column([
                 ft.Text("【初始原文】", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
                 ft.Text(f"标题: {m.original_title}", size=11, italic=True),
-                ft.Container(content=ft.Text(m.original_content, size=11), padding=10, bgcolor=ft.colors.with_opacity(0.05, "onSurface"), border_radius=5),
+                ft.Container(content=ft.Text(m.original_content, size=11), padding=10, bgcolor=with_opacity(0.05, "onSurface"), border_radius=5),
                 ft.Divider(),
                 ft.Text("【AI 魔法精调后】", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                 ft.Text(f"标题: {m.title}", size=11),
-                ft.Container(content=ft.Text(m.content, size=11), padding=10, bgcolor=ft.colors.with_opacity(0.1, "primary"), border_radius=5),
+                ft.Container(content=ft.Text(m.content, size=11), padding=10, bgcolor=with_opacity(0.1, "primary"), border_radius=5),
             ], scroll=ft.ScrollMode.ADAPTIVE, width=500, tight=True),
             actions=[
                 ft.TextButton("使用原文回退", icon=ft.icons.UNDO, on_click=rollback),
@@ -809,6 +861,13 @@ class BatchPostPage:
             ]
         )
         self.page.open(preview_dialog)
+
+    def _obfuscate_link(self, url: str) -> str:
+        """针对百度网盘链接进行零宽字符混淆防御"""
+        if "pan.baidu.com" in url:
+            # 在 domain 中间插入零宽空格 \u200b，有效降低自动化爬虫识别
+            return url.replace("pan.baidu.com", "pan.ba\u200bidu.com")
+        return url
 
     async def _open_shortlink_dialog(self, e):
         """显示短链选择对话框 (带搜索与状态筛选)"""
@@ -842,7 +901,7 @@ class BatchPostPage:
                 on_click=self._on_shortlink_filter_change,
                 style=ft.ButtonStyle(
                     color=ft.colors.ON_PRIMARY if is_selected else ft.colors.ON_SURFACE,
-                    bgcolor=ft.colors.PRIMARY if is_selected else ft.colors.with_opacity(0.1, "onSurface"),
+                    bgcolor=ft.colors.PRIMARY if is_selected else with_opacity(0.1, "onSurface"),
                     shape=ft.RoundedRectangleBorder(radius=20),
                 ),
                 height=32,
@@ -878,6 +937,13 @@ class BatchPostPage:
             label_position=ft.LabelPosition.RIGHT,
             scale=0.8
         )
+        direct_mode_switch = ft.Switch(
+            label="注入网盘原链模式 (直连分享)",
+            value=False,
+            label_position=ft.LabelPosition.RIGHT,
+            scale=0.8,
+            active_color="orange"
+        )
 
         def on_confirm(_):
             if not self._selected_links:
@@ -888,13 +954,22 @@ class BatchPostPage:
             # 从原始列表中找到选中的数据
             selected_data = [link for link in self._all_links if link['shortCode'] in self._selected_links]
             
+            is_direct = direct_mode_switch.value
             for link_data in selected_data:
                 code = link_data['shortCode']
                 seo_title = link_data.get('seoTitle') or ""
                 desc = link_data.get('description') or ""
+                original_url = link_data.get('originalUrl') or ""
 
-                effective_title = seo_title if seo_title else f"主页输入【{code}】立刻查看网盘资源"
-                new_content = f"{desc} 👉 主页搜【{code}】马上查阅" if desc else f"主页搜【{code}】马上查阅"
+                if is_direct and original_url:
+                    effective_title = seo_title if seo_title else f"网盘资源分享 - {code}"
+                    # 执行混淆防御
+                    final_url = self._obfuscate_link(original_url)
+                    new_content = f"{desc} 👉 {final_url}" if desc else final_url
+                else:
+                    effective_title = seo_title if seo_title else f"主页输入【{code}】立刻查看网盘资源"
+                    new_content = f"{desc} 👉 主页搜【{code}】马上查阅" if desc else f"主页搜【{code}】马上查阅"
+                
                 pairs.append((effective_title, new_content))
 
             async def _bg_task():
@@ -922,7 +997,7 @@ class BatchPostPage:
                     ft.Divider(height=1),
                     self._table_container,
                     ft.Divider(height=1),
-                    overwrite_switch,
+                    ft.Row([overwrite_switch, direct_mode_switch], spacing=20),
                 ], tight=True, spacing=10),
                 width=550,
             ),
@@ -949,7 +1024,7 @@ class BatchPostPage:
         for btn in self._filter_chips.controls:
             is_sel = (btn.data == status)
             btn.style.color = ft.colors.ON_PRIMARY if is_sel else ft.colors.ON_SURFACE
-            btn.style.bgcolor = ft.colors.PRIMARY if is_sel else ft.colors.with_opacity(0.1, "onSurface")
+            btn.style.bgcolor = ft.colors.PRIMARY if is_sel else with_opacity(0.1, "onSurface")
             
         await self._render_filtered_links()
 
@@ -1018,7 +1093,8 @@ class BatchPostPage:
             hint_text="搜索标题或内容...",
             prefix_icon=ft.icons.SEARCH,
             on_change=self._on_material_search_change,
-            expand=True, height=40, text_size=12, content_padding=10
+            height=40, text_size=12, content_padding=10,
+            width=250 # 给搜索框固定宽度，防止在 Row 中挤压操作栏
         )
         
         return ft.Container(
@@ -1033,15 +1109,7 @@ class BatchPostPage:
                 ft.Row([self._quick_title, self._quick_content, self._add_btn], spacing=10),
                 ft.Row([
                     material_search,
-                    ft.Row([
-                        ft.FilledButton("批量删除", icon=ft.icons.DELETE_SWEEP, 
-                                        style=ft.ButtonStyle(bgcolor="error", color="white"), 
-                                        on_click=self._bulk_delete_materials),
-                        ft.FilledButton("批量自顶", icon=ft.icons.BOLT, 
-                                        style=ft.ButtonStyle(bgcolor="primary", color="white"), 
-                                        on_click=self._bulk_toggle_auto_bump),
-                        ft.Text(f"已选 {len(self._selected_material_ids)} 项", size=11, color="onSurfaceVariant"),
-                    ], visible=bool(self._selected_material_ids), spacing=10),
+                    self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
                     content=ft.ListView(
@@ -1049,7 +1117,7 @@ class BatchPostPage:
                         expand=True,
                     ),
                     expand=True,
-                    border=ft.border.all(1, ft.colors.with_opacity(0.1, "onSurface")),
+                    border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
                     padding=5,
                 ),
@@ -1064,7 +1132,8 @@ class BatchPostPage:
             hint_text="搜索标题或着陆贴吧...",
             prefix_icon=ft.icons.SEARCH,
             on_change=self._on_archive_search_change,
-            expand=True, height=40, text_size=12, content_padding=10
+            height=40, text_size=12, content_padding=10,
+            width=250 # 固定宽度
         )
 
         return ft.Container(
@@ -1077,8 +1146,7 @@ class BatchPostPage:
                 ], spacing=10),
                 ft.Row([
                     archive_search,
-                    ft.FilledButton("批量回炉", icon=ft.icons.RESTORE_PAGE, style=ft.ButtonStyle(bgcolor="orange", color="white"), on_click=self._bulk_reset_archives, visible=bool(self._selected_archive_ids)),
-                    ft.Text(f"已选 {len(self._selected_archive_ids)} 项", size=11, color="onSurfaceVariant", visible=bool(self._selected_archive_ids)),
+                    self._archive_bulk_actions,
                 ], spacing=10),
                 ft.Container(
                     content=ft.ListView(
@@ -1086,7 +1154,7 @@ class BatchPostPage:
                         expand=True,
                     ),
                     expand=True,
-                    border=ft.border.all(1, ft.colors.with_opacity(0.1, "onSurface")),
+                    border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
                     padding=5,
                 ),
@@ -1121,9 +1189,32 @@ class BatchPostPage:
             label="手动补充吧名 (英文逗号分隔)", 
             hint_text="例如: c语言,python", 
             text_size=11,
-            border_color=ft.colors.with_opacity(0.2, "onSurface")
+            border_color=with_opacity(0.2, "onSurface")
         )
         self._stats_text = ft.Text("状态分布:  ⏳待发(0)   ✅成功(0)   ❌失败(0)", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant")
+        
+        # 批量操作 UI 容器
+        self._material_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
+        self._material_bulk_actions = ft.Row([
+            ft.FilledButton("批量删除", icon=ft.icons.DELETE_SWEEP,
+                            style=ft.ButtonStyle(bgcolor="error", color="white"), 
+                            on_click=self._bulk_delete_materials),
+            ft.FilledButton("批量自顶", icon=ft.icons.BOLT,
+                            style=ft.ButtonStyle(bgcolor="primary", color="white"), 
+                            on_click=self._bulk_toggle_auto_bump),
+            ft.FilledButton("AI 批量改写", icon=ft.icons.AUTO_AWESOME,
+                            style=ft.ButtonStyle(bgcolor="teal", color="white"), 
+                            on_click=self._on_batch_ai_rewrite_click),
+            self._material_selected_count_text,
+        ], visible=False, spacing=10)
+
+        self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
+        self._archive_bulk_actions = ft.Row([
+            ft.FilledButton("批量回炉", icon=ft.icons.RESTORE_PAGE,
+                            style=ft.ButtonStyle(bgcolor="orange", color="white"), 
+                            on_click=self._bulk_reset_archives),
+            self._archive_selected_count_text,
+        ], visible=False, spacing=10)
         
         # 2. 物料录入与表格
         self._quick_title = ft.TextField(label="快速配置标题(可选)", expand=1, text_size=12, dense=True)
@@ -1213,7 +1304,7 @@ class BatchPostPage:
         return ft.Container(
             content=ft.Column([
                 header,
-                ft.Divider(height=1, color=ft.colors.with_opacity(0.1, "onSurface")),
+                ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
                     # 第一栏：核心操作区 (expand=3，最宽，容纳 Tabs 主体)
                     ft.Column([
@@ -1223,7 +1314,6 @@ class BatchPostPage:
                             ft.Row([
                                 ft.IconButton(ft.icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
                                 ft.IconButton(ft.icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
-                                ft.IconButton(ft.icons.AUTO_AWESOME, tooltip="AI 批量改写", on_click=self._on_batch_ai_rewrite_click, icon_color="primary"),
                                 ft.IconButton(ft.icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant"),
                                 ft.IconButton(ft.icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
                             ], spacing=0),
@@ -1235,7 +1325,7 @@ class BatchPostPage:
                                 self.forum_select_btn,
                                 self.manual_forum_input,
                             ], spacing=8),
-                            padding=15, bgcolor=ft.colors.with_opacity(0.05, "surface"), border_radius=12,
+                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
                         # 底部标签页（物料池 / 任务流水 / 任务队列）
                         self.bottom_tabs,
@@ -1252,12 +1342,12 @@ class BatchPostPage:
                                 ft.Text("参与账号池 (勾选启用)", size=12, color="onSurfaceVariant"),
                                 ft.Container(
                                     content=self.account_pool_column,
-                                    border=ft.border.all(1, ft.colors.with_opacity(0.1, "onSurface")),
+                                    border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                                     border_radius=8,
                                     padding=10,
                                 ),
                             ], spacing=10),
-                            padding=15, bgcolor=ft.colors.with_opacity(0.05, "surface"), border_radius=12,
+                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
                         # 下方卡片：控制参数
                         ft.Text("控制参数", size=14, weight=ft.FontWeight.W_500),
@@ -1271,7 +1361,7 @@ class BatchPostPage:
                                 ft.Divider(height=10, color="transparent"),
                                 self.start_btn,
                             ], spacing=10),
-                            padding=15, bgcolor=ft.colors.with_opacity(0.05, "surface"), border_radius=12,
+                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
                     ], expand=2, spacing=12),  # 右侧面板，2 份宽度，两卡片上下排列
                 ],
@@ -1289,7 +1379,7 @@ class BatchPostPage:
                 self.progress_bar,
                 ft.Container(
                     content=self.log_list, expand=True,
-                    border=ft.border.all(1, ft.colors.with_opacity(0.1, "onSurface")), border_radius=10,
+                    border=ft.border.all(1, with_opacity(0.1, "onSurface")), border_radius=10,
                 )
             ], expand=True), expand=True, padding=10
         )
@@ -1313,7 +1403,7 @@ class BatchPostPage:
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(
                 content=ft.ListView([self.task_table], expand=True), expand=True,
-                border=ft.border.all(1, ft.colors.with_opacity(0.05, "onSurface")), border_radius=8,
+                border=ft.border.all(1, with_opacity(0.05, "onSurface")), border_radius=8,
             )
         ], spacing=10, expand=True)
 
@@ -1489,4 +1579,4 @@ class BatchPostPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary" if type != "error" else "error"
         if type == "success": color = ft.colors.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=ft.colors.with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
