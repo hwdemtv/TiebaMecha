@@ -8,7 +8,8 @@ from typing import List, Optional
 from ..components import create_gradient_button, CoreButtonWithLabel
 from ..components.icons import (
     GROUP_WORK, PERSON, SWAP_HORIZ, ARROW_BACK_IOS_NEW,
-    SYNC_ROUNDED, PLAY_ARROW_ROUNDED
+    SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
+    CHECK
 )
 from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
@@ -359,7 +360,7 @@ class SignPage:
                     ),
                     ft.FilledButton(
                         "签到" if not is_signed else "已签",
-                        icon=ft.icons.BOLT if not is_signed else ft.icons.CHECK,
+                        icon=BOLT if not is_signed else CHECK,
                         on_click=lambda e, fn=f.fname: self.page.run_task(self._do_sign_one, fn) if not self._is_signing else None,
                         disabled=is_signed or self._is_signing,
                         style=ft.ButtonStyle(
