@@ -35,12 +35,21 @@ async def main(page: ft.Page):
     await app.initialize(db)
 
 def run_app(port: int = 9006):
-    """启动 Flet 应用，已在 app.py 中通过 logging.addLevelName 修复 uvicorn 日志级别问题"""
-    ft.run(
-        target=main,
-        port=port,
-        view=ft.AppView.WEB_BROWSER,
-    )
+    """启动 Flet 应用"""
+    # 兼容不同 Flet 版本：优先使用 ft.run()，否则回退到 ft.app()
+    try:
+        ft.run(
+            target=main,
+            port=port,
+            view=ft.AppView.WEB_BROWSER,
+        )
+    except AttributeError:
+        # Flet < 0.80.0 使用 ft.app()
+        ft.app(
+            target=main,
+            port=port,
+            view=ft.AppView.WEB_BROWSER,
+        )
 
 
 if __name__ == "__main__":

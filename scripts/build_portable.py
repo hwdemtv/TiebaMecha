@@ -136,11 +136,19 @@ if __name__ == "__main__":
     print(f"访问地址: http://localhost:{port}")
 
     try:
-        ft.run(
-            target=main,
-            port=port,
-            view=ft.AppView.WEB_BROWSER,
-        )
+        # 兼容不同 Flet 版本：优先使用 ft.run()，否则回退到 ft.app()
+        if hasattr(ft, 'run'):
+            ft.run(
+                target=main,
+                port=port,
+                view=ft.AppView.WEB_BROWSER,
+            )
+        else:
+            ft.app(
+                target=main,
+                port=port,
+                view=ft.AppView.WEB_BROWSER,
+            )
     except Exception as e:
         print(f"启动失败: {e}")
         import traceback
