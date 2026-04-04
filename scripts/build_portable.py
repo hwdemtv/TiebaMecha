@@ -93,33 +93,27 @@ os.environ["PYTHONUTF8"] = "1"
 # 恢复标准日志级别名称 (Flet 可能会覆盖为 'warn')
 logging.addLevelName(logging.WARNING, "WARNING")
 
-# Uvicorn 日志级别补丁 (修复 Flet 传参 'warn' 导致的 KeyError)
-# 必须在 import uvicorn 之前执行
-def _patch_uvicorn_log_level():
-    import uvicorn.config as _uvc
-    _orig_configure_logging = _uvc.Config.configure_logging
-    def _patched_configure_logging(self):
-        # 修复：将 'warn' 替换为 'warning'
-        if getattr(self, "log_level", None) == "warn":
-            self.log_level = "warning"
-        return _orig_configure_logging(self)
-    _uvc.Config.configure_logging = _patched_configure_logging
-
-try:
-    _patch_uvicorn_log_level()
-except (ImportError, AttributeError):
-    pass
-
 # 确保能加载当前目录下的 tieba_mecha 包
 sys.path.insert(0, os.getcwd())
 
 import flet as ft
 
-# Flet 加载后再次尝试补丁 (确保覆盖)
-try:
-    _patch_uvicorn_log_level()
-except Exception:
-    pass
+# Uvicorn 日志级别补丁 (修复 Flet 传参 'warn' 导致的 KeyError)
+# 必须在 ft.run() 调用之前执行
+def _patch_uvicorn_log_level():
+    try:
+        import uvicorn.config as _uvc
+        _orig_configure_logging = _uvc.Config.configure_logging
+        def _patched_configure_logging(self):
+            if getattr(self, "log_level", None) == "warn":
+                self.log_level = "warning"
+            return _orig_configure_logging(self)
+        _uvc.Config.configure_logging = _patched_configure_logging
+    except (ImportError, AttributeError):
+        pass
+
+# 立即执行补丁
+_patch_uvicorn_log_level()
 
 from tieba_mecha.web.app import TiebaMechaApp, get_db
 
@@ -137,6 +131,9 @@ if __name__ == "__main__":
     print(f"访问地址: http://localhost:{port}")
 
     try:
+        # 再次执行补丁确保生效
+        _patch_uvicorn_log_level()
+
         # 兼容不同 Flet 版本
         if hasattr(ft, 'run'):
             try:
