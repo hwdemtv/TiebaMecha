@@ -17,7 +17,7 @@ def get_project_root() -> Path:
 def build_portable():
     project_root = get_project_root()
     dist_dir = project_root / "dist"
-    portable_dir = dist_dir / "TiebaMecha_v110_Stable"
+    portable_dir = dist_dir / "TiebaMecha_v110_Final"
 
     # 清理旧的构建目录
     if portable_dir.exists():
@@ -74,25 +74,37 @@ import logging
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"
 
+# 恢复标准日志级别名称 (Flet 可能会覆盖为 'warn')
+logging.addLevelName(logging.WARNING, "WARNING")
+
 # Uvicorn 日志级别补丁 (修复 Flet 传参 'warn' 导致的 KeyError)
-try:
+# 必须在 import uvicorn 之前执行
+def _patch_uvicorn_log_level():
     import uvicorn.config as _uvc
     _orig_configure_logging = _uvc.Config.configure_logging
     def _patched_configure_logging(self):
+        # 修复：将 'warn' 替换为 'warning'
         if getattr(self, "log_level", None) == "warn":
             self.log_level = "warning"
         return _orig_configure_logging(self)
     _uvc.Config.configure_logging = _patched_configure_logging
+
+try:
+    _patch_uvicorn_log_level()
 except (ImportError, AttributeError):
     pass
-
-# 恢复标准日志级别名称以便 Flet/Uvicorn 兼容
-logging.addLevelName(logging.WARNING, "WARNING")
 
 # 确保能加载当前目录下的 tieba_mecha 包
 sys.path.insert(0, os.getcwd())
 
 import flet as ft
+
+# Flet 加载后再次尝试补丁 (确保覆盖)
+try:
+    _patch_uvicorn_log_level()
+except Exception:
+    pass
+
 from tieba_mecha.web.app import TiebaMechaApp, get_db
 
 async def main(page: ft.Page):
@@ -107,9 +119,9 @@ if __name__ == "__main__":
     print("   TiebaMecha 启动中...")
     print("========================================")
     print(f"访问地址: http://localhost:{port}")
-    
+
     try:
-        ft.app(
+        ft.run(
             target=main,
             port=port,
             view=ft.AppView.WEB_BROWSER,
