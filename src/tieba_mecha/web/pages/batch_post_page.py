@@ -31,6 +31,9 @@ class BatchPostPage:
         self._selected_material_ids = set()
         self._selected_archive_ids = set()
 
+        # 初始化所有 UI 控件
+        self._init_controls()
+
     async def load_data(self):
         """加载页面数据"""
         if not self.db: return
@@ -442,90 +445,88 @@ class BatchPostPage:
             self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})"
             
         for m in self._materials:
-            # 搜索过滤逻辑
-            if m.status in ("pending", "failed"):
-                if self._material_search_text and self._material_search_text.lower() not in m.title.lower() and self._material_search_text.lower() not in m.content.lower():
-                    continue
-            else:
-                if self._archive_search_text and self._archive_search_text.lower() not in m.title.lower() and self._archive_search_text.lower() not in (m.posted_fname or "").lower():
-                    continue
-
-            display_t = m.title if len(m.title) <= 15 else m.title[:15] + "..."
-            display_c = m.content if len(m.content) <= 18 else m.content[:18] + "..."
-            
-            ai_text = "✨独立改写" if m.ai_status == "rewritten" else "无处理"
-            ai_color = "primary" if m.ai_status == "rewritten" else "onSurfaceVariant"
-            
-            if m.status in ("pending", "failed"):
-                status_color = "onSurfaceVariant" if m.status == "pending" else "error"
-                status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
-                status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
+            try:
+                # 搜索过滤逻辑
+                m_title = m.title or ""
+                m_content = m.content or ""
+                m_posted_fname = m.posted_fname or "未知吧"
                 
-                pending_rows.append(
-                    ft.DataRow(
-                        selected=m.id in self._selected_material_ids,
-                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
-                        cells=[
-                            ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Text(display_t, tooltip=m.title)),
-                            ft.DataCell(ft.Text(display_c, tooltip=m.content)),
-                            ft.DataCell(ft.Row([ft.Icon(status_icon, color=status_color, size=14), ft.Text(status_text, color=status_color, size=12)], spacing=4)),
-                            ft.DataCell(ft.Row([
-                                ft.Text(ai_text, color=ai_color, size=12),
-                                ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
-                            ], spacing=2)),
-                            ft.DataCell(ft.Row([
-                                ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
-                                ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
-                                ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
-                            ], spacing=0)),
-                            ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8)),
-                        ]
+                if m.status in ("pending", "failed"):
+                    if self._material_search_text and self._material_search_text.lower() not in m_title.lower() and self._material_search_text.lower() not in m_content.lower():
+                        continue
+                else:
+                    if self._archive_search_text and self._archive_search_text.lower() not in m_title.lower() and self._archive_search_text.lower() not in m_posted_fname.lower():
+                        continue
+
+                display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
+                display_c = m_content if len(m_content) <= 18 else m_content[:18] + "..."
+                
+                ai_text = "✨独立改写" if m.ai_status == "rewritten" else "无处理"
+                ai_color = "primary" if m.ai_status == "rewritten" else "onSurfaceVariant"
+                
+                if m.status in ("pending", "failed"):
+                    status_color = "onSurfaceVariant" if m.status == "pending" else "error"
+                    status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
+                    status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
+                    
+                    pending_rows.append(
+                        ft.DataRow(
+                            selected=m.id in self._selected_material_ids,
+                            on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
+                            cells=[
+                                ft.DataCell(ft.Text(str(m.id))),
+                                ft.DataCell(ft.Text(display_t, tooltip=display_t)),
+                                ft.DataCell(ft.Text(display_c, tooltip=display_c)),
+                                ft.DataCell(ft.Row([ft.Icon(status_icon, color=status_color, size=14), ft.Text(status_text, color=status_color, size=12)], spacing=4)),
+                                ft.DataCell(ft.Row([
+                                    ft.Text(ai_text, color=ai_color, size=12),
+                                    ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
+                                ], spacing=2)),
+                                ft.DataCell(ft.Row([
+                                    ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
+                                    ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
+                                    ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
+                                ], spacing=0)),
+                                ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8)),
+                            ]
+                        )
                     )
-                )
-            else:
-                # 已发归档逻辑
-                archive_rows.append(
-                    ft.DataRow(
-                        selected=m.id in self._selected_archive_ids,
-                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
-                        cells=[
-                            ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Text(display_t, tooltip=m.title)),
-                            ft.DataCell(ft.Text(m.posted_fname or "未知吧", weight=ft.FontWeight.BOLD, color="primary")),
-                            ft.DataCell(ft.Text(m.last_used_at.strftime("%y-%m-%d %H:%M") if m.last_used_at else "-")),
-                            ft.DataCell(ft.Row([
-                                ft.IconButton(
-                                    icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
-                                    on_click=lambda e, tid=m.posted_tid: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}") if tid else self._show_snackbar("该贴被系统吞没或未传回TID", "warning")
-                                ),
-                                ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="该贴被干了？重新回炉排期"),
-                            ], spacing=0)),
-                            ft.DataCell(ft.Row([
-                                ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
-                                ft.Text(f"已顶{m.bump_count}", size=11, color="onSurfaceVariant")
-                            ], spacing=2)),
-                        ]
+                else:
+                    # 已发归档逻辑
+                    archive_rows.append(
+                        ft.DataRow(
+                            selected=m.id in self._selected_archive_ids,
+                            on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
+                            cells=[
+                                ft.DataCell(ft.Text(str(m.id))),
+                                ft.DataCell(ft.Text(display_t, tooltip=display_t)),
+                                ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
+                                ft.DataCell(ft.Text(m.last_used_at.strftime("%y-%m-%d %H:%M") if m.last_used_at else "-")),
+                                ft.DataCell(ft.Row([
+                                    ft.IconButton(
+                                        icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
+                                        on_click=lambda e, tid=m.posted_tid: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}") if tid else self._show_snackbar("该贴被系统吞没或未传回TID", "warning")
+                                    ),
+                                    ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="该贴被干了？重新回炉排期"),
+                                ], spacing=0)),
+                                ft.DataCell(ft.Row([
+                                    ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
+                                    ft.Text(f"已顶{m.bump_count}", size=11, color="onSurfaceVariant")
+                                ], spacing=2)),
+                            ]
+                        )
                     )
-                )
+            except Exception as ex:
+                print(f"[ERROR] 渲染物料行 ID:{m.id} 失败: {str(ex)}")
+                continue
                 
         self._material_table.rows = pending_rows
         self._archive_table.rows = archive_rows
-        try:
-            if self._material_table.page:
-                self._material_table.update()
-            if self._archive_table.page:
-                self._archive_table.update()
-        except:
-            pass
-        try:
-            if hasattr(self, "bottom_tabs") and self.bottom_tabs.page:
-                self.bottom_tabs.update()
-        except Exception:
-            pass
+
         # 同步更新批量操作栏
         self._update_bulk_visibility()
-        
+
+        # 直接更新整个页面，确保所有嵌套控件都能刷新
         try:
             self.page.update()
         except Exception:
@@ -551,7 +552,7 @@ class BatchPostPage:
         t = self._quick_title.value.strip() or "暂无标题"
         c = self._quick_content.value.strip()
         if not c:
-            self._show_snackbar("内容不能为空", "error")
+            self._show_snackbar("内容不可为空", "error")
             return
         
         await self.db.add_materials_bulk([(t, c)])
@@ -1115,10 +1116,7 @@ class BatchPostPage:
                     self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
-                    content=ft.ListView(
-                        [ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)],
-                        expand=True,
-                    ),
+                    content=ft.ListView([self._material_table], expand=True),
                     expand=True,
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
@@ -1152,10 +1150,7 @@ class BatchPostPage:
                     self._archive_bulk_actions,
                 ], spacing=10),
                 ft.Container(
-                    content=ft.ListView(
-                        [ft.Row([self._archive_table], scroll=ft.ScrollMode.ADAPTIVE)],
-                        expand=True,
-                    ),
+                    content=ft.ListView([self._archive_table], expand=True),
                     expand=True,
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
@@ -1166,20 +1161,8 @@ class BatchPostPage:
             padding=ft.padding.only(top=10)
         )
 
-    def build(self) -> ft.Control:
-        if self._file_picker not in self.page.overlay:
-            self.page.overlay.append(self._file_picker)
-            
-        header = ft.Row([
-            ft.IconButton(icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._navigate("dashboard")),
-            ft.Column([
-                ft.Text("矩阵发帖终端 / MATRIX POST TERMINAL", size=20, weight=ft.FontWeight.BOLD, color="primary"),
-                ft.Text("多账号轮换、多内容池混淆及多贴吧矩阵发布引擎", size=11, color="onSurfaceVariant"),
-            ], spacing=0),
-        ])
-
-        # --- 初始化所有核心控件 ---
-        
+    def _init_controls(self):
+        """预初始化页面所有持久化控件，防止 build 时被重置"""
         # 1. 贴吧选择
         self.forum_pool_column = ft.Column(spacing=2, height=120, scroll=ft.ScrollMode.ADAPTIVE)
         self.forum_select_btn = ft.OutlinedButton(
@@ -1220,8 +1203,8 @@ class BatchPostPage:
         ], visible=False, spacing=10)
         
         # 2. 物料录入与表格
-        self._quick_title = ft.TextField(label="快速配置标题(可选)", expand=1, text_size=12, dense=True)
-        self._quick_content = ft.TextField(label="正文主段落 (尽量带引流信息) *", expand=2, text_size=12, dense=True)
+        self._quick_title = ft.TextField(label="快速配置标签(可选)", expand=1, text_size=12, dense=True)
+        self._quick_content = ft.TextField(label="正文主段落 (将混合零宽防御)*", expand=2, text_size=12, dense=True)
         self._add_btn = ft.IconButton(icon=icons.ADD_BOX, icon_color="primary", on_click=self._add_material_row, tooltip="写好就塞进去")
         
         self._material_table = ft.DataTable(
@@ -1290,7 +1273,7 @@ class BatchPostPage:
         self.progress_bar = ft.ProgressBar(value=0, visible=False, color="primary")
         self.log_list = ft.ListView(expand=True, spacing=5, padding=10)
         
-        # 6. 整合 Tabs (所有 Tab 需要的子控件必须在上方全部初始化完成)
+        # 6. 整合 Tabs
         self.bottom_tabs = ft.Tabs(
             selected_index=0,
             animation_duration=300,
@@ -1303,8 +1286,16 @@ class BatchPostPage:
             expand=True,
         )
 
-        # --- 拼装最终布局界面 ---
-        return ft.Container(
+        header = ft.Row([
+            ft.IconButton(icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._navigate("dashboard")),
+            ft.Column([
+                ft.Text("矩阵发帖终端 / MATRIX POST TERMINAL", size=20, weight=ft.FontWeight.BOLD, color="primary"),
+                ft.Text("多账号轮换、多内容池混淆及多贴吧矩阵发布引擎", size=11, color="onSurfaceVariant"),
+            ], spacing=0),
+        ])
+
+        # --- 封装最终布局界面并预存 ---
+        self.main_layout = ft.Container(
             content=ft.Column([
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
@@ -1374,6 +1365,11 @@ class BatchPostPage:
             ], expand=True, spacing=20),  # 外层 Column 必须 expand=True，否则内部 Row 无法分配空间
             padding=20, expand=True,
         )
+
+    def build(self) -> ft.Control:
+        if self._file_picker not in self.page.overlay:
+            self.page.overlay.append(self._file_picker)
+        return self.main_layout
 
     def _build_log_view(self):
         # expand=True 使日志视图能填满 Tab 分配的高度

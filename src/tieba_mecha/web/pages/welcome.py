@@ -43,7 +43,11 @@ class WelcomePage:
                     content=ft.Column([
                         ft.Text("第一步：获取登录凭据", size=14, weight=ft.FontWeight.BOLD),
                         ft.Text("在贴吧网页端 F12 找到 BDUSS 和 STOKEN。如果您不知道如何获取，请点击右侧教程。", size=12, color="onSurfaceVariant"),
-                        ft.TextButton("《手把手：Cookie 提取教程》", icon=icons.HELP_OUTLINE),
+                        ft.TextButton(
+                            "《手把手：Cookie 提取教程》", 
+                            icon=icons.HELP_OUTLINE,
+                            on_click=self._show_tutorial
+                        ),
                     ], spacing=10),
                     padding=15,
                     bgcolor=with_opacity(0.03, "onSurface"),
@@ -106,6 +110,38 @@ class WelcomePage:
             self.verify_btn.disabled = False
         
         self.page.update()
+
+    def _show_tutorial(self, e):
+        """显示分步引导教程"""
+        def close_dialog(_):
+            self.page.close(dialog)
+
+        content = ft.Column([
+            ft.Text("如何获取您的贴吧凭据 (Cookie)", size=18, weight=ft.FontWeight.BOLD),
+            ft.Divider(),
+            ft.Text("1. 打开电脑浏览器 (推荐 Chrome/Edge)，访问 tieba.baidu.com并登录。", size=13),
+            ft.Text("2. 按下 F12 或 Ctrl+Shift+I 打开开发者工具。", size=13),
+            ft.Text("3. 切换到 Application (应用程序) 选项卡 (如果没看到，点击 >> 展开)。", size=13),
+            ft.Text("4. 在左侧选择 Storage -> Cookies -> https://tieba.baidu.com。", size=13),
+            ft.Text("5. 在右侧列表中寻找 BDUSS 和 STOKEN 项，双击 Value 即可复制。", size=13),
+            ft.Container(height=10),
+            ft.Container(
+                content=ft.Text("💡 提示：您可以直接复制开发者工具中 Network -> Headers 下的完整 'Cookie:' 文本，并在输入框粘贴，我们会自动为您解析。", 
+                               size=12, color="primary"),
+                padding=10,
+                bgcolor=with_opacity(0.1, "primary"),
+                border_radius=5,
+            ),
+        ], tight=True, spacing=12, width=500)
+
+        dialog = ft.AlertDialog(
+            content=content,
+            actions=[
+                ft.TextButton("了解，去获取", on_click=close_dialog)
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dialog)
 
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"

@@ -73,60 +73,36 @@
 
 ## 🚀 快速开始
 
-### 方式一：便携版（推荐新手/Windows 用户）
+### 方式一：绿色便携版（推荐 Windows 用户/新手）
 
-1. 下载 `TiebaMecha-portable.zip` 并解压。
-2. 运行 `首次运行配置.bat` 生成安全加密密钥（仅需一次）。
-3. 运行 `启动Web界面.bat` 开启机甲。
-4. 浏览器访问 [http://localhost:9006](http://localhost:9006)。
+1. [下载最新的 `TiebaMecha-Portable.zip`](#) 并在本地目录解压。
+2. 运行 **`首次运行(生成密钥).bat`**。系统会自动为您生成唯一的加密盐值和访问密钥（仅需在初次使用或重置环境时运行一次）。
+3. 运行 **`启动机甲.bat`**。
+4. 浏览器将自动打开并访问 [http://localhost:9006](http://localhost:9006)。
 
-**📦 便携版更新流程：**
+**📦 更新与维护：**
 
-1. 下载新版本 `TiebaMecha-portable.zip`
-2. **保留旧版本的以下文件**：
-   - `data/` 目录（含数据库 `tieba_mecha.db`）
-   - `.env` 文件（加密密钥配置）
-3. 解压新版本覆盖旧文件
-4. 将保留的 `data/` 目录和 `.env` 文件放回
+1. 下载新版本 `TiebaMecha-Portable.zip`。
+2. **保留旧版本文件夹中的 `data/` 目录和 `.env` 文件**。它们包含了您的所有账号数据和加密配置。
+3. 将新版本文件解压并覆盖至旧目录，或将保留的文件/文件夹移至新目录即可。
 
-> ⚠️ **注意**：丢失 `data/` 或 `.env` 将导致所有账号数据和加密凭证无法恢复。
+> [!CAUTION]
+> **重要警告**：请务必备份您的 `.env` 文件。一旦丢失，您在数据库中存储的所有加密 Cookie 将无法解密并会导致账号失效。
 
-**🔧 .env 文件配置说明：**
+**🔧 配置文件 (.env) 说明：**
 
-首次运行需要配置加密密钥，编辑 `.env` 文件，填入以下内容：
+在便携版中，主要通过 `首次运行(生成密钥).bat` 自动配置。如果您需要手动调整端口或主界面地址，可以编辑 `.env`：
 
 ```bash
-# 必须修改：加密密钥（各 64 位十六进制字符）
-TIEBA_MECHA_SALT=your_salt_here_64_hex_chars
-TIEBA_MECHA_SECRET_KEY=your_secret_key_here_64_hex_chars
+# 加密参数 (由初始化脚本自动生成)
+TIEBA_MECHA_SALT=...
+TIEBA_MECHA_SECRET_KEY=...
+
+# 可选：自定义端口
+TIEBA_MECHA_PORT=9006
 ```
 
-**生成密钥方法：**
-
-运行 `首次运行配置.bat` 会自动生成，或手动执行：
-
-```python
-# Python 生成
-import secrets
-print(f"TIEBA_MECHA_SALT={secrets.token_hex(32)}")
-print(f"TIEBA_MECHA_SECRET_KEY={secrets.token_hex(32)}")
-```
-
-生成的密钥示例：
-```bash
-TIEBA_MECHA_SALT=a1b2c3d4e5f6...（共64个字符）
-TIEBA_MECHA_SECRET_KEY=1a2b3c4d5e6f...（共64个字符）
-```
-
-**编辑 .env 文件方法：**
-
-| 方式 | 操作步骤 |
-|------|----------|
-| **记事本** | 右键 `.env` → 打开方式 → 记事本 |
-| **VS Code** | 右键 `.env` → 通过 Code 打开 |
-| **命令行** | 在项目目录执行 `notepad .env` |
-
-编辑完成后保存文件即可。
+编辑 `.env` 文件推荐使用 **记事本** 或 **VS Code** 等文本编辑工具。
 
 ### 方式二：Docker 部署（推荐服务器/挂机用户）
 
