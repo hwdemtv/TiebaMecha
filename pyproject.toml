@@ -17,6 +17,7 @@ dependencies = [
     "aiohttp_socks>=0.8.0",
     "httpx>=0.25.0",  # link_manager 直接引用
     "rich>=13.0",     # CLI 美化输出
+    "pydantic>=2.0",  # 数据模型校验
 ]
 
 [project.optional-dependencies]
