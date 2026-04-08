@@ -2,10 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2025-01-01
+## [1.1.1] - 2026-04-08
+
+### Changed
+- **打包稳定性提升**
+  - 在 `pyproject.toml` 和 `build_portable.py` 中显式补齐 `aiohttp_socks`、`httpx`、`rich` 等直引依赖。
+  - 将 Flet 锁定为 `0.23.2` 稳定版，防止因 0.84.0+ API 变更（如 `Badge` 的 `text` 属性移除）导致的兼容性崩溃。
+  - 同步更新便携版启动器版本显示为 `v1.1.1`。
+  - 优化 `build_copy_venv.py` 虚拟环境复制打包，修正绝对路径问题。
+
+### Fixed
+- **便携版协议冲突修复**
+  - 修复 `Receive loop error: 'text'` 错误：通过回滚 Web 协议栈（Uvicorn 0.29.0, FastAPI 0.110.0, Starlette 0.36.3）解决了与 Flet 0.23.2 的 WebSocket 通信冲突。
+  - 修复 `No module named 'aiohttp_socks'` 报错。
+
+- **用户信息探测修复**
+  - 修复带登录态时用户名查询返回 301 的问题（改用无账号客户端获取 portrait）
+  - 修复 `user.level` 属性不存在的问题（改用 `glevel`）
+  - 修复 `get_user_posts` 异步迭代器错误
+  - 修复 `user_name` 显示为 `-` 的问题
+
+- **数据库路径修复**
+  - 修复 `DEFAULT_DB_PATH` 在不同运行环境下路径计算错误
+  - 支持 PyInstaller 打包环境、源码开发环境、便携版环境
+
+- **测试修复**
+  - 修复测试中 BDUSS 长度验证问题
+  - 修复 `get_account_credentials` 返回值解包问题
+  - 修复 `aiohttp.ClientSession` mock 配置问题
+
+## [1.1.0] - 2026-04-01
+
+### Added
+- Flet 0.84+ 兼容性补丁
+
+## [0.1.0] - 2026-04-01
 
 ### Added
 - **矩阵发帖终端 (Matrix Post Terminal)**

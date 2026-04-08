@@ -20,6 +20,14 @@ PYTHON_ZIP_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PY
 def get_root():
     return Path(__file__).parent.parent.absolute()
 
+# --- 国内镜像与源配置 ---
+PYTHON_MIRRORS = [
+    f"https://mirrors.huaweicloud.com/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip",
+    f"https://pypi.tuna.tsinghua.edu.cn/python-ftp/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip",
+    "https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip" 
+]
+PIP_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
 def build_portable():
     root = get_root()
     dist_dir = root / "dist"
@@ -35,14 +43,28 @@ def build_portable():
 
     # 2. 获取嵌入式 Python
     zip_path = dist_dir / "python_embed.zip"
+    resource_zip = root / "scripts" / "resources" / "python_embed.zip"
+    
     if not zip_path.exists():
-        print(f"[2/6] 正在从官方获取 Python {PYTHON_VERSION} 嵌入版...")
-        try:
-            urllib.request.urlretrieve(PYTHON_ZIP_URL, zip_path)
-            print("   下载完成！")
-        except Exception as e:
-            print(f"   下载失败: {e}")
-            return
+        # 优先从本地资源目录查找
+        if resource_zip.exists():
+            print(f"[2/6] 检测到本地内置资源，正在复制: {resource_zip}")
+            shutil.copy2(resource_zip, zip_path)
+        else:
+            print(f"[2/6] 正在获取 Python {PYTHON_VERSION} 嵌入版...")
+            success = False
+            for url in PYTHON_MIRRORS:
+                try:
+                    print(f"   尝试从源下载: {url.split('/')[2]} ...")
+                    urllib.request.urlretrieve(url, zip_path)
+                    success = True
+                    break
+                except Exception as e:
+                    print(f"   该源不可用: {e}")
+            
+            if not success:
+                print("   [ERROR] 所有下载源均失败，请手动下载并将文件放入 scripts/resources/python_embed.zip")
+                return
 
     print("   正在解压 Python 运行时...")
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -79,13 +101,17 @@ def build_portable():
         "cryptography>=41.0",
         "python-dotenv>=1.0.0",
         "aiohttp>=3.8.0",
-        "pydantic"
+        "aiohttp_socks>=0.8.0",
+        "httpx>=0.25.0",
+        "rich>=13.0",
+        "pydantic>=2.0",
     ]
     
     try:
-        print(f"   正在安装: {', '.join(deps[:3])} 等...")
+        print(f"   正在安装: {', '.join(deps[:3])} 等 (使用清华源)...")
         subprocess.run([
             sys.executable, "-m", "pip", "install", 
+            "-i", PIP_INDEX_URL,
             "--target", str(sp_dir),
             *deps
         ], check=True, capture_output=True)
@@ -113,7 +139,12 @@ def build_portable():
     for f in [".env.example", "README.md"]:
         if (root / f).exists():
             shutil.copy2(root / f, portable_dir / f)
-            
+
+    # 复制网盘精准配对导入模板
+    template_file = root / "网盘精准配对导入模板.csv"
+    if template_file.exists():
+        shutil.copy2(template_file, portable_dir / "网盘精准配对导入模板.csv")
+
     # 创建 data 目录
     (portable_dir / "data").mkdir(exist_ok=True)
 

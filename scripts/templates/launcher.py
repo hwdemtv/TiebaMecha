@@ -26,7 +26,7 @@ if not SALT or not SECRET:
     print("\n" + "!" * 60)
     print(" [警告] 系统安全凭证未配置！")
     print(" TiebaMecha 需要 TIEBA_MECHA_SALT 和 TIEBA_MECHA_SECRET_KEY 来加密账号凭据。")
-    print("\n 💡 [解决办法]:")
+    print("\n [解决办法]:")
     print(" 请先关闭本窗口，运行目录下的：")
     print("    >>> [首次运行(生成密钥).bat] <<<")
     print("\n 之后重新启动本程序将自动进入 Web 界面。")
@@ -70,7 +70,7 @@ async def main(page: ft.Page):
 if __name__ == "__main__":
     port = 9006
     print("=" * 50)
-    print("   TiebaMecha Cyber-Mecha v1.1.0 [Portable]")
+    print("   TiebaMecha Cyber-Mecha v1.1.1 [Portable]")
     print(f"   访问地址: http://localhost:{port}")
     print("=" * 50)
     

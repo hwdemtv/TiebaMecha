@@ -1,12 +1,12 @@
 [project]
 name = "tieba-mecha"
-version = "1.1.0"
+version = "1.1.1"
 description = "Cyber-Mecha style Baidu Tieba management tool with CLI and Web UI"
 authors = [{ name = "Developer" }]
 requires-python = ">=3.10,<3.15"
 dependencies = [
     "aiotieba",
-    "flet>=0.21.0,<0.90.0",  # 锁定版本范围，避免 API 变更
+    "flet==0.23.2",
     "typer>=0.9.0",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.19.0",
@@ -14,6 +14,9 @@ dependencies = [
     "cryptography>=41.0",
     "python-dotenv>=1.0.0",
     "aiohttp>=3.8.0",  # 显式声明依赖
+    "aiohttp_socks>=0.8.0",
+    "httpx>=0.25.0",  # link_manager 直接引用
+    "rich>=13.0",     # CLI 美化输出
 ]
 
 [project.optional-dependencies]
