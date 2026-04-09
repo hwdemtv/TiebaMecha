@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from ..flet_compat import COLORS
 from typing import List, Optional
 
 from ..components import create_gradient_button, icons
@@ -55,8 +56,8 @@ class AccountsPage:
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
-                            color=ft.colors.PRIMARY,
-                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
+                            color=COLORS.PRIMARY,
+                            bgcolor={"": with_opacity(0.1, COLORS.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -181,10 +182,10 @@ class AccountsPage:
             status = getattr(acc, "status", "unknown")
             last_v = getattr(acc, "last_verified", None)
             
-            status_color = ft.colors.GREY_400
-            if status == "active": status_color = ft.colors.GREEN_ACCENT_400
-            elif status == "expired": status_color = ft.colors.ERROR
-            elif status == "error": status_color = ft.colors.AMBER
+            status_color = COLORS.GREY_400
+            if status == "active": status_color = COLORS.GREEN_ACCENT_400
+            elif status == "expired": status_color = COLORS.ERROR
+            elif status == "error": status_color = COLORS.AMBER
             
             # 查找关联代理名称
             proxy_info = "直连"
@@ -715,7 +716,7 @@ class AccountsPage:
             ft.Text("2. 按下 F12 或 Ctrl+Shift+I 打开开发者工具。", size=13),
             ft.Text("3. 切换到 Application (应用程序) 选项卡 (如果没看到，点击 >> 展开)。", size=13),
             ft.Text("4. 在左侧选择 Storage -> Cookies -> https://tieba.baidu.com。", size=13),
-            ft.Text("5. 在右侧列表中寻找 BDUSS 和 STOKEN 项，双击 Value 即可复制。", size=13),
+            ft.Text("5. 在右侧列表中寻找 BDUSS 和 STOKEN 项，双击 Value 选中后按 Ctrl+C 复制。", size=13),
             ft.Container(height=10),
             ft.Container(
                 content=ft.Text("💡 提示：您可以直接复制开发者工具中 Network -> Headers 下的完整 'Cookie:' 文本，并在输入框粘贴，程序会自动尝试提取。", 
@@ -738,7 +739,7 @@ class AccountsPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(
             ft.SnackBar(
                 content=ft.Text(message),

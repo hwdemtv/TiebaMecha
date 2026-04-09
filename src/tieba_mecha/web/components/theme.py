@@ -1,11 +1,8 @@
-"""Theme configuration - Cyber-Mecha style"""
+"""Theme configuration - Cyber-Mecha style with Flet version compatibility"""
 
 import flet as ft
-from ..utils import with_opacity
-
-# ============================================================
-# 赛博机甲风格配色方案
-# ============================================================
+from ..flet_compat import safe_color_scheme, safe_theme
+from ...web.utils import with_opacity
 
 
 def get_dark_theme() -> ft.Theme:
@@ -13,22 +10,21 @@ def get_dark_theme() -> ft.Theme:
     护眼赛博机甲风 (Cyber-Mecha Dark)
     采用极光底色提亮技术，脱离纯黑，消除长时间凝视产生的高对比度残影
     """
-    # 兼容不同 Flet 版本的参数
-    kwargs = dict(
-        surface="#1C2028",  # 深渊钢板 - 与背景轻微拉开厚度感
-        primary="#00BFA5",  # 玉石青 - 高明度荧光态的主操色
-        secondary="#E8C361",  # 明亮金 - 告别暗沉的高价值回馈色
-        error="#EF5350",  # 柔和红 - 消除荧光刺眼的危险警示
-        outline="#242A35",  # 幽蓝灰 - 区分块面，不喧宾夺主
-        on_surface="#F2F5F9",  # 星尘白 - 极高明度的主文防模糊色
-        on_surface_variant="#A3AAB8",  # 冷峻亮灰 - 专门解决眯眼看小字的痛点
+    color_scheme = safe_color_scheme(
+        surface="#1C2028",
+        primary="#00BFA5",
+        secondary="#E8C361",
+        error="#EF5350",
+        outline="#242A35",
+        on_surface="#F2F5F9",
+        on_surface_variant="#A3AAB8",
         outline_variant="#2D3440",
-        tertiary="#FF9800",  # 警告色
+        tertiary="#FF9800",
+        # 可选参数（自动处理兼容性）
+        surface_container_highest="#252B36",
     )
-    # Flet 0.83+ 支持 surface_container_highest
-    if hasattr(ft.ColorScheme, "surface_container_highest"):
-        kwargs["surface_container_highest"] = "#252B36"
-    return ft.Theme(color_scheme=ft.ColorScheme(**kwargs))
+
+    return safe_theme(color_scheme=color_scheme)
 
 
 def get_light_theme() -> ft.Theme:
@@ -36,28 +32,26 @@ def get_light_theme() -> ft.Theme:
     实验舱风 (Lab-Clinic Light)
     适用于强光差环境，追求类医疗软件或精密仪器的极简、专业、清晰感
     """
-    # 兼容不同 Flet 版本的参数
-    kwargs = dict(
-        surface="#FFFFFF",  # 纯净白 - 让操作卡片像悬浮在纸面上
-        primary="#009688",  # 沉稳青 - 稍降明度，防止在白底上糊成一片
-        secondary="#C49B27",  # 古铜金 - 在高亮环境下依然能看清的深色金
-        error="#D32F2F",  # 警灯红 - 经典的无歧义错误色
-        outline="#E5E8EB",  # 素雅灰 - 像细铅笔划过的微痕边框
-        on_surface="#1A1A1A",  # 主文本
-        on_surface_variant="#6B7280",  # 中性石灰 - 恰到好处的降噪副文
+    color_scheme = safe_color_scheme(
+        surface="#FFFFFF",
+        primary="#009688",
+        secondary="#C49B27",
+        error="#D32F2F",
+        outline="#E5E8EB",
+        on_surface="#1A1A1A",
+        on_surface_variant="#6B7280",
         outline_variant="#D1D5DB",
-        tertiary="#F59E0B",  # 警告色
+        tertiary="#F59E0B",
+        surface_container_highest="#F0F2F5",
     )
-    # Flet 0.83+ 支持 surface_container_highest
-    if hasattr(ft.ColorScheme, "surface_container_highest"):
-        kwargs["surface_container_highest"] = "#F0F2F5"
-    return ft.Theme(color_scheme=ft.ColorScheme(**kwargs))
+
+    return safe_theme(color_scheme=color_scheme)
 
 
 # 渐变色配置
-GRADIENT_CYAN = ["#00B894", "#00C2FF"]  # 极光增强渐变串 (Aurora Boost)
-GRADIENT_GOLD = ["#E8C361", "#F5A623"]  # 金色渐变
-GRADIENT_DANGER = ["#EF5350", "#FF7043"]  # 危险渐变
+GRADIENT_CYAN = ["#00B894", "#00C2FF"]
+GRADIENT_GOLD = ["#E8C361", "#F5A623"]
+GRADIENT_DANGER = ["#EF5350", "#FF7043"]
 
 
 def create_gradient_button(
@@ -68,11 +62,7 @@ def create_gradient_button(
     width: float | None = None,
     height: float = 48,
 ) -> ft.Container:
-    """
-    创建渐变按钮 (Aurora Boost 版)
-
-    带边缘硬化和光晕效果
-    """
+    """创建渐变按钮 (Aurora Boost 版)"""
     colors = gradient_colors or GRADIENT_CYAN
 
     content = ft.Row(
@@ -83,7 +73,6 @@ def create_gradient_button(
         alignment=ft.MainAxisAlignment.CENTER,
         spacing=8,
     )
-    # 过滤掉 None
     content.controls = [c for c in content.controls if c is not None]
 
     return ft.Container(
@@ -109,18 +98,11 @@ def create_hud_panel(
     title: str,
     value: str,
     icon: str,
-    border_position: str = "left",  # left or right
+    border_position: str = "left",
 ) -> ft.Container:
-    """
-    创建 HUD 翼板 (Symmetric Capsule)
-
-    用于仪表盘左右对称的数值监控
-    """
-    # 使用简单的圆角
+    """创建 HUD 翼板 (Symmetric Capsule)"""
     border_radius = 12
 
-    # 使用简单的边框
-    border = ft.border.all(1, "outlineVariant")
     if border_position == "left":
         border = ft.border.Border(
             left=ft.BorderSide(3, "primary"),
@@ -169,11 +151,7 @@ def create_function_tile(
     on_click=None,
     on_hover=None,
 ) -> ft.Container:
-    """
-    创建功能磁贴 (Function Tiles)
-
-    核心功能入口 2x2 网格
-    """
+    """创建功能磁贴 (Function Tiles)"""
     controls = [
         ft.Icon(icon, color="primary", size=32),
         ft.Text(title, color="onSurface", size=14, weight=ft.FontWeight.W_500),
@@ -207,11 +185,7 @@ def create_stream_list_item(
     trailing_controls: list | None = None,
     on_click=None,
 ) -> ft.Container:
-    """
-    创建流式列表项 (Stream List Item)
-
-    用于实时动态排行榜
-    """
+    """创建流式列表项 (Stream List Item)"""
     leading = [
         ft.Icon(leading_icon, color="primary", size=20) if leading_icon else None,
         ft.Text(title, color="onSurface", size=13, expand=True),
@@ -241,11 +215,7 @@ def create_core_button(
     on_click=None,
     size: float = 100,
 ) -> ft.Container:
-    """
-    创建核心按钮 (Core Button)
-
-    主操作入口，带渐变和发光效果
-    """
+    """创建核心按钮 (Core Button)"""
     return ft.Container(
         content=ft.Icon(icon, color="onSurface", size=40),
         gradient=ft.RadialGradient(

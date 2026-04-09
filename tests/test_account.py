@@ -194,7 +194,7 @@ class TestAccountManagement:
         creds = await get_account_credentials(db)
 
         assert creds is not None
-        bduss, stoken, proxy_id, cuid, ua = creds
+        acc_id, bduss, stoken, proxy_id, cuid, ua = creds
         assert bduss == sample_account_data["bduss"]
         assert stoken == sample_account_data["stoken"]
 
@@ -229,7 +229,7 @@ class TestAccountManagement:
         # Verify acc2 is now active
         creds = await get_account_credentials(db)
         assert creds is not None
-        bduss, _, _, _, _ = creds
+        _, bduss, _, _, _, _ = creds
         assert bduss == "bduss2"
 
     async def test_remove_account(self, db):

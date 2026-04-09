@@ -18,12 +18,16 @@ class TestAccountWorkflow:
             get_account_credentials,
         )
 
+        # BDUSS 必须是 192 字符
+        bduss1 = "a" * 192
+        bduss2 = "b" * 192
+
         # Add first account
-        acc1 = await add_account(db, "account1", "bduss1", "stoken1")
+        acc1 = await add_account(db, "account1", bduss1, "stoken1")
         assert acc1.is_active is True
 
         # Add second account
-        acc2 = await add_account(db, "account2", "bduss2", "stoken2")
+        acc2 = await add_account(db, "account2", bduss2, "stoken2")
         assert acc2.is_active is False
 
         # List accounts
@@ -33,14 +37,14 @@ class TestAccountWorkflow:
         # Get credentials for active account
         creds = await get_account_credentials(db)
         assert creds is not None
-        bduss, _, _, _, _ = creds
-        assert bduss == "bduss1"
+        _, bduss, _, _, _, _ = creds
+        assert bduss == bduss1
 
         # Switch to second account
         await switch_account(db, acc2.id)
         creds = await get_account_credentials(db)
-        bduss, _, _, _, _ = creds
-        assert bduss == "bduss2"
+        _, bduss, _, _, _, _ = creds
+        assert bduss == bduss2
 
         # Remove first account
         await remove_account(db, acc1.id)
@@ -58,11 +62,12 @@ class TestAccountWorkflow:
         # Create proxy
         proxy = await db.add_proxy(host="127.0.0.1", port=7890)
 
-        # Add account with proxy
+        # Add account with proxy (BDUSS 必须是 192 字符)
+        bduss = "c" * 192
         acc = await add_account(
             db,
             "proxied_account",
-            "bduss",
+            bduss,
             "stoken",
             proxy_id=proxy.id,
         )
@@ -72,7 +77,7 @@ class TestAccountWorkflow:
 
         # Get credentials should include proxy_id
         creds = await get_account_credentials(db)
-        _, _, proxy_id, _, _ = creds
+        _, _, proxy_id, _, _, _ = creds
         assert proxy_id == proxy.id
 
 
@@ -114,7 +119,7 @@ class TestSignWorkflow:
 
         # Check stats
         stats = await get_sign_stats(db)
-        assert stats["signed"] == 1
+        assert stats["success"] == 1
 
 
 @pytest.mark.asyncio

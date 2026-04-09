@@ -21,8 +21,11 @@ def _patched_configure_logging(self):
     return _orig_configure_logging(self)
 _uvc.Config.configure_logging = _patched_configure_logging
 
-# 添加 src 到路径
-sys.path.insert(0, "src")
+# 添加绝对路径 src 到路径
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(ROOT_DIR, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
 import flet as ft
 from tieba_mecha.web.app import TiebaMechaApp

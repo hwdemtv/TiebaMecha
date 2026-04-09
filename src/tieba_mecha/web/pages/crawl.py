@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from ..flet_compat import COLORS
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -42,8 +43,8 @@ class CrawlPage:
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
-                            color=ft.colors.PRIMARY,
-                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
+                            color=COLORS.PRIMARY,
+                            bgcolor={"": with_opacity(0.1, COLORS.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -73,7 +74,7 @@ class CrawlPage:
         self.forum_name = ft.TextField(label="贴吧名称", hint_text="例如: 百度贴吧", expand=True, text_size=13)
         self.pages_count = ft.TextField(label="爬取页数", value="5", width=80, text_size=13, keyboard_type=ft.KeyboardType.NUMBER)
 
-        self.user_target = ft.TextField(label="用户ID / Portrait", hint_text="输入数字ID或加密Portrait", expand=True, text_size=13, visible=False)
+        self.user_target = ft.TextField(label="用户ID / 用户名 / Portrait", hint_text="例: 123456 / hwdemtv(用户名,非昵称) / tb.1.xxx", expand=True, text_size=13, visible=False)
         self.with_posts = ft.Checkbox(label="同步爬取发帖记录", value=True, visible=False)
 
         self.progress_bar = ft.ProgressBar(value=0, visible=False, color="primary", bar_height=4)
@@ -144,7 +145,7 @@ class CrawlPage:
                         text="清理",
                         icon=icons.DELETE_SWEEP,
                         on_click=self._clear_old_records,
-                        style=ft.ButtonStyle(color=ft.colors.ERROR),
+                        style=ft.ButtonStyle(color=COLORS.ERROR),
                     ),
                 ], spacing=8),
                 ft.Divider(height=5),
@@ -197,6 +198,9 @@ class CrawlPage:
         self.retry_indicator.visible = False
         self.page.update()
 
+        last_status = None  # ✅ 新增
+        last_message = None  # ✅ 新增
+
         try:
             if is_threads:
                 try:
@@ -220,13 +224,23 @@ class CrawlPage:
                     if p.total > 0:
                         self.progress_bar.value = p.current / p.total
 
+                    last_status = p.status  # ✅ 新增
+                    last_message = p.message  # ✅ 新增
                     self.page.update()
             else:
                 async for p in crawl_user(self.db, target, with_posts=self.with_posts.value):
                     self.progress_text.value = f"👤 用户数据 | {p.message}"
+                    last_status = p.status  # ✅ 新增
+                    last_message = p.message  # ✅ 新增
                     self.page.update()
 
-            self._show_snackbar("数据探测任务已完成", "success")
+            # ✅ 新增：根据状态决定提示
+            if last_status == "completed":
+                self._show_snackbar("数据探测任务已完成", "success")
+            elif last_status == "failed":
+                self._show_snackbar(last_message or "探测失败", "error")
+            else:
+                self._show_snackbar("数据探测任务已完成", "success")
         except Exception as ex:
             self._show_snackbar(f"探测中断: {str(ex)}", "error")
 
@@ -352,7 +366,7 @@ class CrawlPage:
                 ft.FilledButton(
                     "全部清空", 
                     icon=icons.DELETE_FOREVER,
-                    style=ft.ButtonStyle(bgcolor=ft.colors.ERROR, color=ft.colors.ON_ERROR),
+                    style=ft.ButtonStyle(bgcolor=COLORS.ERROR, color=COLORS.ON_ERROR),
                     on_click=lambda _: self.page.run_task(do_clear, 0)
                 ),
             ],
@@ -578,5 +592,5 @@ class CrawlPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))

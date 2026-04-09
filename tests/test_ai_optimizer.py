@@ -92,12 +92,18 @@ class TestAIOptimizer:
             }]
         })
 
-        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
-            with patch('aiohttp.ClientSession') as mock_session:
-                mock_session.return_value.__aenter__ = AsyncMock(return_value=mock_session.return_value)
-                mock_session.return_value.__aexit__ = AsyncMock(return_value=None)
-                mock_session.return_value.post = AsyncMock(return_value=mock_response)
+        # Create a proper async context manager mock
+        mock_post_context = AsyncMock()
+        mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_context.__aexit__ = AsyncMock(return_value=None)
 
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
                 success, title, content, error = await optimizer.optimize_post(
                     "Original Title", "Original Content"
                 )
@@ -125,12 +131,18 @@ class TestAIOptimizer:
         mock_response.status = 401
         mock_response.text = AsyncMock(return_value="Unauthorized")
 
-        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
-            with patch('aiohttp.ClientSession') as mock_session:
-                mock_session.return_value.__aenter__ = AsyncMock(return_value=mock_session.return_value)
-                mock_session.return_value.__aexit__ = AsyncMock(return_value=None)
-                mock_session.return_value.post = AsyncMock(return_value=mock_response)
+        # Create a proper async context manager mock
+        mock_post_context = AsyncMock()
+        mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_context.__aexit__ = AsyncMock(return_value=None)
 
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
                 success, title, content, error = await optimizer.optimize_post(
                     "Original Title", "Original Content"
                 )
@@ -164,12 +176,18 @@ class TestAIOptimizer:
             }]
         })
 
-        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
-            with patch('aiohttp.ClientSession') as mock_session:
-                mock_session.return_value.__aenter__ = AsyncMock(return_value=mock_session.return_value)
-                mock_session.return_value.__aexit__ = AsyncMock(return_value=None)
-                mock_session.return_value.post = AsyncMock(return_value=mock_response)
+        # Create a proper async context manager mock
+        mock_post_context = AsyncMock()
+        mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_context.__aexit__ = AsyncMock(return_value=None)
 
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
                 success, title, content, error = await optimizer.optimize_post(
                     "Original Title", "Original Content"
                 )
@@ -193,11 +211,17 @@ class TestAIOptimizer:
         mock_response = MagicMock()
         mock_response.status = 200
 
-        with patch('aiohttp.ClientSession') as mock_session:
-            mock_session.return_value.__aenter__ = AsyncMock(return_value=mock_session.return_value)
-            mock_session.return_value.__aexit__ = AsyncMock(return_value=None)
-            mock_session.return_value.post = AsyncMock(return_value=mock_response)
+        # Create a proper async context manager mock
+        mock_post_context = AsyncMock()
+        mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_context.__aexit__ = AsyncMock(return_value=None)
 
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch('aiohttp.ClientSession', return_value=mock_session):
             success, message = await optimizer.test_connection()
 
         assert success is True

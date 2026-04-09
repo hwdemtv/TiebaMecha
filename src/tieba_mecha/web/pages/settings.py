@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from ..flet_compat import COLORS
 from typing import List, Optional
 
 from ..components import create_gradient_button
@@ -79,16 +80,16 @@ class SettingsPage:
             am = get_auth_manager()
             if am.status == AuthStatus.PRO:
                 self.auth_info_label.value = "✔️ 已激活 Pro 特权"
-                self.auth_info_label.color = ft.colors.GREEN
+                self.auth_info_label.color = COLORS.GREEN
             elif am.status == AuthStatus.FREE:
                 self.auth_info_label.value = "⚠️ 未激活 (基础版)"
-                self.auth_info_label.color = ft.colors.AMBER
+                self.auth_info_label.color = COLORS.AMBER
             elif am.status == AuthStatus.EXPIRED:
                 self.auth_info_label.value = "❌ 授权已过期"
-                self.auth_info_label.color = ft.colors.RED
+                self.auth_info_label.color = COLORS.RED
             else:
                 self.auth_info_label.value = "⚡ 授权状态未知 (离线)"
-                self.auth_info_label.color = ft.colors.GREY
+                self.auth_info_label.color = COLORS.GREY
                 
             self.hwid_field.value = f"HWID: {self._settings.get('hwid', '获取中...')}"
             self.page.update()
@@ -167,8 +168,8 @@ class SettingsPage:
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
-                            color=ft.colors.PRIMARY,
-                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
+                            color=COLORS.PRIMARY,
+                            bgcolor={"": with_opacity(0.1, COLORS.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -359,7 +360,7 @@ class SettingsPage:
                     ft.Divider(height=10, color="transparent"),
                     # 底部：版本与保存
                     ft.Row([
-                        ft.Text("TiebaMecha v1.1.0 | Current Path: Cyber-Router", size=10, color="onSurfaceVariant"),
+                        ft.Text("TiebaMecha v1.1.1 | Current Path: Cyber-Router", size=10, color="onSurfaceVariant"),
                         ft.Container(expand=True),
                         save_btn,
                     ]),
@@ -488,5 +489,5 @@ class SettingsPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))

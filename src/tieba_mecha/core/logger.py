@@ -14,7 +14,7 @@ class AsyncQueueHandler(logging.Handler):
     def emit(self, record):
         # 过滤 Flet 内部已知的 WebSocket 噪音日志 (通常发生在 Web 模式下连接断开时)
         msg = record.getMessage()
-        if "Receive loop error: text" in msg:
+        if "Receive loop error" in msg:
             return
 
         try:

@@ -139,8 +139,8 @@ class TestGetSignStats:
         stats = await get_sign_stats(db)
 
         assert stats["total"] == 0
-        assert stats["signed"] == 0
-        assert stats["unsigned"] == 0
+        assert stats["success"] == 0
+        assert stats["failure"] == 0
 
     async def test_get_sign_stats_no_forums(self, db, sample_account_data):
         """Test get_sign_stats with account but no forums."""
@@ -157,7 +157,7 @@ class TestGetSignStats:
         stats = await get_sign_stats(db)
 
         assert stats["total"] == 0
-        assert stats["signed"] == 0
+        assert stats["success"] == 0
 
     async def test_get_sign_stats_with_forums(self, db, sample_account_data):
         """Test get_sign_stats with forums."""
@@ -181,8 +181,8 @@ class TestGetSignStats:
         stats = await get_sign_stats(db)
 
         assert stats["total"] == 2
-        assert stats["signed"] == 1
-        assert stats["unsigned"] == 1
+        assert stats["success"] == 1
+        assert stats["failure"] == 0
 
 
 @pytest.mark.asyncio

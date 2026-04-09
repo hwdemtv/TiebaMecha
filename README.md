@@ -14,9 +14,8 @@
 ---
 
 ### 📚 技术文档
-- 📦 **[桌面分发指南](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/deployment/distribution-guide.md)**：了解如何打包 `.exe` 或便携版。
-- 🐳 **[Docker 部署手册](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/deployment/linux-deployment.md)**：在 Linux 云服务器上实现 24h 挂机。
-- 🔐 **[集成技术细节](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/technical/licensing-and-broadcast-integration.md)**：深入了解 HWID 生成与授权校验逻辑。
+- 📦 **[桌面分发指南](docs/deployment/distribution-guide.md)**：了解如何打包绿色便携版。
+- 🐳 **[Docker 部署手册](docs/deployment/linux-deployment.md)**：在 Linux 云服务器上实现 24h 挂机。
 
 ---
 
@@ -48,10 +47,12 @@
 - **统计追踪**：记录签到历史、连续天数、等级变化
 - **自动同步**：从账号自动拉取关注的贴吧列表
 
-### 6. 拟人化养号 (BioWarming™)
-- **深度模拟**：自动模拟真人进入贴吧浏览、翻页、停顿阅读
-- **随机互动**：在浏览过程中随机执行点赞（Agree）交互，建立健康活跃画像
-- **守护进程调度**：后台 4 小时周期性自动运行，全自动维护账号权重
+### 6. 拟人化养号 (BioWarming™) [ENHANCED]
+- **深度模拟**：自动模拟真人进入贴吧浏览、翻页、停顿阅读。
+- **冷启动支持 (Cold Start)**：针对 0 关注的新号，自动启用「公域发现池」进行破冰探索，确保新号不因无关注数据而停滞。
+- **动态行为权重**：根据账号发育程度自动调整，新号自动进入“潜行模式”，显著延长停顿时间并将点赞等高危互动概率降至极低。
+- **破冰自动关注**：在公域探索中模拟真人兴趣，低概率自动关注优质版块，主动构建账号画像标签。
+- **守护进程调度**：后台 4 小时周期性自动运行，全自动维护账号权重。
 
 ### 7. 全域通知中心
 - **本地通知**：任务完成、账号异常、代理失效等事件实时推送
@@ -133,7 +134,7 @@ docker-compose up -d
 
 访问 `http://localhost:9006` 即可打开 Web 界面。
 
-详见 [Docker 部署手册](file:///D:/%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/TiebaMecha/docs/deployment/linux-deployment.md)。
+详见 [Docker 部署手册](docs/deployment/linux-deployment.md)。
 
 ### 方式三：源码安装（开发者）
 
@@ -409,7 +410,7 @@ from tieba_mecha.core.plugin_loader import PluginBase
 class MyPlugin(PluginBase):
     name = "我的插件"
     description = "插件描述"
-    version = "1.1.0"
+    version = "1.1.1"
     author = "Your Name"
 
     async def on_load(self):
@@ -499,7 +500,7 @@ class MyPlugin(PluginBase):
 | ✅ | 拟人化风控引擎 | 高斯延迟、生理节律 |
 | ✅ | AI 智能改写 | 智谱/DeepSeek/OpenAI |
 | ✅ | 自动回帖 (Auto-Bump) | 帖子热度维护 |
-| ✅ | 拟人化养号 | 浏览模拟、随机点赞 |
+| ✅ | 拟人化养号 (BioWarming™) | 浏览模拟、随机点赞、新号冷启动破冰 [NEW] |
 | ✅ | 全域通知中心 | 本地 + 远程通知 |
 | ✅ | 自动更新检测 | GitHub Releases |
 | 🔜 | 云控中心 | 多节点统一管理 |

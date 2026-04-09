@@ -1,4 +1,4 @@
-"""Main Flet application - TiebaMecha Cyber-Mecha v1.1.0"""
+"""Main Flet application - TiebaMecha Cyber-Mecha v1.1.1"""
 
 from __future__ import annotations
 
@@ -194,7 +194,7 @@ class TiebaMechaApp:
 
         await log_info("TiebaMecha 系统内聚核动力引擎已启动")
 
-    async def _show_notifications(self, _):
+    async def _show_notifications(self, _=None):
         """显示通知对话框（延迟导入）"""
         from ..core.notification import get_notification_manager
         from .components.notification_bell import show_notification_dialog

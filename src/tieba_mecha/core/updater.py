@@ -10,7 +10,6 @@ import aiohttp
 
 from .. import __version__
 
-
 @dataclass
 class ReleaseInfo:
     """发布版本信息"""

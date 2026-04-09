@@ -65,7 +65,7 @@ class TestUpdateManager:
         """Test _compare_versions with greater version first."""
         manager = UpdateManager()
 
-        assert manager._compare_versions("1.1.0", "1.0.0") == 1
+        assert manager._compare_versions("1.1.1", "1.0.0") == 1
         assert manager._compare_versions("2.0.0", "1.9.9") == 1
         assert manager._compare_versions("1.0.1", "1.0.0") == 1
 
@@ -73,7 +73,7 @@ class TestUpdateManager:
         """Test _compare_versions with lesser version first."""
         manager = UpdateManager()
 
-        assert manager._compare_versions("1.0.0", "1.1.0") == -1
+        assert manager._compare_versions("1.0.0", "1.1.1") == -1
         assert manager._compare_versions("1.9.9", "2.0.0") == -1
         assert manager._compare_versions("1.0.0", "1.0.1") == -1
 
