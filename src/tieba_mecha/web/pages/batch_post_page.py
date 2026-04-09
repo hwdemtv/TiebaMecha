@@ -1432,13 +1432,13 @@ class BatchPostPage:
         pairs = []
         try:
             if file_path.endswith(".txt"):
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, "r", encoding="utf-8-sig") as f:
                     for line in f:
                         if line.strip():
                             pairs.append(("暂无标题", line.strip()))
             elif file_path.endswith(".csv"):
                 import csv
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, "r", encoding="utf-8-sig") as f:
                     reader = csv.reader(f)
                     for row in reader:
                         if len(row) >= 2:
