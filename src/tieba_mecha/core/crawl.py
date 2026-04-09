@@ -274,19 +274,56 @@ async def crawl_user(
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         # 获取用户信息
+        user_data = None  # 预先初始化
         try:
-            if isinstance(user_id, int):
-                user = await client.get_user_info(user_id)
-            else:
-                user = await client.get_user_info(user_id)
+            # 智能解析输入并调用 aiotieba 接口
+            # 注意：带登录态时，直接用用户名查询常返回 301，需先用无账号客户端获取 portrait
+            search_arg = user_id
+            user = None
+
+            if isinstance(user_id, str):
+                if user_id.isdigit():
+                    search_arg = int(user_id)
+                elif user_id.startswith("tb.1."):
+                    search_arg = user_id  # portrait 直接使用
+                else:
+                    # 用户名：先尝试无账号查询获取 portrait（避免登录态限制）
+                    try:
+                        async with aiotieba.Client() as anon_client:
+                            anon_user = await anon_client.get_user_info(user_id)
+                            if anon_user and anon_user.user_id and anon_user.portrait:
+                                search_arg = anon_user.portrait
+                            else:
+                                # 无账号查询也失败，尝试直接查
+                                search_arg = user_id
+                    except Exception:
+                        search_arg = user_id
+
+            user = await client.get_user_info(search_arg)
+
+            if not user or not getattr(user, "user_id", 0):
+                # ✅ 改进的错误诊断
+                if isinstance(user_id, str):
+                    if user_id.isdigit():
+                        fail_msg = f"用户ID {user_id} 查询失败\n可能原因：用户已注销或隐私设置禁止查询"
+                    elif user_id.startswith("tb.1."):
+                        fail_msg = f"Portrait {user_id} 查询失败\n可能原因：用户已注销或用户信息无法公开访问"
+                    else:
+                        fail_msg = f"用户名 '{user_id}' 查询失败\n可能原因：\n• 账号凭证已过期（BDUSS/STOKEN失效）\n• CUID指纹配置错误\n• 用户不存在或已注销\n• 用户隐私设置禁止API查询\n• 贴吧API限制或变化\n\n建议：改用纯数字 ID 或 Portrait (tb.1.xxx) 查询"
+                else:
+                    fail_msg = f"查询用户{user_id}失败：无法获取有效信息"
+                raise Exception(fail_msg)
+
+            # aiotieba 返回的 user_name 可能为 '-'，优先使用 nick_name
+            display_name = user.nick_name or user.show_name or (user.user_name if user.user_name != '-' else None) or str(user.user_id)
 
             user_data = UserData(
                 user_id=user.user_id,
-                user_name=user.user_name,
+                user_name=display_name,
                 nick_name=user.nick_name,
                 portrait=user.portrait,
-                level=user.level,
-                gender=user.gender,
+                level=getattr(user, 'glevel', 0),
+                gender=user.gender.value if hasattr(user.gender, 'value') else user.gender,
                 sign=user.sign,
                 tieba_uid=user.tieba_uid,
             )
@@ -297,22 +334,29 @@ async def crawl_user(
                 target=str(user_id),
                 current=1,
                 status="running",
-                message=f"获取用户: {user.user_name}",
+                message=f"获取用户: {user.nick_name or user.user_name}",
             )
 
             # 获取发帖记录
             if with_posts:
                 posts = []
-                async for post in client.get_user_posts(user.user_id):
-                    posts.append(
-                        {
-                            "tid": post.tid,
-                            "title": post.title,
-                            "fname": post.fname,
-                            "create_time": post.create_time,
-                        }
-                    )
-                    if len(posts) % 50 == 0:
+                pn = 1
+                while True:
+                    try:
+                        result = await client.get_user_posts(user.user_id, pn=pn, rn=50)
+                        if not result or not result.objs:
+                            break
+
+                        for post in result.objs:
+                            posts.append(
+                                {
+                                    "tid": post.tid,
+                                    "title": post.title,
+                                    "fname": post.fname,
+                                    "create_time": post.create_time,
+                                }
+                            )
+
                         yield CrawlProgress(
                             task_id=task.id,
                             task_type="user",
@@ -322,9 +366,17 @@ async def crawl_user(
                             message=f"获取发帖记录: {len(posts)} 条",
                         )
 
+                        # 如果返回数量小于请求数量，说明已到最后一页
+                        if len(result.objs) < 50:
+                            break
+                        pn += 1
+                    except Exception:
+                        break
+
                 user_data.posts = posts
 
         except Exception as e:
+            await db.update_crawl_task(task.id, status="failed")
             yield CrawlProgress(
                 task_id=task.id,
                 task_type="user",
@@ -352,7 +404,7 @@ async def crawl_user(
         target=str(user_id),
         current=1 + len(user_data.posts),
         status="completed",
-        message=f"用户 {user_data.user_name}，发帖 {len(user_data.posts)} 条",
+        message=f"用户 {user_data.nick_name or user_data.user_name}，发帖 {len(user_data.posts)} 条",
     )
 
 

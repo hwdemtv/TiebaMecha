@@ -1,6 +1,7 @@
 """Batch posting page with Cyber-Mecha aesthetic and progress monitor"""
 
 import flet as ft
+from ..flet_compat import COLORS
 import asyncio
 import json
 from datetime import datetime, timedelta
@@ -79,7 +80,7 @@ class BatchPostPage:
                     label=f"{display_name} ({proxy_label}) [权重: {weight_dots}]",
                     value=not is_suspended,
                     data=acc.id,
-                    fill_color=ft.colors.ERROR if is_suspended else ft.colors.PRIMARY
+                    fill_color=COLORS.ERROR if is_suspended else COLORS.PRIMARY
                 )
                 items.append(cb)
                 
@@ -904,8 +905,8 @@ class BatchPostPage:
                 data=status,
                 on_click=self._on_shortlink_filter_change,
                 style=ft.ButtonStyle(
-                    color=ft.colors.ON_PRIMARY if is_selected else ft.colors.ON_SURFACE,
-                    bgcolor=ft.colors.PRIMARY if is_selected else with_opacity(0.1, "onSurface"),
+                    color=COLORS.ON_PRIMARY if is_selected else COLORS.ON_SURFACE,
+                    bgcolor=COLORS.PRIMARY if is_selected else with_opacity(0.1, "onSurface"),
                     shape=ft.RoundedRectangleBorder(radius=20),
                 ),
                 height=32,
@@ -1027,8 +1028,8 @@ class BatchPostPage:
         # 更新按钮样式以模拟单选卡片
         for btn in self._filter_chips.controls:
             is_sel = (btn.data == status)
-            btn.style.color = ft.colors.ON_PRIMARY if is_sel else ft.colors.ON_SURFACE
-            btn.style.bgcolor = ft.colors.PRIMARY if is_sel else with_opacity(0.1, "onSurface")
+            btn.style.color = COLORS.ON_PRIMARY if is_sel else COLORS.ON_SURFACE
+            btn.style.bgcolor = COLORS.PRIMARY if is_sel else with_opacity(0.1, "onSurface")
             
         await self._render_filtered_links()
 
@@ -1577,5 +1578,5 @@ class BatchPostPage:
 
     def _show_snackbar(self, message: str, type="info"):
         color = "primary" if type != "error" else "error"
-        if type == "success": color = ft.colors.GREEN
+        if type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))

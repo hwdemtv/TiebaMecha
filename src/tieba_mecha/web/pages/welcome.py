@@ -1,6 +1,7 @@
 """Welcome Wizard for initial account setup"""
 
 import flet as ft
+from ..flet_compat import COLORS
 import asyncio
 from ..utils import with_opacity
 from ..components import icons
@@ -36,7 +37,7 @@ class WelcomePage:
         return ft.Container(
             content=ft.Column([
                 ft.Icon(icons.SHIELD_ROUNDED, size=80, color="primary"),
-                ft.Text("欢迎使用 TIEBAMECHA v1.1.0", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text("欢迎使用 TIEBAMECHA v1.1.1", size=24, weight=ft.FontWeight.BOLD),
                 ft.Text("INITIALIZATION REQUIRED / 需要初始化", size=12, color="primary", weight=ft.FontWeight.W_300),
                 ft.Divider(height=40, color="transparent"),
                 ft.Container(
@@ -146,5 +147,5 @@ class WelcomePage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))

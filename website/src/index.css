@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+/* Custom theme variables - used for JS access */
+:root {
+  --cyber-blue: #00f2ff;
+  --cyber-purple: #7000ff;
+  --cyber-pink: #ff00ff;
+  --cyber-dark: #050510;
+}
+
+/* Direct utility classes for custom colors */
+@layer utilities {
+  .bg-cyber-blue { background-color: #00f2ff; }
+  .bg-cyber-purple { background-color: #7000ff; }
+  .bg-cyber-pink { background-color: #ff00ff; }
+  .bg-cyber-dark { background-color: #050510; }
+
+  .text-cyber-blue { color: #00f2ff; }
+  .text-cyber-purple { color: #7000ff; }
+  .text-cyber-pink { color: #ff00ff; }
+
+  .border-cyber-blue { border-color: #00f2ff; }
+  .border-cyber-purple { border-color: #7000ff; }
+  .border-cyber-pink { border-color: #ff00ff; }
+
+  /* Opacity variants */
+  .bg-cyber-blue\/10 { background-color: rgba(0, 242, 255, 0.1); }
+  .bg-cyber-blue\/20 { background-color: rgba(0, 242, 255, 0.2); }
+  .bg-cyber-blue\/30 { background-color: rgba(0, 242, 255, 0.3); }
+  .bg-cyber-purple\/10 { background-color: rgba(112, 0, 255, 0.1); }
+  .bg-cyber-purple\/20 { background-color: rgba(112, 0, 255, 0.2); }
+  .bg-cyber-pink\/10 { background-color: rgba(255, 0, 255, 0.1); }
+  .bg-cyber-pink\/20 { background-color: rgba(255, 0, 255, 0.2); }
+
+  .border-cyber-blue\/10 { border-color: rgba(0, 242, 255, 0.1); }
+  .border-cyber-blue\/20 { border-color: rgba(0, 242, 255, 0.2); }
+  .border-cyber-blue\/30 { border-color: rgba(0, 242, 255, 0.3); }
+  .border-cyber-purple\/20 { border-color: rgba(112, 0, 255, 0.2); }
+  .border-cyber-pink\/20 { border-color: rgba(255, 0, 255, 0.2); }
+}
+
+@layer base {
+  body {
+    background: radial-gradient(circle at 50% 50%, #0a0a20 0%, #050510 100%);
+    min-height: 100vh;
+    color: #f3f4f6;
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .cyber-button {
+    padding: 0.5rem 1.5rem;
+    border-radius: 9999px;
+    font-weight: 700;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(90deg, #00f2ff 0%, #7000ff 100%);
+    box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
+    color: white;
+  }
+
+  .cyber-button:hover {
+    transform: scale(1.05);
+    box-shadow: 0 0 25px rgba(112, 0, 255, 0.5);
+  }
+
+  .glass-card {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 1rem;
+    padding: 1.5rem;
+  }
+}
+
+/* Custom animations */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 3s infinite;
+}

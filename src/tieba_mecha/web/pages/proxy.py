@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from ..flet_compat import COLORS
 from typing import List, Optional
 
 from ..components import create_gradient_button
@@ -47,8 +48,8 @@ class ProxyPage:
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
-                            color=ft.colors.PRIMARY,
-                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
+                            color=COLORS.PRIMARY,
+                            bgcolor={"": with_opacity(0.1, COLORS.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -358,7 +359,7 @@ class ProxyPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
 
     def _on_search_change(self, e):

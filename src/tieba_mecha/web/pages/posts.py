@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from ..flet_compat import COLORS
 import csv
 import os
 from datetime import datetime
@@ -76,7 +77,7 @@ class PostsPage:
                 class ThreadData:
                     pass
                 t = ThreadData()
-                t.tid = r.tid
+                t.tid = int(r.tid)
                 t.title = r.title
                 t.author_name = r.author_name
                 t.reply_num = r.reply_num
@@ -91,7 +92,11 @@ class PostsPage:
             self._update_toolbar_label("监控列表 (本地缓存)")
         else:
             self._is_from_db = False
-            self._update_toolbar_label("搜索结果")
+            self._threads = []
+            self.thread_list.controls = []  # 显式清空界面
+            self._update_toolbar_label("监控列表 (无数据)")
+        
+        self.page.update()
 
     def build(self) -> ft.Control:
         # 标题区域
@@ -103,8 +108,8 @@ class PostsPage:
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
-                            color=ft.colors.PRIMARY,
-                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
+                            color=COLORS.PRIMARY,
+                            bgcolor={"": with_opacity(0.1, COLORS.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -524,8 +529,8 @@ class PostsPage:
         if success:
             self._show_snackbar("已从本地记录中移除", "info")
             # 从当前列表中移除
-            self._threads = [t for t in self._threads if t.tid != tid]
-            self._selected.discard(tid)
+            self._threads = [t for t in self._threads if int(t.tid) != int(tid)]
+            self._selected.discard(int(tid))
             self.thread_list.controls = self._build_thread_items()
             self._update_toolbar()
             self.page.update()
@@ -554,6 +559,7 @@ class PostsPage:
             self._show_snackbar(msg, "error")
 
     def _toggle_select(self, tid):
+        tid = int(tid)
         if tid in self._selected: self._selected.remove(tid)
         else: self._selected.add(tid)
         
@@ -567,7 +573,7 @@ class PostsPage:
         if len(self._selected) == len(self._threads):
             self._selected.clear()
         else:
-            self._selected = {t.tid for t in self._threads}
+            self._selected = {int(t.tid) for t in self._threads}
         
         # 刷新列表项状态
         self.thread_list.controls = self._build_thread_items()
@@ -591,16 +597,23 @@ class PostsPage:
         if not self._selected:
             return
 
-        tids = list(self._selected)
+        tids = [int(tid) for tid in self._selected]
         count = await self.db.delete_thread_records_bulk(tids)
 
-        self._show_snackbar(f"已从本地移除 {count} 条记录", "info")
+        self._show_snackbar(f"已从本地移除 {count} 条记录", "info" if count > 0 else "warning")
         self._selected.clear()
 
-        # 重新加载本地缓存
-        await self._load_cached_threads()
-        self._update_toolbar()
-        self.page.update()
+        # 核心修复：直接根据 tids 过滤当前内存中的列表，而不是重新加载整个 DB
+        # 这样如果在搜索模式下，列表依然会保留搜索状态但移除已选内容
+        self._threads = [t for t in self._threads if int(t.tid) not in tids]
+        
+        # 如果 self._threads 变空了，且我们正在监控模式，则尝试从 DB 重新加载
+        if not self._threads and self._is_from_db:
+             await self._load_cached_threads()
+        else:
+            self.thread_list.controls = self._build_thread_items()
+            self._update_toolbar()
+            self.page.update()
 
     async def _delete_selected(self, e):
         if not self._selected: return
@@ -662,7 +675,7 @@ class PostsPage:
                     "确认执行", 
                     icon=icons.DELETE_FOREVER, 
                     on_click=start_batch_delete, 
-                    style=ft.ButtonStyle(bgcolor=ft.colors.ERROR, color=ft.colors.WHITE)
+                    style=ft.ButtonStyle(bgcolor=COLORS.ERROR, color=COLORS.WHITE)
                 ),
             ],
         )
@@ -713,5 +726,5 @@ class PostsPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))

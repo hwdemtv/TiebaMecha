@@ -22,7 +22,7 @@ os.environ["TIEBA_MECHA_SALT"] = "a" * 64  # 64 hex chars = 32 bytes
 os.environ["TIEBA_MECHA_SECRET_KEY"] = "b" * 64
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create an event loop for async tests."""
     loop = asyncio.new_event_loop()
@@ -68,10 +68,11 @@ def mock_aiotieba_client() -> MagicMock:
 @pytest.fixture
 def sample_account_data() -> dict:
     """Sample account data for testing."""
+    # BDUSS 必须是 192 字符
     return {
         "name": "test_account",
-        "bduss": "test_bduss_value_12345",
-        "stoken": "test_stoken_value_67890",
+        "bduss": "a" * 192,  # 192 个字符
+        "stoken": "b" * 64,  # STOKEN 通常 64 字符
         "user_id": 12345678,
         "user_name": "test_user",
     }

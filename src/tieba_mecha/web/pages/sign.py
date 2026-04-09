@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from ..flet_compat import COLORS
 from datetime import datetime
 from typing import List, Optional
 
@@ -36,6 +37,10 @@ class SignPage:
         if not self.db: return
         
         try:
+            # [NEW] 数据加载前强制检测并修复跨天签到状态
+            if hasattr(self.db, "check_and_reset_daily_sign"):
+                await self.db.check_and_reset_daily_sign()
+                
             # 加载贴吧列表 (单账号模式使用)
             account = await self.db.get_active_account()
             if account:
@@ -84,6 +89,13 @@ class SignPage:
                 pass
             
             self.refresh_ui()
+            
+            # --- 自动触发逻辑 (来自仪表盘快捷键) ---
+            if self.page.session.get("auto_start_sign"):
+                self.page.session.set("auto_start_sign", False)
+                # 等待一小会确保 UI 已渲染
+                self.page.run_task(self._do_sign, None)
+                
         except Exception as e:
             self._show_snackbar(f"数据加载引擎背刺: {str(e)}", "error")
             import traceback
@@ -118,7 +130,7 @@ class SignPage:
         self._mode = "matrix" if self._mode == "single" else "single"
         self.mode_text.value = "矩阵全扫模式" if self._mode == "matrix" else "单账号模式"
         self.mode_icon.name = GROUP_WORK if self._mode == "matrix" else PERSON
-        self.mode_icon.color = ft.colors.ERROR if self._mode == "matrix" else ft.colors.PRIMARY
+        self.mode_icon.color = COLORS.ERROR if self._mode == "matrix" else COLORS.PRIMARY
         
         # 切换设置面板可见性
         self.matrix_settings.visible = (self._mode == "matrix")
@@ -128,8 +140,8 @@ class SignPage:
     def build(self) -> ft.Control:
         # 统计文本组件
         self.total_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="primary")
-        self.success_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_ACCENT_400)
-        self.failure_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.RED_ACCENT_400)
+        self.success_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=COLORS.GREEN_ACCENT_400)
+        self.failure_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=COLORS.RED_ACCENT_400)
         self.matrix_total_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="primary")
         
         self.mode_text = ft.Text("单账号模式", size=14, weight=ft.FontWeight.BOLD, color="primary")
@@ -158,8 +170,8 @@ class SignPage:
                         icon_size=16,
                         on_click=lambda e: self._navigate("dashboard"),
                         style=ft.ButtonStyle(
-                            color=ft.colors.PRIMARY,
-                            bgcolor={"": with_opacity(0.1, ft.colors.PRIMARY)},
+                            color=COLORS.PRIMARY,
+                            bgcolor={"": with_opacity(0.1, COLORS.PRIMARY)},
                         ),
                     ),
                     padding=5,
@@ -273,7 +285,7 @@ class SignPage:
             on_click=self._save_daemon_config, 
             width=260, 
             style=ft.ButtonStyle(
-                bgcolor=ft.colors.SECONDARY,
+                bgcolor=COLORS.SECONDARY,
                 shape=ft.RoundedRectangleBorder(radius=8),
             )
         )
@@ -344,8 +356,8 @@ class SignPage:
                             ft.Container(
                                 content=ft.Row([
                                     ft.Text(f"总数:{f.history_total}", size=9, color="white"),
-                                    ft.Text(f"成功:{f.history_success}", size=9, color=ft.colors.GREEN_ACCENT_400),
-                                    ft.Text(f"失败:{f.history_failed}", size=9, color=ft.colors.RED_ACCENT_400),
+                                    ft.Text(f"成功:{f.history_success}", size=9, color=COLORS.GREEN_ACCENT_400),
+                                    ft.Text(f"失败:{f.history_failed}", size=9, color=COLORS.RED_ACCENT_400),
                                 ], spacing=5),
                                 bgcolor=with_opacity(0.1, "onSurface"),
                                 padding=ft.padding.symmetric(horizontal=6, vertical=2),
@@ -389,14 +401,14 @@ class SignPage:
                 status_color = "error"
                 acc_status = "ORPHANED"
                 proxy_info = "无"
-                proxy_color = ft.colors.RED_ACCENT_400
+                proxy_color = COLORS.RED_ACCENT_400
             else:
                 acc_name = f"{acc.name} [{acc.user_name}]" if acc.name and acc.user_name and acc.user_name != acc.name else (acc.name or acc.user_name)
                 is_acc_ready = acc.status == "ready"
                 status_color = "primary" if is_acc_ready else "error"
                 acc_status = acc.status.upper()
                 proxy_info = f"代理:{acc.proxy_id}" if acc.proxy_id else "裸连"
-                proxy_color = ft.colors.GREEN if acc.proxy_id else ft.colors.AMBER
+                proxy_color = COLORS.GREEN if acc.proxy_id else COLORS.AMBER
 
             card = ft.Container(
                 content=ft.Row([
@@ -571,7 +583,7 @@ class SignPage:
     def _show_snackbar(self, message: str, type="info"):
         color = "primary"
         if type == "error": color = "error"
-        elif type == "success": color = ft.colors.GREEN
+        elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
 
     async def _show_forum_history(self, forum_id: int, fname: str):
