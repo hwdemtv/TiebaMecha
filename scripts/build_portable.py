@@ -103,6 +103,7 @@ def build_portable():
         "aiohttp>=3.8.0",
         "aiohttp_socks>=0.8.0",
         "httpx>=0.25.0",
+        "socksio",
         "rich>=13.0",
         "pydantic>=2.0",
     ]
