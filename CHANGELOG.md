@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.1] - 2026-04-08
+## [1.1.1] - 2026-04-10
 
 ### Changed
 - **打包稳定性提升**
@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **便携版协议冲突修复**
   - 修复 `Receive loop error: 'text'` 错误：通过回滚 Web 协议栈（Uvicorn 0.29.0, FastAPI 0.110.0, Starlette 0.36.3）解决了与 Flet 0.23.2 的 WebSocket 通信冲突。
   - 修复 `No module named 'aiohttp_socks'` 报错。
+
+- **SOCKS 代理支持修复 (Hotfix)**
+  - 修复了使用 SOCKS 代理时由于缺少 `socksio` 依赖导致的 `ImportError`，确保 `httpx` 连接稳定性。
 
 - **用户信息探测修复**
   - 修复带登录态时用户名查询返回 301 的问题（改用无账号客户端获取 portrait）
