@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.1] - 2026-04-10
 
+- **矩阵发帖 UI 状态记忆**
+  - 在 `BatchPostPage` 中引入持久化状态集，解决切换页面导致账号/贴吧选中状态重设为全选的问题。
+  - 支持手动操作与全选操作的实时状态同步。
+
+- **自顶计数智能重置**
+  - 修复 `MaterialPool` 物料重置或重发时 `bump_count` 累计未清零的问题。
+  - 确保每一条新出的“战报”都从 0 次自顶开始。
+
 ### Changed
 - **打包稳定性提升**
   - 在 `pyproject.toml` 和 `build_portable.py` 中显式补齐 `aiohttp_socks`、`httpx`、`rich` 等直引依赖。
@@ -14,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 同步更新便携版启动器版本显示为 `v1.1.1`。
   - 优化 `build_copy_venv.py` 虚拟环境复制打包，修正绝对路径问题。
 
-### Fixed
+### Fixed (Hotfix)
 - **便携版协议冲突修复**
   - 修复 `Receive loop error: 'text'` 错误：通过回滚 Web 协议栈（Uvicorn 0.29.0, FastAPI 0.110.0, Starlette 0.36.3）解决了与 Flet 0.23.2 的 WebSocket 通信冲突。
   - 修复 `No module named 'aiohttp_socks'` 报错。
