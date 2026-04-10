@@ -177,8 +177,8 @@ async def sign_forum(db: Database, fname: str) -> SignResult:
 
         # 160002 为"已签到"，在业务逻辑上视为成功
         is_already_signed = hasattr(result, 'err') and result.err and result.err.code == 160002
-        # 340006/340001 表示贴吧已删除/封禁
-        is_forum_invalid = hasattr(result, 'err') and result.err and result.err.code in (340006, 340001)
+        # 340006/340001 表示贴吧已删除/封禁；3250004 表示账号在本项目被封禁
+        is_forum_invalid = hasattr(result, 'err') and result.err and result.err.code in (340006, 340001, 3250004)
 
         if result or is_already_signed:
             msg = "签到成功" if not is_already_signed else "今日已签到"
@@ -200,9 +200,13 @@ async def sign_forum(db: Database, fname: str) -> SignResult:
             forum = next((f for f in forums if f.fname == fname), None)
             if forum:
                 if is_forum_invalid:
-                    # 自动删除无效贴吧
-                    await db.delete_forum(forum.id)
-                    await log_warn(f"[{fname}] 贴吧已失效，已自动从数据库移除")
+                    err_code = result.err.code if hasattr(result, 'err') else 0
+                    if err_code == 3250004:
+                        await db.mark_forum_banned(account.id, fname, reason="智能签到检测到吧务封禁 (3250004)")
+                        await log_warn(f"[{fname}] 检测到吧务封禁，已转入熔断模式（仍保留在列表中）")
+                    else:
+                        await db.delete_forum(forum.id)
+                        await log_warn(f"[{fname}] 贴吧已失效 ({err_code})，已自动从数据库移除")
                 else:
                     await db.add_sign_log(forum_id=forum.id, fname=fname, success=success, message=msg)
                     await db.update_forum_sign(forum.id, success)
@@ -256,8 +260,8 @@ async def sign_all_forums(
                 
                 # 特殊逻辑：160002 代表已签到，在自动化任务中应视作成功
                 is_already_signed = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code == 160002
-                # 340006/340001 表示贴吧已删除/封禁，需要标记为无效
-                is_forum_invalid = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code in (340006, 340001)
+                # 340006/340001 表示贴吧已删除/封禁；3250004 表示账号再该吧被封禁
+                is_forum_invalid = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code in (340006, 340001, 3250004)
 
                 if sign_res or is_already_signed:
                     msg = "签到成功" if not is_already_signed else "今日已签到"
@@ -268,11 +272,17 @@ async def sign_all_forums(
                         sign_count=forum.sign_count + (0 if is_already_signed else 1)
                     )
                 elif is_forum_invalid:
-                    msg = f"贴吧已失效 ({sign_res.err.code})"
+                    err_code = sign_res.err.code if hasattr(sign_res, 'err') else 0
+                    msg = f"贴吧已失效 ({err_code})"
                     result = SignResult(fname=forum.fname, success=False, message=msg)
-                    # 自动删除无效贴吧
-                    await db.delete_forum(forum.id)
-                    await log_warn(f"[{forum.fname}] 贴吧已失效，已自动从数据库移除")
+                    
+                    if err_code == 3250004:
+                        await db.mark_forum_banned(account.id, forum.fname, reason="自动全扫检测到吧务封禁 (3250004)")
+                        await log_warn(f"[{forum.fname}] 检测到吧务封禁，已转入熔断模式")
+                    else:
+                        # 自动删除无效贴吧
+                        await db.delete_forum(forum.id)
+                        await log_warn(f"[{forum.fname}] 贴吧已失效，已自动从数据库移除")
                 else:
                     err_msg = str(sign_res.err) if hasattr(sign_res, 'err') else "请求被拒或未命中判定"
                     result = SignResult(fname=forum.fname, success=False, message=err_msg)
@@ -424,15 +434,22 @@ async def sign_all_accounts(
 
                 # 判定逻辑：支持 160002 已签到状态，检测无效贴吧
                 is_already_signed = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code == 160002
-                is_forum_invalid = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code in (340006, 340001)
+                is_forum_invalid = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code in (340006, 340001, 3250004)
                 success = bool(result_raw) or is_already_signed
 
                 if is_forum_invalid:
-                    # 自动删除无效贴吧
-                    await db.delete_forum(forum.id)
-                    message = f"贴吧已失效 ({result_raw.err.code})，已自动移除"
+                    err_code = result_raw.err.code if hasattr(result_raw, 'err') else 0
                     success = False
-                    await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
+                    
+                    if err_code == 3250004:
+                        await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
+                        message = f"贴吧已封禁 (3250004)"
+                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
+                    else:
+                        # 自动删除无效贴吧
+                        await db.delete_forum(forum.id)
+                        message = f"贴吧已失效 ({err_code})，已自动移除"
+                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
                 elif is_already_signed:
                     message = "今日已签到"
                 elif success:

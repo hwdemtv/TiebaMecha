@@ -12,6 +12,12 @@ import logging
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"
 
+# 提前注入 Flet Web 上传所需的密钥
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+from dotenv import load_dotenv
+load_dotenv(os.path.join(ROOT_DIR, ".env"))
+os.environ["FLET_SECRET_KEY"] = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY") or "cyber_mecha_secret_777"
+
 import uvicorn.config as _uvc
 _orig_configure_logging = _uvc.Config.configure_logging
 def _patched_configure_logging(self):
@@ -21,15 +27,25 @@ def _patched_configure_logging(self):
     return _orig_configure_logging(self)
 _uvc.Config.configure_logging = _patched_configure_logging
 
-# 添加绝对路径 src 到路径
+# 智能路径检测：兼容开发版(src/)与便携版(root)
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(ROOT_DIR, "src")
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
+if os.path.exists(SRC_DIR):
+    if SRC_DIR not in sys.path:
+        sys.path.insert(0, SRC_DIR)
+else:
+    # 便携版环境下，直接将根目录加入路径
+    if ROOT_DIR not in sys.path:
+        sys.path.insert(0, ROOT_DIR)
 
 import flet as ft
+from dotenv import load_dotenv
 from tieba_mecha.web.app import TiebaMechaApp
 from tieba_mecha.db.crud import get_db
+
+# 加载环境变量
+env_path = os.path.join(ROOT_DIR, ".env")
+load_dotenv(env_path)
 
 
 async def main(page: ft.Page):
@@ -40,32 +56,35 @@ async def main(page: ft.Page):
 
 def run_app(port: int = 9006):
     """启动 Flet 应用"""
-    # 兼容不同 Flet 版本
-    # Flet >= 0.80.0: ft.run()
-    # Flet >= 0.85.0: ft.run(main, ...) - 第一个参数是位置参数
-    # Flet < 0.80.0: ft.app()
+    # 确保上传目录存在，使用绝对路径避免工作目录问题
+    upload_dir = os.path.abspath("uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # 获取用于 Web 上传加密的密钥 (优先从环境变量读取)
+    secret_key = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY") or "fallback_secret_key"
+
+    # 显式注入 Flet 要求的环境变量，这是解决 Web 上传报错最可靠的方法
+    # 注意：旧版 Flet 只通过环境变量读取 secret_key，不接受参数传递
+    os.environ["FLET_SECRET_KEY"] = secret_key
+    os.environ["FLET_UPLOAD_DIR"] = upload_dir
+
+    # 构建应用参数
+    app_kwargs = {
+        "port": port,
+        "view": ft.AppView.WEB_BROWSER,
+        "upload_dir": upload_dir,
+    }
+
     if hasattr(ft, 'run'):
         try:
-            # 尝试新版本 API (第一个参数是位置参数)
-            ft.run(
-                main,
-                port=port,
-                view=ft.AppView.WEB_BROWSER,
-            )
+            # 新版本: ft.run() 第一个参数是 target (位置参数)
+            ft.run(main, **app_kwargs)
         except TypeError:
-            # 回退到关键字参数 (旧版本 ft.run)
-            ft.run(
-                target=main,
-                port=port,
-                view=ft.AppView.WEB_BROWSER,
-            )
+            # 旧版本: 所有参数都必须是关键字参数
+            ft.run(target=main, **app_kwargs)
     else:
-        # Flet < 0.80.0 使用 ft.app()
-        ft.app(
-            target=main,
-            port=port,
-            view=ft.AppView.WEB_BROWSER,
-        )
+        # 更旧版本: 使用 ft.app()
+        ft.app(target=main, **app_kwargs)
 
 
 if __name__ == "__main__":

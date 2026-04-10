@@ -496,6 +496,14 @@ class SignPage:
                 current += 1
                 self.progress_bar.value = current / total
                 self.status_text.value = f"正在签到: {result.fname} ({current}/{total})"
+                
+                # --- 方案 A: 跨页面进度广播 ---
+                self.page.pubsub.send_all_on_topic("sign_progress", {
+                    "value": current / total,
+                    "text": f"正在签到: {result.fname} ({current}/{total})",
+                    "status": "running"
+                })
+                
                 self.page.update()
             
             self._show_snackbar("所有签到指令已执行完毕", "success")
@@ -505,6 +513,10 @@ class SignPage:
         self._is_signing = False
         self.progress_bar.visible = False
         self.status_text.value = ""
+        
+        # 发送结束广播
+        self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
+        
         await self.load_data()
 
     async def _do_sign_matrix(self):
@@ -533,6 +545,14 @@ class SignPage:
                     
                 self.progress_bar.value = current_task_idx / total_tasks
                 self.status_text.value = f"[{current_task_idx}/{total_tasks}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
+                
+                # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
+                self.page.pubsub.send_all_on_topic("sign_progress", {
+                    "value": current_task_idx / total_tasks,
+                    "text": f"正在矩阵签到: {result.get('fname')}",
+                    "status": "running"
+                })
+                
                 self.page.update()
             
             self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
@@ -542,6 +562,8 @@ class SignPage:
         self._is_signing = False
         self.progress_bar.visible = False
         self.status_text.value = ""
+        # 发送结束广播
+        self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
         await self.load_data()
 
     async def _do_sign_one(self, fname):

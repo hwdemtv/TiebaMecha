@@ -24,7 +24,10 @@ class BatchPostPage:
         self._materials = [] # now mapped to DB MaterialPool
         self._all_fnames = []
         self.connector = SmartLinkConnector(db)
-        self._file_picker = ft.FilePicker(on_result=self._on_file_result)
+        self._file_picker = ft.FilePicker(
+            on_result=self._on_file_result,
+            on_upload=self._on_upload_progress
+        )
         
         # 搜索与批量选择状态
         self._material_search_text = ""
@@ -52,13 +55,13 @@ class BatchPostPage:
             self._refresh_forum_pool()
             await self._refresh_material_table()
         except Exception as e:
-            from ..core.logger import log_error
+            from ...core.logger import log_error
             await log_error(f"[UI ERROR] load_data failed: {e}")
             self._show_snackbar(f"数据同步异常: {str(e)}", "error")
 
     def _refresh_task_list(self):
         if hasattr(self, "task_table"):
-            self.task_table.rows = [self._build_task_row(t) for t in self._tasks]
+            self.task_table.rows = [self._build_task_row(t, i) for i, t in enumerate(self._tasks)]
             self.page.update()
 
     def _refresh_account_pool(self):
@@ -146,7 +149,7 @@ class BatchPostPage:
         """打开新型双轨矩阵靶场选择器"""
         if not hasattr(self, "global_group_column"):
             self.global_group_column = ft.Column(spacing=2, height=120, scroll=ft.ScrollMode.ADAPTIVE)
-            self._refresh_forum_pool()
+        self._refresh_forum_pool()
 
         def confirm_selection(e):
             num_native = sum(1 for cb in self.forum_pool_column.controls if isinstance(cb, ft.Checkbox) and cb.value)
@@ -289,8 +292,9 @@ class BatchPostPage:
         async def close_dialog(_):
             self.page.close(dialog)
             await self.load_data()
-            if self.forum_dialog.open:
-                self.page.close(self.forum_dialog)
+            # 设置完立刻刷新底层的 UI，不强制踢出用户
+            self._refresh_forum_pool()
+            self.page.update()
 
         dialog = ft.AlertDialog(
             title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
@@ -358,37 +362,6 @@ class BatchPostPage:
             self._archive_bulk_actions.visible = bool(self._selected_archive_ids)
             self._archive_selected_count_text.value = f"已选 {len(self._selected_archive_ids)} 项"
 
-    async def _bulk_toggle_auto_bump(self, e):
-        """批量开关自动回帖监控"""
-        if not self._selected_material_ids: return
-        
-        # 以第一个选中的状态取反作为目标
-        target_val = True
-        first_id = list(self._selected_material_ids)[0]
-        for m in self._materials:
-            if m.id == first_id:
-                target_val = not m.is_auto_bump
-                break
-        
-        from sqlalchemy import update
-        from ..db.models import MaterialPool
-        async with self.db.async_session() as session:
-            await session.execute(
-                update(MaterialPool)
-                .where(MaterialPool.id.in_(list(self._selected_material_ids)))
-                .values(is_auto_bump=target_val)
-            )
-            await session.commit()
-            
-        # 同步内存
-        for m in self._materials:
-            if m.id in self._selected_material_ids:
-                m.is_auto_bump = target_val
-        
-        num = len(self._selected_material_ids)
-        self._selected_material_ids.clear()
-        await self._refresh_material_table()
-        self._show_snackbar(f"成功批量{'开启' if target_val else '关闭'} {num} 条物料的监控", "success")
 
     async def _on_material_search_change(self, e):
         self._material_search_text = e.control.value
@@ -431,19 +404,42 @@ class BatchPostPage:
         await self._refresh_material_table()
         self._show_snackbar("选中记录已回炉重造", "success")
 
-    async def _refresh_material_table(self):
-        if not hasattr(self, "_material_table") or not hasattr(self, "_archive_table"):
+    async def _bulk_reset_materials(self, e):
+        """批量重置排期池中的选中项（通常用于将‘失败’重置为‘待发’）"""
+        if not self._selected_material_ids:
             return
-            
+        for mid in list(self._selected_material_ids):
+            await self.db.update_material_status(mid, "pending")
+        self._selected_material_ids.clear()
+        self._materials = await self.db.get_materials()
+        await self._refresh_material_table()
+        self._show_snackbar(f"已批量重置 {len(self._selected_material_ids)} 条物料到待发状态", "success")
+
+    async def _refresh_material_table(self):
+        print(f"[DEBUG] _refresh_material_table 被调用，物料数: {len(self._materials)}")
+
+        if not hasattr(self, "_material_table") or not hasattr(self, "_archive_table"):
+            print(f"[DEBUG] _material_table 或 _archive_table 未初始化，跳过刷新")
+            return
+
         pending_rows = []
         archive_rows = []
-        
+
         pending = sum(1 for m in self._materials if m.status == "pending")
         success = sum(1 for m in self._materials if m.status == "success")
         failed = sum(1 for m in self._materials if m.status == "failed")
+
+        print(f"[DEBUG] 状态统计 - 待发: {pending}, 成功: {success}, 失败: {failed}")
         
         if hasattr(self, "_stats_text"):
             self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})"
+
+        if hasattr(self, "bottom_tabs"):
+            for tab in self.bottom_tabs.tabs:
+                if tab.icon == "list_alt_rounded":
+                    tab.text = f"物料排期池 ({pending + failed})"
+                elif tab.icon == "archive_rounded":
+                    tab.text = f"已发归档库 ({success})"
             
         for m in self._materials:
             try:
@@ -537,7 +533,7 @@ class BatchPostPage:
         mid = e.control.data
         val = e.control.value
         async with self.db.async_session() as session:
-            from ..db.models import MaterialPool
+            from ...db.models import MaterialPool
             m = await session.get(MaterialPool, mid)
             if m:
                 m.is_auto_bump = val
@@ -613,7 +609,67 @@ class BatchPostPage:
         self._materials = []
         await self._refresh_material_table()
         if e: self._show_snackbar("物料池已全库排空", "success")
-        
+
+    def _open_batch_paste_dialog(self, e):
+        """打开批量粘贴导入对话框"""
+        paste_content = ft.TextField(
+            label="粘贴内容（支持 CSV 或纯文本）",
+            hint_text="CSV格式: 每行 标题,内容\n纯文本: 每行一条内容",
+            multiline=True,
+            min_lines=8,
+            max_lines=15,
+            width=600,
+        )
+        format_hint = ft.Text(
+            "支持格式：\n• CSV: 标题,内容（每行一条）\n• 纯文本: 每行一条内容，标题自动设为'暂无标题'",
+            size=11, color="onSurfaceVariant"
+        )
+
+        async def do_import(_):
+            text = paste_content.value.strip()
+            if not text:
+                self._show_snackbar("请先粘贴内容", "warning")
+                return
+
+            pairs = []
+            lines = text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                # 检测是否为 CSV 格式（包含逗号分隔）
+                if ',' in line:
+                    parts = line.split(',', 1)  # 只分割第一个逗号
+                    if len(parts) == 2:
+                        title = parts[0].strip() or "暂无标题"
+                        content = parts[1].strip()
+                        if content:
+                            pairs.append((title, content))
+                else:
+                    # 纯文本格式
+                    pairs.append(("暂无标题", line))
+
+            if not pairs:
+                self._show_snackbar("未解析到有效内容", "warning")
+                return
+
+            added_count = await self.db.add_materials_bulk(pairs)
+            self._materials = await self.db.get_materials()
+            await self._refresh_material_table()
+            self.page.close(dialog)
+            self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.CONTENT_PASTE_GO, color="primary"), ft.Text("批量粘贴导入")], spacing=10),
+            content=ft.Column([paste_content, format_hint], spacing=10, tight=True),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("导入", on_click=do_import),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dialog)
+
     async def _reset_all_materials(self, e=None):
         await self.db.reset_materials_status()
         self._materials = await self.db.get_materials()
@@ -686,7 +742,7 @@ class BatchPostPage:
         # 获取第一个选中的状态，作为基准进行翻转（或者全部设为统一值，这里采用统一设为 True 的逻辑，除非全是 True 才会全部设为 False）
         is_any_off = False
         async with self.db.async_session() as session:
-            from ..db.models import MaterialPool
+            from ...db.models import MaterialPool
             for mid in list(self._selected_material_ids):
                 m = await session.get(MaterialPool, mid)
                 if m and not m.is_auto_bump:
@@ -700,6 +756,7 @@ class BatchPostPage:
                     m.is_auto_bump = target_val
             await session.commit()
             
+        self._selected_material_ids.clear()
         self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar(f"已批量{'开启' if target_val else '关闭'} {len(self._selected_material_ids)} 项自动回帖", "success")
@@ -793,7 +850,7 @@ class BatchPostPage:
                         await self.db.update_material_ai(m.id, opt_title, opt_content)
                         success_count += 1
                 except Exception as ex:
-                    from ..core.logger import log_error
+                    from ...core.logger import log_error
                     await log_error(f"AI Batch error on ID {m.id}: {ex}")
                 
                 progress_bar.value = (i + 1) / total
@@ -1186,6 +1243,9 @@ class BatchPostPage:
             ft.FilledButton("批量删除", icon=icons.DELETE_SWEEP,
                             style=ft.ButtonStyle(bgcolor="error", color="white"), 
                             on_click=self._bulk_delete_materials),
+            ft.FilledButton("批量重置", icon=icons.REPLAY_ROUNDED,
+                            style=ft.ButtonStyle(bgcolor="orange", color="white"), 
+                            on_click=self._bulk_reset_materials),
             ft.FilledButton("批量自顶", icon=icons.BOLT,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
@@ -1265,7 +1325,7 @@ class BatchPostPage:
         )
         self.account_pool_column = ft.Column(spacing=5, height=150, scroll=ft.ScrollMode.ADAPTIVE)
         self.start_btn = ft.ElevatedButton(
-            "启动矩阵任务", icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
+            "制定矩阵任务", icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
             on_click=self._on_start_click,
             style=ft.ButtonStyle(color="white", bgcolor="primary")
         )
@@ -1279,10 +1339,10 @@ class BatchPostPage:
             selected_index=0,
             animation_duration=300,
             tabs=[
+                ft.Tab(text="全域任务队列", icon=icons.UPDATE_ROUNDED, content=self._build_task_queue_view()),
                 ft.Tab(text="物料排期池", icon=icons.LIST_ALT_ROUNDED, content=self._build_material_view()),
                 ft.Tab(text="已发归档库", icon=icons.ARCHIVE_ROUNDED, content=self._build_archive_view()),
                 ft.Tab(text="实时任务流水", icon=icons.STREAM_ROUNDED, content=self._build_log_view()),
-                ft.Tab(text="全域任务队列", icon=icons.UPDATE_ROUNDED, content=self._build_task_queue_view()),
             ],
             expand=True,
         )
@@ -1309,7 +1369,8 @@ class BatchPostPage:
                             ft.Row([
                                 ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
                                 ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
-                                ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant"),
+                                ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
+                                ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
                                 ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
                             ], spacing=0),
                         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -1358,7 +1419,7 @@ class BatchPostPage:
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
-                    ], expand=2, spacing=12),  # 右侧面板，2 份宽度，两卡片上下排列
+                    ], expand=2, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),  # 右侧面板，支持滚动防止底部被截断
                 ],
                     expand=True,
                     vertical_alignment=ft.CrossAxisAlignment.START,  # 顶部对齐
@@ -1387,13 +1448,14 @@ class BatchPostPage:
     def _build_task_queue_view(self):
         self.task_table = ft.DataTable(
             columns=[
-                ft.DataColumn(ft.Text("ID")),
+                ft.DataColumn(ft.Text("序号")),
                 ft.DataColumn(ft.Text("贴吧")),
                 ft.DataColumn(ft.Text("AI")),
                 ft.DataColumn(ft.Text("策略")),
                 ft.DataColumn(ft.Text("计划时间")),
                 ft.DataColumn(ft.Text("状态")),
                 ft.DataColumn(ft.Text("进度")),
+                ft.DataColumn(ft.Text("操作")),
             ], rows=[],
         )
         return ft.Column([
@@ -1407,37 +1469,169 @@ class BatchPostPage:
             )
         ], spacing=10, expand=True)
 
-    def _build_task_row(self, t):
+    def _build_task_row(self, t, index):
+        import json
         status_color = {"pending": "orange", "running": "primary", "completed": "green", "failed": "error"}.get(t.status, "onSurface")
-        fnames_disp = t.fnames_json if hasattr(t, "fnames_json") and t.fnames_json else t.fname
+        
+        # 优化贴吧列表显示
+        try:
+            if hasattr(t, "fnames_json") and t.fnames_json:
+                fnames = json.loads(t.fnames_json)
+                if isinstance(fnames, list):
+                    count = len(fnames)
+                    if count > 1:
+                        fnames_disp = f"{fnames[0]} 等 {count} 个贴吧"
+                    else:
+                        fnames_disp = fnames[0] if fnames else "未指定"
+                else:
+                    fnames_disp = str(fnames)
+            else:
+                fnames_disp = t.fname or "未指定"
+        except Exception:
+            fnames_disp = t.fname or "解析错误"
 
         return ft.DataRow(cells=[
-            ft.DataCell(ft.Text(str(t.id))),
-            ft.DataCell(ft.Text(fnames_disp[:15] + ("..." if len(fnames_disp)>15 else ""))),
+            ft.DataCell(ft.Text(str(index + 1))),
+            ft.DataCell(ft.Text(fnames_disp, tooltip=t.fnames_json)), # 悬停显示原始数据以备查
             ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(t.schedule_time.strftime("%m-%d %H:%M") if t.schedule_time else "即时")),
             ft.DataCell(ft.Text(t.status.upper(), color=status_color, weight=ft.FontWeight.BOLD)),
             ft.DataCell(ft.Text(f"{t.progress}/{t.total}")),
+            ft.DataCell(
+                ft.Row([
+                    ft.IconButton(
+                        icons.DELETE_OUTLINE, 
+                        icon_color="error", 
+                        icon_size=18,
+                        tooltip="删除任务",
+                        on_click=lambda _: self.page.run_task(self._on_delete_task, t.id)
+                    ),
+                ], spacing=0)
+            ),
         ])
+
+    async def _on_delete_task(self, task_id: int):
+        if await self.db.delete_batch_task(task_id):
+            self._show_snackbar(f"任务 ID:{task_id} 已删除", "success")
+            await self.load_data()
+        else:
+            self._show_snackbar("删除失败", "error")
 
     def _toggle_schedule(self, e):
         self.schedule_time.visible = e.control.value
         self.interval_hours.visible = e.control.value
         self.page.update()
 
-    async def _on_file_result(self, e):
+    async def _on_file_result(self, e: ft.FilePickerResultEvent):
         if not e.files: return
+
         file_path = e.files[0].path
+
+        # 兼容性处理：Web 模式下 path 为 None
+        if file_path is None:
+            try:
+                # 开启 Web 上传流程
+                self.progress_bar.visible = True
+                self.progress_bar.value = 0
+                self.page.update()
+
+                self._show_snackbar("正在开启 Web 传输通道，请稍候...", "info")
+                upload_files = []
+                for f in e.files:
+                    # 获取上传 URL (过期时间 60s)
+                    u_url = self.page.get_upload_url(f.name, 60)
+                    if u_url:
+                        upload_files.append(ft.FilePickerUploadFile(f.name, upload_url=u_url))
+                    else:
+                        # 无法获取上传 URL，可能是 SECRET_KEY 问题
+                        self._show_snackbar("无法获取上传 URL，请检查 FLET_SECRET_KEY 配置", "error")
+                        self.progress_bar.visible = False
+                        self.page.update()
+                        return
+
+                if upload_files:
+                    self._file_picker.upload(upload_files)
+                else:
+                    self._show_snackbar("未能创建上传任务，请重试", "warning")
+                    self.progress_bar.visible = False
+                    self.page.update()
+                return
+            except Exception as ex:
+                self._show_snackbar(f"文件上传初始化失败: {str(ex)}", "error")
+                self.progress_bar.visible = False
+                self.page.update()
+                return
+
+        # 桌面模式：直接处理
+        await self._process_file_import(file_path)
+
+    async def _on_upload_progress(self, e: ft.FilePickerUploadEvent):
+        """处理 Web 端文件上传进度与后续导入"""
+        # 更新上传进度条
+        self.progress_bar.value = e.progress
+        self.page.update()
+
+        if e.progress == 1.0:
+            # 上传完成，文件现在位于服务器的 uploads/ 目录下
+            import os
+            # 获取 Flet 配置的上传目录 (多重探测)
+            env_upload = os.environ.get("FLET_UPLOAD_DIR")
+            page_upload = getattr(self.page, 'upload_dir', None)
+            
+            if env_upload:
+                upload_dir = env_upload
+            elif page_upload:
+                upload_dir = page_upload
+            else:
+                # 最后的兜底策略：查找项目根目录下的 uploads
+                # 从当前文件 src/tieba_mecha/web/pages/batch_post_page.py 向上退 4 级
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir))))
+                upload_dir = os.path.join(root_dir, "uploads")
+
+            file_server_path = os.path.join(upload_dir, e.file_name)
+            
+            print(f"[DEBUG] 上传完成，探测目录: {upload_dir}")
+            print(f"[DEBUG] 查找目标文件: {file_server_path}")
+
+            # 等待 1.0s 确保 OS 文件句柄释放且缓冲区落盘
+            await asyncio.sleep(1.0)
+
+            if os.path.exists(file_server_path):
+                try:
+                    await self._process_file_import(file_server_path)
+                finally:
+                    # 处理完后重置进度条
+                    self.progress_bar.visible = False
+                    self.page.update()
+
+                    # 处理完后清理临时文件
+                    try:
+                        os.remove(file_server_path)
+                    except:
+                        pass
+            else:
+                # 文件不存在，给出明确错误提示
+                self.progress_bar.visible = False
+                self.page.update()
+                self._show_snackbar(f"文件上传后未找到: {file_server_path}，请检查 uploads 目录权限", "error")
+
+    async def _process_file_import(self, file_path: str):
+        """通用的文本/CSV物料解析与持久化逻辑"""
         pairs = []
         try:
-            if file_path.endswith(".txt"):
+            print(f"[DEBUG] 开始处理文件导入: {file_path}")
+
+            if file_path.lower().endswith(".txt"):
+                # 使用 utf-8-sig 兼容带/不带 BOM 的文本
                 with open(file_path, "r", encoding="utf-8-sig") as f:
                     for line in f:
                         if line.strip():
                             pairs.append(("暂无标题", line.strip()))
-            elif file_path.endswith(".csv"):
+            elif file_path.lower().endswith(".csv"):
                 import csv
+                # 使用 utf-8-sig 确保从 Excel 导出的带 BOM 的 CSV 也能被正确解析标题
                 with open(file_path, "r", encoding="utf-8-sig") as f:
                     reader = csv.reader(f)
                     for row in reader:
@@ -1445,18 +1639,31 @@ class BatchPostPage:
                             pairs.append((row[0], row[1]))
                         elif len(row) == 1 and row[0].strip():
                             pairs.append(("暂无标题", row[0].strip()))
-            
+
+            print(f"[DEBUG] 解析到 {len(pairs)} 条数据")
+
+            if not pairs:
+                self._show_snackbar("文件内容为空或格式不匹配，未导入任何数据", "warning")
+                return
+
             added_count = await self.db.add_materials_bulk(pairs)
+            print(f"[DEBUG] 写入数据库: {added_count} 条")
+
             self._materials = await self.db.get_materials()
+            print(f"[DEBUG] 刷新缓存: {len(self._materials)} 条物料")
+
             await self._refresh_material_table()
             self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")
         except Exception as ex:
+            print(f"[ERROR] 文件导入失败: {str(ex)}")
+            import traceback
+            traceback.print_exc()
             self._show_snackbar(f"文件解析失败: {str(ex)}", "error")
 
     async def _on_start_click(self, e):
         if self._is_running:
             self._is_running = False
-            self.start_btn.text = "启动矩阵任务"
+            self.start_btn.text = "制定矩阵任务"
             self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
             self.page.update()
             return
@@ -1517,7 +1724,7 @@ class BatchPostPage:
         self._is_running = True
         self.start_btn.text = "停止任务"
         self.start_btn.icon = icons.STOP_CIRCLE_ROUNDED
-        self.start_btn.bgcolor = "error"
+        self.start_btn.style = ft.ButtonStyle(color="white", bgcolor="error")
         self.progress_bar.visible = True
         self.progress_bar.value = 0
         self.log_list.controls.clear()
@@ -1560,9 +1767,9 @@ class BatchPostPage:
             self._add_log(f"CRITICAL ERROR: {str(ex)}", "error")
         finally:
             self._is_running = False
-            self.start_btn.text = "启动矩阵任务"
+            self.start_btn.text = "制定矩阵任务"
             self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
-            self.start_btn.bgcolor = "primary"
+            self.start_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
             self.progress_bar.visible = False
             self.page.update()
 

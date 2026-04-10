@@ -3,6 +3,7 @@
 import asyncio
 import random
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional, AsyncGenerator
@@ -204,13 +205,10 @@ class BatchPostManager:
 
         # --- 授权门控与配额限制 ---
         am = get_auth_manager()
+        # 强制在任务启动前刷新一次本地状态，避免异步加载延迟导致的权限误判 (修复 AI 开启无效问题)
+        await am.check_local_status()
         is_pro = (am.status == AuthStatus.PRO)
         
-        if not is_pro:
-            # 尝试刷新一次授权状态
-            await am.check_local_status()
-            is_pro = (am.status == AuthStatus.PRO)
-            
         if not is_pro:
             # Free 版配额限制
             if len(task.accounts) > 1:
@@ -230,6 +228,17 @@ class BatchPostManager:
         if not fnames:
             yield {"status": "failed", "msg": "未指定目标贴吧"}
             return
+
+        # [核平级编码修复] 强制确保该异步任务线程的输出编码为 UTF-8
+        import sys
+        if sys.platform == "win32":
+            try:
+                if hasattr(sys.stdout, "reconfigure"):
+                    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+                if hasattr(sys.stderr, "reconfigure"):
+                    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass
 
         await log_info(
             f"启动批量发帖任务: {fnames} | 策略: {task.strategy} | 目标数: {task.total}"
@@ -291,47 +300,42 @@ class BatchPostManager:
             title = current_material.title
             content = current_material.content
 
-            # AI 动态变体增强 (增加强制 10 秒超时避免单个挂起全队)
-            if task.use_ai:
-                try:
+            # [Step 1: AI 动态变体增强] (增加强制 15 秒超时避免单个挂起全队)
+            try:
+                if task.use_ai:
                     optimizer = AIOptimizer(self.db)
-                    success, opt_title, opt_content, err = await asyncio.wait_for(
+                    success_ai, opt_title, opt_content, err_ai = await asyncio.wait_for(
                         optimizer.optimize_post(title, content),
-                        timeout=12.0
+                        timeout=15.0
                     )
-                    if success:
+                    if success_ai:
                         title, content = opt_title, opt_content
-                        await log_info(f"AI 变体生成成功: {title[:20]}...")
+                        # 将生成的变体同步回数据库，让用户在 UI 界面可见
+                        await self.db.update_material_ai(current_material.id, title, content)
+                        short_title = title[:15] + "..." if len(title) > 15 else title
+                        await log_info(f"[Step 1] AI 变体生成成功: [{short_title}]")
                     else:
-                        await log_warn(f"AI 改写拒稿，回落原始文案: {err}")
-                except asyncio.TimeoutError:
-                    await log_warn("AI 服务调用超时 (超过12s)，回落原始文案")
-                except Exception as ex:
-                    await log_warn(f"AI 服务异常: {str(ex)}")
+                        await log_warn(f"[Step 1] AI 改写拒稿，回落原始文案: {err_ai}")
+            except Exception as ex:
+                await log_warn(f"[Step 1] AI 服务异常或超时: {str(ex)}")
 
+            # 核心执行链
             try:
                 async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
                     import httpx
                     
                     # 确保获取上下文 TBS
-                    await client.get_self_info()
+                    try:
+                        await client.get_self_info()
+                    except Exception: pass
+                    
                     if not getattr(client.account, 'tbs', None):
                         yield {"status": "error", "msg": "获取账号发帖凭证(TBS)失败", "fname": target_fname, "progress": task.progress, "total": task.total}
                         continue
 
                     forum = await client.get_forum(target_fname)
                     
-                    headers = {
-                        "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
-                        "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-                        "Referer": f"https://tieba.baidu.com/f?kw={target_fname}",
-                        "Origin": "https://tieba.baidu.com",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    }
-                    
+                    # 代理配置
                     proxy_model = await self.db.get_proxy(proxy_id) if proxy_id else None
                     proxy_url = None
                     if proxy_model:
@@ -341,50 +345,91 @@ class BatchPostManager:
                         p = proxy_model.port
                         user = decrypt_value(proxy_model.username) if proxy_model.username else ""
                         pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
-                        if user and pwd:
-                            proxy_url = f"{scheme}://{user}:{pwd}@{h}:{p}"
-                        else:
-                            proxy_url = f"{scheme}://{h}:{p}"
-                            
-                    # 【防抽引擎】零宽防风控挂载 (确保连改写后的 AI 文本也能被防抽)
-                    safe_title = Obfuscator.inject_zero_width_chars(title, density=0.2)
-                    safe_content = Obfuscator.humanize_spacing(Obfuscator.inject_zero_width_chars(content, density=0.3))
+                        proxy_url = f"{scheme}://{user}:{pwd}@{h}:{p}" if user and pwd else f"{scheme}://{h}:{p}"
+
+                    # --- [Step 2: 文案安全清洗、强制编码转换及混淆] ---
+                    try:
+                        # [关键修复] 强制 UTF-8 清洗，并剔除可能导致 Win32 环境崩溃的非法字符
+                        title = title.encode('utf-8', 'replace').decode('utf-8')
+                        content = content.encode('utf-8', 'replace').decode('utf-8')
                         
-                    data = {
-                        "ie": "utf-8",
-                        "kw": target_fname,
-                        "fid": forum.fid,
-                        "tbs": client.account.tbs,
-                        "title": safe_title,
-                        "content": safe_content,
-                        "anonymous": 0
-                    }
-                    
+                        # 混淆逻辑
+                        obfuscated_content = Obfuscator.inject_zero_width_chars(content, density=0.2)
+                        safe_content = Obfuscator.humanize_spacing(obfuscated_content)
+                    except Exception as e:
+                        err_msg = f"[Step 2] 文本预处理异常: {str(e)}"
+                        await self.db.update_material_status(current_material.id, "failed", err_msg, posted_fname=target_fname, posted_account_id=account_id)
+                        yield {"status": "error", "msg": err_msg, "fname": target_fname, "progress": task.progress, "total": task.total}
+                        continue
+
+                    # --- [Step 3: 网络协议发射] ---
                     tid = 0
                     success = False
                     err_msg = ""
-                    
-                    async with httpx.AsyncClient(proxy=proxy_url) as http_client:
-                        # 启动预热仿生浏览器动作
-                        try:
-                            await http_client.get(f"https://tieba.baidu.com/f?kw={target_fname}", headers=headers, timeout=10.0)
-                            await asyncio.sleep(1.2)
-                        except Exception:
-                            pass
+                    try:
+                        # [关键修复] 对 URL 路径中的中文进行 Percent-encoding 转义
+                        # 核心原因：Windows 系统某些环境下请求头不允许非 ASCII 字符，必须转义为 % 形式
+                        quoted_fname = urllib.parse.quote(target_fname)
+                        headers = {
+                            "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
+                            "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                            "Referer": f"https://tieba.baidu.com/f?kw={quoted_fname}",
+                            "Origin": "https://tieba.baidu.com",
+                            "X-Requested-With": "XMLHttpRequest",
+                            "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                        }
+                        data = {
+                            "ie": "utf-8",
+                            "kw": target_fname,
+                            "fid": getattr(forum, 'fid', 0),
+                            "tbs": getattr(client.account, 'tbs', ''),
+                            "title": title,
+                            "content": safe_content,
+                            "anonymous": 0
+                        }
+                        
+                        async with httpx.AsyncClient(proxy=proxy_url) as http_client:
+                            # 仿生预热流量 (转义后的 URL)
+                            try:
+                                await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
+                                await asyncio.sleep(1.2)
+                            except: pass
+                                
+                            # [终极加固] 手动对 Body 进行 UTF-8 编码，防止系统 ASCII 环境干扰导致崩溃
+                            body_content = urllib.parse.urlencode(data).encode('utf-8')
                             
-                        # 进行核心发射
-                        res = await http_client.post(
-                            "https://tieba.baidu.com/f/commit/thread/add",
-                            headers=headers,
-                            data=data,
-                            timeout=15.0
-                        )
-                        res_json = res.json()
-                        if res_json.get("err_code") == 0:
-                            tid = res_json.get("data", {}).get("tid", 0)
-                            success = True
-                        else:
-                            err_msg = str(res_json.get('error') or res_json)
+                            res = await http_client.post(
+                                "https://tieba.baidu.com/f/commit/thread/add",
+                                headers=headers,
+                                content=body_content,
+                                timeout=20.0
+                            )
+                            res_json = res.json()
+                            err_code = res_json.get("err_code", 0)
+                            
+                            if err_code == 0:
+                                tid = res_json.get("data", {}).get("tid", 0)
+                                success = True
+                            else:
+                                err_msg = str(res_json.get('error') or res_json)
+                                # 识别封禁逻辑
+                                if err_code == 3250004:
+                                    await log_error(f"检测到吧务封禁！账号 {account_id} 已在 {target_fname} 自动熔断。")
+                                    await self.db.mark_forum_banned(account_id, target_fname, reason="Step 3 发射检测到吧务封禁")
+                                    try: await client.unfollow(target_fname)
+                                    except: pass
+                                elif err_code == 340001:
+                                    await log_warn(f"{target_fname} 正在升级中，已跳过该点位。")
+                                    continue
+                    except Exception as e:
+                        # [环境诊断] 如果进入此块，str(e) 将明确告知是否仍为 encoding 错误
+                        err_msg = f"[Step 3] 通讯过程异常 (账号:{account_id} @ {target_fname}): {str(e)}"
+                        await log_error(err_msg)
+                        await self.db.update_material_status(current_material.id, "failed", err_msg, posted_fname=target_fname, posted_account_id=account_id)
+                        yield {"status": "error", "msg": err_msg, "fname": target_fname, "progress": task.progress, "total": task.total}
+                        continue
 
                     if success:
                         task.progress += 1
@@ -392,7 +437,8 @@ class BatchPostManager:
                             current_material.id, 
                             "success", 
                             posted_fname=target_fname, 
-                            posted_tid=tid
+                            posted_tid=tid,
+                            posted_account_id=account_id
                         )
                         await self.db.update_target_pool_status(target_fname, is_success=True)
                         await log_info(
@@ -406,7 +452,13 @@ class BatchPostManager:
                             "account_id": account_id, "progress": task.progress, "total": task.total,
                         }
                     else:
-                        await self.db.update_material_status(current_material.id, "failed", err_msg)
+                        await self.db.update_material_status(
+                            current_material.id, 
+                            "failed", 
+                            last_error=err_msg,
+                            posted_fname=target_fname,
+                            posted_account_id=account_id
+                        )
                         await self.db.update_target_pool_status(target_fname, is_success=False, error_reason=err_msg)
                         yield {"status": "error", "msg": f"发帖拦截: {err_msg}", "fname": target_fname, "progress": task.progress, "total": task.total}
             except TiebaServerError as e:
@@ -438,7 +490,28 @@ class BatchPostManager:
                 await client.add_post(fname, tid, safe_content)
                 return True
             except Exception as e:
-                await log_error(f"自顶回帖失败 [TID:{tid}]: {str(e)}")
+                err_str = str(e)
+                await log_error(f"自顶回帖失败 [TID:{tid}]: {err_str}")
+                
+                # 识别吧务封禁
+                if "3250004" in err_str:
+                    # 标记位熔断：不再删除记录，而是设为封禁并停止发帖许可
+                    await self.db.mark_forum_banned(account_id, fname, reason="回帖触发吧务封禁 (3250004)")
+                    try:
+                        await client.unfollow(fname)
+                    except Exception as ue:
+                        logger.warning(f"回帖熔断取消关注失败: {ue}")
+                        
+                    # 寻找关联物料并关闭自动回帖，防止持续背刺
+                    async with self.db.async_session() as session:
+                        from ..db.models import MaterialPool
+                        from sqlalchemy import update
+                        await session.execute(
+                            update(MaterialPool).where(MaterialPool.posted_tid == tid).values(is_auto_bump=False)
+                        )
+                        await session.commit()
+                    await log_warn(f"账号 {account_id} 在 {fname} 遭遇封禁，已转入标记熔断并紧急关闭 TID:{tid} 的自动回帖。")
+                
                 return False
 
 
@@ -477,20 +550,29 @@ class AutoBumpManager:
 
             await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件，开始执行...")
             
-            # 选取一个活跃账号进行回帖 (简单策略：使用当前全局活跃号)
-            active_acc = await self.db.get_active_account()
-            if not active_acc:
-                await log_warn("自动回帖失败：未设置全局活跃账号")
-                return
+            # 运行时 Skip-List：防止在同一次扫描中反复背刺已被封的账号
+            banned_pairs = set() # (account_id, fname)
+            
+            # 获取当前全局活跃号作为后备
+            default_acc = await self.db.get_active_account()
 
             for material in candidates:
-                # 构造回帖内容：可以从 AI 生成或者简单的占位符，这里简单使用标题变体
+                # 【原号出战策略】优先选用发帖时的原号进行回帖 (Section 4.2)
+                target_account_id = material.posted_account_id or (default_acc.id if default_acc else None)
+                if not target_account_id:
+                    continue
+                
+                # 检查动态黑名单
+                if (target_account_id, material.posted_fname) in banned_pairs:
+                    continue
+
+                # 构造回帖内容
                 bump_content = f"自顶一下：{material.title[:15]}..." 
                 if material.ai_status == "rewritten":
                     bump_content = f"分享：{material.title}"
                     
                 success = await self.post_manager.reply_to_thread(
-                    active_acc.id, 
+                    target_account_id, 
                     material.posted_fname, 
                     material.posted_tid, 
                     bump_content
@@ -498,8 +580,9 @@ class AutoBumpManager:
                 
                 if success:
                     await self.db.update_material_bump(material.id)
-                    await log_info(f"物料 [{material.id}] 自顶成功 (TID:{material.posted_tid})")
-                    # 避免回帖太快，引入拟人化短休眠
+                    await log_info(f"物料 [{material.id}] 自顶成功 (账号:{target_account_id} | TID:{material.posted_tid})")
                     await asyncio.sleep(random.uniform(5, 15))
                 else:
+                    # 如果失败是因为封禁，记入本次运行的 Skip-List
+                    banned_pairs.add((target_account_id, material.posted_fname))
                     await log_warn(f"物料 [{material.id}] 自顶失败")
