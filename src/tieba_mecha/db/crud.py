@@ -1092,6 +1092,12 @@ class Database:
                 m.status = status
                 from datetime import datetime
                 m.last_used_at = datetime.now()
+                
+                # [修复] 状态重置为 pending 或重新发送成功时，清空自顶计数与记录
+                if status in ("pending", "success"):
+                    m.bump_count = 0
+                    m.last_bumped_at = None
+                
                 if last_error is not None: m.last_error = last_error
                 if posted_fname is not None: m.posted_fname = posted_fname
                 if posted_tid is not None: m.posted_tid = posted_tid
@@ -1142,7 +1148,12 @@ class Database:
     async def reset_materials_status(self) -> None:
         async with self.async_session() as session:
             await session.execute(
-                update(MaterialPool).values(status="pending", last_error="")
+                update(MaterialPool).values(
+                    status="pending", 
+                    last_error="",
+                    bump_count=0,
+                    last_bumped_at=None
+                )
             )
             await session.commit()
 

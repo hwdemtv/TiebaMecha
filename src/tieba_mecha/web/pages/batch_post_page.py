@@ -34,6 +34,12 @@ class BatchPostPage:
         self._archive_search_text = ""
         self._selected_material_ids = set()
         self._selected_archive_ids = set()
+        
+        # 矩阵配置持久化状态
+        self._selected_account_ids = set()
+        self._selected_forum_names = set()
+        self._selected_group_names = set()
+        self._initial_load_done = False
 
         # 初始化所有 UI 控件
         self._init_controls()
@@ -49,6 +55,13 @@ class BatchPostPage:
             self._target_groups = await self.db.get_target_pool_groups()
             
             self._materials = await self.db.get_materials()
+            
+            # 首次加载初始化默认选择
+            if not self._initial_load_done:
+                for acc in self._accounts:
+                    if acc.status != "suspended_proxy":
+                        self._selected_account_ids.add(acc.id)
+                self._initial_load_done = True
             
             self._refresh_task_list()
             self._refresh_account_pool()
@@ -81,9 +94,10 @@ class BatchPostPage:
                 # Checkbox
                 cb = ft.Checkbox(
                     label=f"{display_name} ({proxy_label}) [权重: {weight_dots}]",
-                    value=not is_suspended,
+                    value=acc.id in self._selected_account_ids,
                     data=acc.id,
-                    fill_color=COLORS.ERROR if is_suspended else COLORS.PRIMARY
+                    fill_color=COLORS.ERROR if is_suspended else COLORS.PRIMARY,
+                    on_change=self._on_account_select_change
                 )
                 items.append(cb)
                 
@@ -97,9 +111,10 @@ class BatchPostPage:
             for fname in self._native_forums:
                 cb = ft.Checkbox(
                     label=fname,
-                    value=False,
+                    value=fname in self._selected_forum_names,
                     data=fname,
-                    fill_color="green"  # 标记为安全的本土吧
+                    fill_color="green",  # 标记为安全的本土吧
+                    on_change=self._on_forum_select_change
                 )
                 items.append(cb)
             
@@ -111,9 +126,10 @@ class BatchPostPage:
                 for g in self._target_groups:
                     cb = ft.Checkbox(
                         label=g,
-                        value=False,
+                        value=g in self._selected_group_names,
                         data=g,
-                        fill_color="red" # 标记为轰炸大池
+                        fill_color="red", # 标记为轰炸大池
+                        on_change=self._on_group_select_change
                     )
                     g_items.append(cb)
                     
@@ -139,7 +155,32 @@ class BatchPostPage:
         for cb in container.controls:
             if isinstance(cb, ft.Checkbox) and cb.visible:
                 cb.value = value
+                # 同步到状态集
+                if container == self.account_pool_column:
+                    if value: self._selected_account_ids.add(cb.data)
+                    else: self._selected_account_ids.discard(cb.data)
+                elif container == self.forum_pool_column:
+                    if value: self._selected_forum_names.add(cb.data)
+                    else: self._selected_forum_names.discard(cb.data)
+                elif hasattr(self, "global_group_column") and container == self.global_group_column:
+                    if value: self._selected_group_names.add(cb.data)
+                    else: self._selected_group_names.discard(cb.data)
         container.update()
+
+    def _on_account_select_change(self, e):
+        acc_id = e.control.data
+        if e.control.value: self._selected_account_ids.add(acc_id)
+        else: self._selected_account_ids.discard(acc_id)
+
+    def _on_forum_select_change(self, e):
+        fname = e.control.data
+        if e.control.value: self._selected_forum_names.add(fname)
+        else: self._selected_forum_names.discard(fname)
+
+    def _on_group_select_change(self, e):
+        group_name = e.control.data
+        if e.control.value: self._selected_group_names.add(group_name)
+        else: self._selected_group_names.discard(group_name)
 
     def _toggle_select_all_forums(self, e):
         """全选/取消贴吧 (保留兼容旧版逻辑)"""
