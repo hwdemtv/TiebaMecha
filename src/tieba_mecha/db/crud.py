@@ -122,7 +122,8 @@ class Database:
         # MaterialPool 新字段迁移
         for col_sql in [
             "ALTER TABLE material_pool ADD COLUMN posted_fname VARCHAR(100) DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN posted_tid INTEGER DEFAULT NULL",
+            "ALTER TABLE material_pool ADD COLUMN posted_tid BIGINT DEFAULT NULL",
+            "ALTER TABLE material_pool ADD COLUMN posted_account_id INTEGER DEFAULT NULL",
             "ALTER TABLE material_pool ADD COLUMN is_auto_bump BOOLEAN DEFAULT 0",
             "ALTER TABLE material_pool ADD COLUMN bump_count INTEGER DEFAULT 0",
             "ALTER TABLE material_pool ADD COLUMN last_bumped_at DATETIME DEFAULT NULL",
@@ -144,13 +145,18 @@ class Database:
             if "duplicate column" not in str(e).lower():
                 logger.warning(f"Failed to add is_post_target to forums: {e}")
 
-        # Forums 表新字段迁移 (隐藏贴吧)
-        try:
-            async with self.engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE forums ADD COLUMN is_hidden BOOLEAN DEFAULT 0"))
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.warning(f"Failed to add is_hidden to forums: {e}")
+        # Forums 表新字段迁移 (隐藏贴吧与封禁状态)
+        for col_sql in [
+            "ALTER TABLE forums ADD COLUMN is_hidden BOOLEAN DEFAULT 0",
+            "ALTER TABLE forums ADD COLUMN is_banned BOOLEAN DEFAULT 0",
+            "ALTER TABLE forums ADD COLUMN ban_reason VARCHAR(200) DEFAULT NULL",
+        ]:
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.execute(text(col_sql))
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.warning(f"Failed to add forums tracking column: {e}")
 
         # Accounts 表新字段迁移 (BioWarming 养号支持)
         for col_sql in [
@@ -165,6 +171,13 @@ class Database:
                     logger.debug(f"Accounts BioWarming column already exists")
                 else:
                     logger.warning(f"Failed to add Accounts BioWarming column: {e}")
+
+        # 数据自愈：确保所有账号的 post_weight 都有默认值 5
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(text("UPDATE accounts SET post_weight = 5 WHERE post_weight IS NULL"))
+        except Exception as e:
+            logger.warning(f"Failed to heal post_weight data: {e}")
 
 
     async def close(self) -> None:
@@ -183,6 +196,7 @@ class Database:
         proxy_id: int | None = None,
         cuid: str = "",
         user_agent: str = "",
+        post_weight: int = 5,
     ) -> Account:
         """添加账号，自动注入指纹"""
         import uuid
@@ -225,6 +239,7 @@ class Database:
                 proxy_id=proxy_id,
                 cuid=cuid,
                 user_agent=user_agent,
+                post_weight=post_weight,
             )
             session.add(account)
             await session.commit()
@@ -553,6 +568,30 @@ class Database:
                 delete(Forum).where(Forum.account_id == account_id, Forum.fid.in_(fids))
             )
             await session.commit()
+
+    async def mark_forum_banned(self, account_id: int, fname: str, reason: str) -> None:
+        """标记账号在该贴吧被封禁"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Forum).where(Forum.account_id == account_id, Forum.fname == fname)
+            )
+            forum = result.scalar_one_or_none()
+            if forum:
+                forum.is_banned = True
+                forum.ban_reason = reason
+                # 被封后自动关闭发帖许可，防止调度器再次选中
+                forum.is_post_target = False
+                await session.commit()
+
+    async def delete_forum_by_name(self, account_id: int, fname: str) -> bool:
+        """根据贴吧名删除指定账号的贴吧记录"""
+        from sqlalchemy import delete
+        async with self.async_session() as session:
+            await session.execute(
+                delete(Forum).where(Forum.account_id == account_id, Forum.fname == fname)
+            )
+            await session.commit()
+            return True
 
     # ========== SignLog CRUD ==========
 
@@ -940,6 +979,16 @@ class Database:
             )
             return list(result.scalars().all())
 
+    async def delete_batch_task(self, task_id: int) -> bool:
+        """删除批量发帖任务记录"""
+        async with self.async_session() as session:
+            task = await session.get(BatchPostTask, task_id)
+            if task:
+                await session.delete(task)
+                await session.commit()
+                return True
+            return False
+
     async def get_matrix_accounts(self) -> list[Account]:
         """获取矩阵发帖可用账号列表"""
         async with self.async_session() as session:
@@ -961,11 +1010,18 @@ class Database:
         from sqlalchemy import func
         async with self.async_session() as session:
             result = await session.execute(
-                select(Forum.fid, Forum.fname, func.max(Forum.is_post_target))
+                select(Forum.fid, Forum.fname, func.max(Forum.is_post_target), func.max(Forum.is_banned))
                 .group_by(Forum.fname)
                 .order_by(Forum.fname)
             )
-            return [{"fid": row.fid, "fname": row.fname, "is_post_target": bool(row[2])} for row in result.all()]
+            return [
+                {
+                    "fid": row.fid, 
+                    "fname": row.fname, 
+                    "is_post_target": bool(row[2]),
+                    "is_banned": bool(row[3])
+                } for row in result.all()
+            ]
 
 
     # ========== MaterialPool CRUD ==========
@@ -1021,19 +1077,25 @@ class Database:
                 return True
             return False
 
-    async def update_material_status(self, material_id: int, status: str, last_error: str | None = None, posted_fname: str | None = None, posted_tid: int | None = None) -> None:
+    async def update_material_status(
+        self, 
+        material_id: int, 
+        status: str, 
+        last_error: str | None = None, 
+        posted_fname: str | None = None, 
+        posted_tid: int | None = None,
+        posted_account_id: int | None = None
+    ) -> None:
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
             if m:
                 m.status = status
                 from datetime import datetime
                 m.last_used_at = datetime.now()
-                if last_error is not None:
-                    m.last_error = last_error
-                if posted_fname is not None:
-                    m.posted_fname = posted_fname
-                if posted_tid is not None:
-                    m.posted_tid = posted_tid
+                if last_error is not None: m.last_error = last_error
+                if posted_fname is not None: m.posted_fname = posted_fname
+                if posted_tid is not None: m.posted_tid = posted_tid
+                if posted_account_id is not None: m.posted_account_id = posted_account_id
                 await session.commit()
 
     async def update_material_bump(self, material_id: int) -> None:
@@ -1087,9 +1149,12 @@ class Database:
     # ========== Forum Targets & Global Target Pool ==========
 
     async def get_native_post_targets(self, account_id: int | None = None) -> list[str]:
-        """获取已标记为 is_post_target=True 的本机安全贴吧名池"""
+        """获取已标记为 is_post_target=True 且未被封禁的本机安全贴吧名池"""
         async with self.async_session() as session:
-            stmt = select(Forum.fname).where(Forum.is_post_target == True)
+            stmt = select(Forum.fname).where(
+                Forum.is_post_target == True,
+                Forum.is_banned == False
+            )
             if account_id:
                 stmt = stmt.where(Forum.account_id == account_id)
             result = await session.execute(stmt.distinct())

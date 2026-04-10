@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -65,6 +65,8 @@ class Forum(Base):
     account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
     is_post_target: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否允许作为发贴目标")
     is_hidden: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否在 UI 中隐藏且跳过签到")
+    is_banned: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否被该吧吧务封禁")
+    ban_reason: Mapped[str | None] = mapped_column(String(200), nullable=True, comment="封禁原因")
 
     __table_args__ = (
         UniqueConstraint("fid", "account_id", name="uq_forum_fid_account"),
@@ -222,8 +224,9 @@ class MaterialPool(Base):
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="发送失败原因/错误日志")
     
     # --- 自动回帖(自顶) 增强字段 ---
-    posted_tid: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="发帖成功后的线程ID")
+    posted_tid: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="发帖成功后的线程ID")
     posted_fname: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="发布所在的贴吧")
+    posted_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="发布该物料的账号ID")
     is_auto_bump: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启自动回帖")
     bump_count: Mapped[int] = mapped_column(Integer, default=0, comment="已回帖(自顶)次数")
     last_bumped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次回帖时间")

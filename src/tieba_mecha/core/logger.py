@@ -44,10 +44,34 @@ class AsyncQueueHandler(logging.Handler):
                 pass
         await _LOG_QUEUE.put(log_entry)
 
-# 初始化 root logger 拦截
+import os
+from logging.handlers import RotatingFileHandler
+
+# 初始化 root logger 拦截 (UI 队列流)
 _handler = AsyncQueueHandler()
 _handler.setFormatter(logging.Formatter('%(message)s'))
 logging.getLogger().addHandler(_handler)
+
+# 初始化物理日志持久化 (覆盖 root logger)
+_core_dir = os.path.dirname(os.path.abspath(__file__))  # tieba_mecha/core
+_pkg_dir = os.path.dirname(_core_dir)                  # tieba_mecha
+_parent_dir = os.path.dirname(_pkg_dir)                # src 或 TiebaMecha_Portable
+
+if os.path.basename(_parent_dir).lower() == "src":
+    BASE_DIR = os.path.dirname(_parent_dir)            # 原生开发环境
+else:
+    BASE_DIR = _parent_dir                             # Portable 部署环境
+
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+LOG_FILE = os.path.join(DATA_DIR, "system.log")
+
+_file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'
+)
+_file_formatter = logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+_file_handler.setFormatter(_file_formatter)
+logging.getLogger().addHandler(_file_handler)
 
 async def log_info(msg: str):
     """记录信息日志"""
@@ -62,7 +86,7 @@ async def log_error(msg: str):
     await _add_log("ERROR", msg)
 
 async def _add_log(level: str, msg: str):
-    """内部推送到队列"""
+    """内部推送到队列及物理文件"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     log_entry = {
         "time": timestamp,
@@ -81,6 +105,18 @@ async def _add_log(level: str, msg: str):
             pass
             
     await _LOG_QUEUE.put(log_entry)
+    
+    # 同步写入物理日志文件
+    try:
+        level_map = {"INFO": logging.INFO, "WARN": logging.WARNING, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+        num_level = level_map.get(level.upper(), logging.INFO)
+        record = logging.LogRecord(
+            name="TiebaMecha", level=num_level,
+            pathname="", lineno=0, msg=msg, args=(), exc_info=None
+        )
+        _file_handler.emit(record)
+    except Exception:
+        pass
 
 def get_log_queue() -> asyncio.Queue:
     """获取日志队列引用"""

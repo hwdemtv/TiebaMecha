@@ -242,6 +242,14 @@ class AccountsPage:
                                     ft.Container(width=10),
                                     ft.Icon(icons.LANGUAGE, size=12, color="onSurfaceVariant"),
                                     ft.Text(f"代理: {proxy_info}", color="onSurfaceVariant", size=11),
+                                    ft.Container(width=10),
+                                    ft.Icon(icons.STAR_HALF_ROUNDED, size=12, color="primary"),
+                                    ft.Text(
+                                        "权重: " + "●" * ((acc.post_weight or 5) // 2) + "○" * (5 - (acc.post_weight or 5) // 2), 
+                                        color="primary", 
+                                        size=11, 
+                                        tooltip=f"当前权重值: {acc.post_weight or 5}/10"
+                                    ),
                                 ], spacing=4),
                             ],
                             spacing=4,
@@ -345,6 +353,24 @@ class AccountsPage:
             text_size=13,
         )
 
+        weight_slider = ft.Slider(
+            min=1, max=10, divisions=9, value=5,
+            label="{value}",
+        )
+        
+        weight_row = ft.Row([
+            ft.Icon(icons.STAR_HALF_ROUNDED, size=20, color="primary"),
+            ft.Text("发帖权重:", size=13),
+            weight_slider,
+            ft.Text("5", size=13, weight="bold")
+        ], spacing=10)
+        
+        # 联动更新权重文本
+        weight_slider.on_change = lambda e: (
+            setattr(weight_row.controls[3], "value", str(int(e.control.value))),
+            self.page.update()
+        )
+
         def on_cookie_change(e):
             if not cookie_input.value: return
             bduss, stoken = parse_cookie(cookie_input.value)
@@ -403,7 +429,8 @@ class AccountsPage:
                     stoken=encrypt_value(stoken_field.value) if stoken_field.value else "",
                     user_id=uid,
                     user_name=uname,
-                    proxy_id=proxy_id
+                    proxy_id=proxy_id,
+                    post_weight=int(weight_slider.value)
                 )
                 
                 await log_info(f"账号库录入成功: {uname} (关联代理: {proxy_id or '无'})")
@@ -434,6 +461,7 @@ class AccountsPage:
                         ft.Row([bduss_field, stoken_field], spacing=10),
                         name_field,
                         proxy_dropdown,
+                        weight_row,
                     ],
                     tight=True,
                     spacing=15,
@@ -506,6 +534,24 @@ class AccountsPage:
             text_size=13,
         )
 
+        edit_weight_slider = ft.Slider(
+            min=1, max=10, divisions=9, value=float(account.post_weight or 5),
+            label="{value}",
+        )
+        
+        edit_weight_row = ft.Row([
+            ft.Icon(icons.STAR_HALF_ROUNDED, size=20, color="primary"),
+            ft.Text("发帖权重:", size=13),
+            edit_weight_slider,
+            ft.Text(str(account.post_weight or 5), size=13, weight="bold")
+        ], spacing=10)
+        
+        # 联动更新权重文本
+        edit_weight_slider.on_change = lambda e: (
+            setattr(edit_weight_row.controls[3], "value", str(int(e.control.value))),
+            self.page.update()
+        )
+
         async def on_save(e):
             if not bduss_field.value:
                 self._show_snackbar("BDUSS 不能为空", "error")
@@ -536,7 +582,8 @@ class AccountsPage:
                     name=name_field.value,
                     bduss=encrypt_value(bduss_field.value),
                     stoken=encrypt_value(stoken_field.value) if stoken_field.value else "",
-                    proxy_id=proxy_id
+                    proxy_id=proxy_id,
+                    post_weight=int(edit_weight_slider.value)
                 )
                 
                 self.page.close(dialog)
@@ -564,6 +611,7 @@ class AccountsPage:
                         cookie_input,
                         ft.Row([bduss_field, stoken_field], spacing=10),
                         proxy_dropdown,
+                        edit_weight_row,
                     ],
                     tight=True,
                     spacing=15,

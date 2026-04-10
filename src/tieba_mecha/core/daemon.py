@@ -79,10 +79,7 @@ async def do_batch_post_tasks():
             total=task.total
         )
         
-        # 如果是循环任务，执行前自动重置物料状态为 pending
-        if task.interval_hours > 0:
-            print(f"[DAEMON] 循环任务 ID={task.id} 触发，自动重置物料池状态...")
-            await db.reset_materials_status()
+        # 移除原先自动调用 reset_materials_status() 的逻辑，允许“每日提取新物料（滴灌）”的打法
 
         # 更新任务状态为 running
         await db.update_batch_task(task.id, status="running")

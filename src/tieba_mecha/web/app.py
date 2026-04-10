@@ -37,7 +37,8 @@ class TiebaMechaApp:
         self.page = page
         self.db: Database | None = None
         self.current_page: str = "dashboard"
-        
+        self._pages_cache: dict = {}  # 页面实例缓存，避免重复创建导致状态丢失
+
         self._setup_page()
 
     def _setup_page(self):
@@ -518,13 +519,19 @@ class TiebaMechaApp:
 
         self.current_page = page_name
 
-        # 懒加载页面模块
-        module_name, class_name = PAGE_MODULES.get(page_name, ("dashboard", "DashboardPage"))
-        from importlib import import_module
-        module = import_module(f".pages.{module_name}", package=__name__.rsplit(".", 1)[0])
-        page_class = getattr(module, class_name)
+        # 尝试从缓存获取页面对象
+        if page_name in self._pages_cache:
+            page_obj = self._pages_cache[page_name]
+        else:
+            # 懒加载页面模块
+            module_name, class_name = PAGE_MODULES.get(page_name, ("dashboard", "DashboardPage"))
+            from importlib import import_module
+            module = import_module(f".pages.{module_name}", package=__name__.rsplit(".", 1)[0])
+            page_class = getattr(module, class_name)
 
-        page_obj = page_class(self.page, self.db, self._navigate_sync)
+            page_obj = page_class(self.page, self.db, self._navigate_sync)
+            self._pages_cache[page_name] = page_obj  # 缓存页面对象
+
         self.content_area.content = page_obj.build()
         # 先刷新框架，再异步加载数据
         self.page.update()

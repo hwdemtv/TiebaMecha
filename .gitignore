@@ -173,3 +173,6 @@ tmp/
 # Claude Code
 .claude/
 
+ 
+# Uploads directory
+uploads/

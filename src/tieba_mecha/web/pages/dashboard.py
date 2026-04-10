@@ -22,7 +22,7 @@ from ..components.icons import (
     TERMINAL_ROUNDED, SIGNAL_CELLULAR_ALT, NETWORK_CHECK_ROUNDED,
     GROUP, FLASH_ON_ROUNDED, POWER_SETTINGS_NEW_ROUNDED,
     VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, MEMORY_ROUNDED,
-    WARNING_AMBER_ROUNDED
+    WARNING_AMBER_ROUNDED, SEND_ROUNDED, PLAY_ARROW_ROUNDED
 )
 
 
@@ -37,6 +37,9 @@ class DashboardPage:
         self._sys_stats = {"accounts": 0, "active_proxies": 0, "pending_batch": 0}
         self._recent_forums = []
         self._ai_api_key_set = False  # AI API Key 是否已配置
+        
+        # --- 方案 A: 跨页面进度同步订阅 ---
+        self.page.pubsub.subscribe_topic("sign_progress", self._on_sign_progress)
 
     async def load_data(self):
         """同步数据库数据"""
@@ -252,11 +255,11 @@ class DashboardPage:
                     "on_click": lambda e: self._navigate("accounts"),
                 },
                 {
-                    "title": "全域签到",
-                    "icon": FLASH_ON_ROUNDED,
-                    "subtitle": "GLOBAL SIGN",
-                    "tooltip": "执行全贴吧自动化签到，维持账号稳健度。",
-                    "on_click": lambda e: self._navigate("sign"),
+                    "title": "批量发帖",
+                    "icon": SEND_ROUNDED,
+                    "subtitle": "BATCH POST",
+                    "tooltip": "利用排期物料，对全域贴吧执行批量发帖指令。",
+                    "on_click": lambda e: self._navigate("batch_post"),
                 },
                 {
                     "title": "贴子管理",
@@ -276,12 +279,25 @@ class DashboardPage:
         )
 
         # --- 中央控制按钮 ---
+        def _start_global_sign(e):
+            # 设置会话变量，让签到页面在加载后自动触发执行
+            self.page.session.set("auto_start_sign", True)
+            self._navigate("sign")
+
         self.core_btn = CoreButtonWithLabel(
-            label="开始同步全域签到",
-            icon=POWER_SETTINGS_NEW_ROUNDED,
-            on_click=lambda e: self._navigate("sign"),
+            label="立即启动全域签到",
+            icon=PLAY_ARROW_ROUNDED,
+            on_click=_start_global_sign,
             size=100,
         )
+
+        # --- 跨页面进度反馈组件 ---
+        self.global_progress_bar = ft.ProgressBar(value=0, visible=False, color="secondary", height=4, width=200)
+        self.global_progress_text = ft.Text("任务初始化中...", size=11, color="onSurfaceVariant", visible=False)
+        self.progress_panel = ft.Column([
+            self.global_progress_text,
+            self.global_progress_bar
+        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5, visible=False)
 
         # --- 实时动态列表 ---
         self.forum_list = StreamList(
@@ -327,6 +343,7 @@ class DashboardPage:
                             ft.Column([
                                 ft.Text("全局指令 / GLOBAL COMMAND", size=14, weight=ft.FontWeight.W_500, color="secondary", text_align=ft.TextAlign.CENTER),
                                 self.core_btn,
+                                self.progress_panel, # 进度显示区
                             ], expand=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=15),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -355,3 +372,26 @@ class DashboardPage:
     def _navigate(self, page_name: str):
         if self.on_navigate:
             self.on_navigate(page_name)
+
+    def _on_sign_progress(self, topic, message):
+        """处理来自签到页面的进度广播"""
+        if topic != "sign_progress": return
+        
+        try:
+            status = message.get("status")
+            if status == "running":
+                self.progress_panel.visible = True
+                self.global_progress_bar.visible = True
+                self.global_progress_bar.value = message.get("value")
+                self.global_progress_text.value = message.get("text")
+                self.global_progress_text.visible = True
+            elif status == "completed":
+                self.progress_panel.visible = False
+                self.global_progress_bar.visible = False
+                self.global_progress_text.visible = False
+            
+            # 安全更新页面（如果当前页面实例属于当前活跃视图）
+            if self.page:
+                self.page.update()
+        except Exception:
+            pass # 避免跨页面销毁或状态不一致时的崩溃

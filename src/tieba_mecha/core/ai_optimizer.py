@@ -104,11 +104,15 @@ class AIOptimizer:
                     content_str = result['choices'][0]['message']['content']
                     
                     # 尝试解析 JSON
+                    content_str = content_str.strip()
+                    # 鲁棒性增强：剥离可能存在的 Markdown JSON 标记 (Section 5.1)
+                    if content_str.startswith("```"):
+                        content_str = re.sub(r'^```(?:json)?\s*|\s*```$', '', content_str, flags=re.MULTILINE | re.IGNORECASE).strip()
+
                     try:
                         parsed = json.loads(content_str)
                     except json.JSONDecodeError:
                         # 如果非标准 JSON，尝试正则表达式提取
-                        import re
                         title_match = re.search(r'"title":\s*"(.*?)"', content_str, re.S)
                         content_match = re.search(r'"content":\s*"(.*?)"', content_str, re.S)
                         if title_match and content_match:

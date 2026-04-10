@@ -83,6 +83,7 @@ class AccountInfo:
     cuid: str = ""
     user_agent: str = ""
     proxy_id: int | None = None
+    post_weight: int = 5
     is_maint_enabled: bool = False
     last_maint_at: datetime | None = None
 
@@ -151,6 +152,7 @@ async def add_account(
         cuid=account.cuid,
         user_agent=account.user_agent,
         proxy_id=account.proxy_id,
+        post_weight=getattr(account, 'post_weight', 5),
         is_maint_enabled=account.is_maint_enabled,
         last_maint_at=account.last_maint_at,
     )
@@ -239,6 +241,7 @@ async def list_accounts(db: Database) -> list[AccountInfo]:
             cuid=a.cuid,
             user_agent=a.user_agent,
             proxy_id=a.proxy_id,
+            post_weight=getattr(a, 'post_weight', 5),
             is_maint_enabled=a.is_maint_enabled,
             last_maint_at=a.last_maint_at,
         )
@@ -310,6 +313,7 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
             cuid=updated.cuid,
             user_agent=updated.user_agent,
             proxy_id=updated.proxy_id,
+            post_weight=getattr(updated, 'post_weight', 5),
             is_maint_enabled=updated.is_maint_enabled,
             last_maint_at=updated.last_maint_at,
         )

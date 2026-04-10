@@ -1,92 +1,119 @@
-"""
-TiebaMecha Portable Launcher
-该脚本用于在绿色便携版环境下初始化路径并启动 Web UI。
-"""
-
-import os
 import sys
+import os
+import socket
 import logging
-from pathlib import Path
+import asyncio
 
-# 1. 强制编码环境 (UTF-8 是一切稳定的基础)
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  修复 uvicorn KeyError: 'warn'                                      │
+# └─────────────────────────────────────────────────────────────────────┘
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"
 
-# 2. 纠正根目录与系统路径
-BASE_DIR = Path(__file__).parent.absolute()
-# 加载环境变量 (优先从文件夹根目录中的 .env 读取)
+# 强制重配置标准输出流为 UTF-8 (解决 Emojis/中文导致的 UnicodeEncodeError)
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+else:
+    # 针对旧版本或受限环境的后备方案
+    import io
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+# 提前注入 Flet Web 上传及双模运行所需的密钥
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 from dotenv import load_dotenv
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(os.path.join(ROOT_DIR, ".env"))
+SECRET_KEY = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY") or "cyber_mecha_dual_launcher_999"
+os.environ["FLET_SECRET_KEY"] = SECRET_KEY
 
-# 环境变量检查拦截 (防止因缺少密钥导致崩溃)
-SALT = os.getenv("TIEBA_MECHA_SALT")
-SECRET = os.getenv("TIEBA_MECHA_SECRET_KEY")
+import uvicorn.config as _uvc
+_orig_configure_logging = _uvc.Config.configure_logging
+def _patched_configure_logging(self):
+    if getattr(self, "log_level", None) == "warn":
+        self.log_level = "warning"
+    return _orig_configure_logging(self)
+_uvc.Config.configure_logging = _patched_configure_logging
 
-if not SALT or not SECRET:
-    print("\n" + "!" * 60)
-    print(" [警告] 系统安全凭证未配置！")
-    print(" TiebaMecha 需要 TIEBA_MECHA_SALT 和 TIEBA_MECHA_SECRET_KEY 来加密账号凭据。")
-    print("\n [解决办法]:")
-    print(" 请先关闭本窗口，运行目录下的：")
-    print("    >>> [首次运行(生成密钥).bat] <<<")
-    print("\n 之后重新启动本程序将自动进入 Web 界面。")
-    print("!" * 60 + "\n")
-    input("按回车键退出程序...")
-    sys.exit(1)
-
-# 将 site-packages 额外加入路径 (双重保险)
-RUNTIME_SP = BASE_DIR / "_runtime" / "site-packages"
-if RUNTIME_SP.exists():
-    sys.path.insert(0, str(RUNTIME_SP))
-
-sys.path.insert(0, str(BASE_DIR))
-sys.path.insert(0, str(BASE_DIR / "src"))
-
-# 3. 恢复标准日志级别名称 (兼容 aiotieba / flet 冲突)
-logging.addLevelName(logging.WARNING, "WARNING")
-
-# 4. Uvicorn & Flet 路径补丁
-try:
-    import uvicorn.config as _uvc
-    _orig = _uvc.Config.configure_logging
-    def _patched(self):
-        if getattr(self, "log_level", None) == "warn":
-            self.log_level = "warning"
-        return _orig(self)
-    _uvc.Config.configure_logging = _patched
-except:
-    pass
+# 智能路径检测：兼容开发版(src/)与便携版(root)
+SRC_DIR = os.path.join(ROOT_DIR, "src")
+if os.path.exists(SRC_DIR):
+    if SRC_DIR not in sys.path:
+        sys.path.insert(0, SRC_DIR)
+else:
+    # 便携版环境下，直接将根目录加入路径
+    if ROOT_DIR not in sys.path:
+        sys.path.insert(0, ROOT_DIR)
 
 import flet as ft
 from tieba_mecha.web.app import TiebaMechaApp
 from tieba_mecha.db.crud import get_db
 
+def get_local_ip():
+    """获取本机局域网 IP"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 async def main(page: ft.Page):
-    """应用主入口"""
+    """Flet 应用主函数"""
     app = TiebaMechaApp(page)
     db = await get_db()
     await app.initialize(db)
 
+def run_app(port: int = 9006):
+    """启动“桌面窗口+Web 模式”双模应用"""
+    upload_dir = os.path.abspath("uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    local_ip = get_local_ip()
+    print("\n" + "="*50)
+    print(" 贴吧机甲 (TiebaMecha) 本地独立终端已就绪")
+    print("="*50)
+    print(f" [+] 本地控制：已弹出独立高性能独立桌面窗口")
+    print("="*50)
+    print(" [提示] 桌面窗口模式下载入文件无需等待上传，性能极快。")
+    print(" [注意] 请勿关闭此黑窗口，否则程序将彻底退出。")
+    print(" [网关提示] 若需要远程网页访问或手机控制，请使用 `start_web.bat` (网页专属版) 启动。")
+    print("="*50 + "\n")
+
+    # 同时开启窗口模式和网页服务
+    # host="0.0.0.0" 允许手机/局域网访问
+    ft.app(
+        target=main,
+        port=port,
+        host="0.0.0.0",
+        view=ft.AppView.FLET_APP,  # 开启桌面窗口
+        upload_dir=upload_dir,
+        assets_dir="assets"
+    )
+
 if __name__ == "__main__":
-    port = 9006
-    print("=" * 50)
-    print("   TiebaMecha Cyber-Mecha v1.1.1 [Portable]")
-    print(f"   访问地址: http://localhost:{port}")
-    print("=" * 50)
+    if len(sys.argv) > 1:
+        try:
+            port = int(sys.argv[1])
+        except ValueError:
+            port = 9006
+    else:
+        port = 9006
     
     try:
-        # 兼容最新版 Flet API
-        if hasattr(ft, 'run'):
-            try:
-                ft.run(main, port=port, view=ft.AppView.WEB_BROWSER)
-            except TypeError:
-                ft.run(target=main, port=port, view=ft.AppView.WEB_BROWSER)
-        else:
-            ft.app(target=main, port=port, view=ft.AppView.WEB_BROWSER)
+        run_app(port=port)
     except KeyboardInterrupt:
-        print("\n[系统] 用户请求关闭，程序安全退出。")
+        print("\n应用已通过 Ctrl+C 停止")
     except Exception as e:
-        print(f"\n[错误] 程序运行崩溃: {e}")
+        print(f"启动失败: {e}")
         import traceback
         traceback.print_exc()
-        input("\n按回车键退出...")
+        input("按任意键退出...")

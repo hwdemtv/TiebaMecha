@@ -136,7 +136,7 @@ def build_portable():
             shutil.copy2(src_p, portable_dir / dst_name)
     
     # 填充配置文件与文档
-    for f in [".env.example", "README.md"]:
+    for f in [".env.example", "README.md", "start_web.py"]:
         if (root / f).exists():
             shutil.copy2(root / f, portable_dir / f)
 
@@ -173,6 +173,18 @@ _runtime\\python.exe setup_env.py
 endlocal
 """
     (portable_dir / "首次运行(生成密钥).bat").write_text(setup_bat, encoding="utf-8")
+
+    # 网页端启动脚本 (修复 etlocal / o 报错：纯代码生成，防止模板文件带有 UTF-8 BOM 或 UTF-16 编码导致 cmd.exe 读取乱码)
+    start_web_bat = f"""@echo off
+chcp 65001 >nul
+setlocal
+cd /d "%~dp0"
+echo [TiebaMecha] 正在启动纯 Web 网页端控制器...
+_runtime\\python.exe start_web.py
+if %ERRORLEVEL% neq 0 pause
+endlocal
+"""
+    (portable_dir / "启动网页版控制台.bat").write_text(start_web_bat, encoding="utf-8")
 
     print("\n" + "=" * 50)
     print(f" [DONE] 绿色便携版打包完成！")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import urllib.parse
 from dataclasses import dataclass
 from typing import AsyncGenerator
 
@@ -336,10 +337,13 @@ async def add_thread(
             forum = await client.get_forum(fname)
             
             # 增强环境伪装头
+            # [核心加固] 对贴吧名进行转义，防止 Windows 环境下请求头触发 ASCII 编码异常
+            quoted_fname = urllib.parse.quote(fname)
+            
             headers = {
                 "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
                 "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-                "Referer": f"https://tieba.baidu.com/f?kw={fname}",
+                "Referer": f"https://tieba.baidu.com/f?kw={quoted_fname}",
                 "Origin": "https://tieba.baidu.com",
                 "X-Requested-With": "XMLHttpRequest",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -377,19 +381,26 @@ async def add_thread(
             }
             
             async with httpx.AsyncClient(proxy=proxy_url) as http_client:
-                # 【第一步防封】预热会话，模拟真人正在阅读本吧首页
+                # 【诊断日志】确认新固件已加载
+                from .logger import log_info as diagnostic_log
+                await diagnostic_log(f"[加固协议开启] 正在对 {fname} 执行预读转义...")
+                
+                # 【第一步防封】预热会话，模拟真人正在阅读本吧首页 (同步转义 URL)
                 try:
-                    await http_client.get(f"https://tieba.baidu.com/f?kw={fname}", headers=headers, timeout=10.0)
+                    await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
                     await asyncio.sleep(1.2)  # 停留模拟人类打字停顿
                 except Exception as e:
                     from .logger import log_warn
-                    await log_warn(f"[{fname}] 预读失败，不阻断主流程: {str(e)}")
+                    await log_warn(f"[{fname}] 预读失败: {str(e)}")
                     
                 # 【第二步防封】实际提交流程
+                # [终极加固] 手动将数据编码为 UTF-8 字节流，避免 httpx 在 ASCII 环境下自动转换失效
+                body_content = urllib.parse.urlencode(data).encode('utf-8')
+                
                 res = await http_client.post(
                     "https://tieba.baidu.com/f/commit/thread/add",
                     headers=headers,
-                    data=data,
+                    content=body_content,
                     timeout=15.0
                 )
                 
