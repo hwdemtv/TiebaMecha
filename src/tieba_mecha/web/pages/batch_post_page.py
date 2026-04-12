@@ -1562,7 +1562,7 @@ class BatchPostPage:
         )
         self.account_pool_column = ft.Column(spacing=5, height=150, scroll=ft.ScrollMode.ADAPTIVE)
         self.start_btn = ft.ElevatedButton(
-            "锁定发射坐标", 
+            "制定矩阵任务", 
             icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
             on_click=self._on_start_click,
             style=ft.ButtonStyle(color="white", bgcolor="primary")
@@ -1588,7 +1588,7 @@ class BatchPostPage:
         header = ft.Row([
             ft.IconButton(icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._navigate("dashboard")),
             ft.Column([
-                ft.Text("火力抛射靶场 / ARTILLERY RANGE", size=20, weight=ft.FontWeight.BOLD, color="primary"),
+                ft.Text("矩阵发帖终端 / MATRIX POST TERMINAL", size=20, weight=ft.FontWeight.BOLD, color="primary"),
                 ft.Text("多账号轮换、多内容池混淆及多贴吧矩阵发布引擎", size=11, color="onSurfaceVariant"),
             ], spacing=0),
         ])
