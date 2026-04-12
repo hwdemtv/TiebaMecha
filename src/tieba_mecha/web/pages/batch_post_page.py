@@ -1213,7 +1213,7 @@ class BatchPostPage:
                 ft.FilledButton(
                     "防抽网络编织完毕锁定", 
                     icon=icons.LOCK_ROUNDED, 
-                    bgcolor="green",
+                    style=ft.ButtonStyle(bgcolor="green", color="white"),
                     on_click=on_lock_safety
                 ),
             ],
