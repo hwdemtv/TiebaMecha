@@ -38,6 +38,9 @@ WARNING = "warning"
 WARNING_AMBER = "warning_amber"
 WARNING_AMBER_ROUNDED = "warning_amber_rounded"
 INFO = "info"
+LOCK_ROUNDED = "lock_rounded"
+TARGET = "target"
+GPS_FIXED = "gps_fixed"
 
 # 功能图标
 ADD = "add"
