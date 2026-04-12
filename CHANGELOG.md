@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-04-12
+
+- **战术火力配置工作流 (Artillery Tactical Workflow)**
+  - 引入二级向导配置模式：【安全原初打法配置】->【配置火力抛射靶场】。
+  - 实现“本地自留区”与“全域轰炸组”的页签化管理，支持实时搜索与过滤勾选。
+  - 支持在火力配置界面直接执行“批量取消关注并全局清理”阵地，实现战术级清场。
+
+- **风控情报分析引擎增强 (Enhanced Risk Intelligence)**
+  - 升级发帖拦截细节弹窗，支持展示：出战账号 ID、攻坚目标吧名。
+  - 接入“战术指导”系统：针对“用户没有权限”、“由于吧务设置”等拦截提供精准的实战应对建议（如：全域签到提权、AI 深度改写等）。
+
+- **文案引擎防抽增强**
+  - 优化 AI 改写输出逻辑：强制执行文案与链接间的双空行分隔。
+  - 支持内容池零宽字符自动混淆深度调节（内部逻辑优化）。
+
+- **稳定性修复 (Hotfix)**
+  - 修复 `Flet 0.23.2` 兼容性问题：修正 `ft.Badge` 参数及 `ft.Alignment` 常量引用，修复 `Checkbox` 参数 `label_size` 无效导致的崩溃。
+  - 优化项目全域 Web 布局：修复“全域签到”页面垂直拉伸异常，优化“矩阵发帖终端”三栏布局比例为 2:6:2 以提升大屏幕适配度。
+  - 修复战术图标库映射不全导致的 UI 渲染异常。
+  - 修复 AI 优化器在高负载下的文本截断问题。
+
 ## [1.1.1] - 2026-04-10
 
 - **矩阵发帖 UI 状态记忆**
@@ -54,10 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **矩阵发帖终端 (Matrix Post Terminal)**
-  - 多账号轮询/随机/加权三种调度策略
-  - 多贴吧批量投递支持
-  - AI 智能改写（智谱/DeepSeek/OpenAI 兼容）
-  - 全局物料池管理
+  - **向导式战术配置**：从安全原初打法到火力抛射配置的二级向导流。
+  - **多账号调度策略**：轮询/随机/加权三种模式。
+  - **全域阵地管理**：页签化管理本地关注吧与外部目标吧，支持**一键全局取关与清理**。
+  - **AI 智能改写**：对接智谱/DeepSeek/OpenAI，支持强制空行分隔防抽处理。
+  - **战术情报引擎**：发帖拦截后提供保姆级的实战操作建议与账号定位。
 
 - **拟人化风控引擎 (BionicDelay™)**
   - 高斯分布延迟，拒绝固定间隔
