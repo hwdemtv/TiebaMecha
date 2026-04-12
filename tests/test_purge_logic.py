@@ -63,7 +63,7 @@ class TestPurgeLogic:
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = None
-        mock_client.unfollow = AsyncMock(return_value=None)
+        mock_client.unfollow_forum = AsyncMock(return_value=None)
         mock_create_client.return_value = mock_client
         
         pm = BatchPostManager(db)
@@ -73,7 +73,7 @@ class TestPurgeLogic:
         
         assert success is True
         # 验证是否调用了取关 API
-        mock_client.unfollow.assert_called_with("target_bar")
+        mock_client.unfollow_forum.assert_called_with("target_bar")
         
         # 验证数据库是否已清理
         assert len(await db.get_forums()) == 0
