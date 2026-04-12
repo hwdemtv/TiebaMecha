@@ -101,6 +101,19 @@ class Database:
                     logger.debug(f"Column '{column}' already exists in {table} table")
                 else:
                     logger.warning(f"Failed to add column '{column}' to {table}: {e}")
+        # MaterialPool 新字段迁移
+        material_columns = [
+            ("material_pool", "survival_status", "VARCHAR(20) DEFAULT 'unknown'"),
+        ]
+        for table, column, col_type in material_columns:
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"Column '{column}' already exists in {table} table")
+                else:
+                    logger.warning(f"Failed to add column '{column}' to {table}: {e}")
 
         # 贴吧字段迁移
         for new_col in [
@@ -1120,6 +1133,14 @@ class Database:
                 if posted_fname is not None: m.posted_fname = posted_fname
                 if posted_tid is not None: m.posted_tid = posted_tid
                 if posted_account_id is not None: m.posted_account_id = posted_account_id
+                await session.commit()
+
+    async def update_material_survival_status(self, material_id: int, status: str) -> None:
+        """更新并持久化物料的存活探测状态"""
+        async with self.async_session() as session:
+            m = await session.get(MaterialPool, material_id)
+            if m:
+                m.survival_status = status
                 await session.commit()
 
     async def update_material_bump(self, material_id: int) -> None:

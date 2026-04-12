@@ -45,6 +45,10 @@ class BatchPostPage:
         self._selected_forum_names = set()
         self._selected_group_names = set()
         self._temp_target_fnames = []  # 新增：用于在弹窗间流转的临时吧名列表
+        
+        # 账号选择增强状态
+        self._account_search_text = ""
+        self._account_select_all = False
         self._initial_load_done = False
 
         # 初始化所有 UI 控件
@@ -62,6 +66,12 @@ class BatchPostPage:
             
             self._materials = await self.db.get_materials()
             
+            # [持久化同步] 从数据库加载历史探测状态到内存缓存
+            for m in self._materials:
+                if m.status == "success" and m.posted_tid and m.survival_status != "unknown":
+                    # 只同步已探测过的有效状态，checking 状态不持久化以防卡死
+                    self._survival_cache[m.posted_tid] = m.survival_status
+
             # 首次加载初始化默认选择
             if not self._initial_load_done:
                 for acc in self._accounts:
@@ -83,11 +93,46 @@ class BatchPostPage:
             self.task_table.rows = [self._build_task_row(t, i) for i, t in enumerate(self._tasks)]
             self.page.update()
 
+    async def _on_account_search_change(self, e):
+        """账号池搜索实时过滤"""
+        self._account_search_text = e.control.value.lower()
+        self._refresh_account_pool()
+
+    async def _on_account_select_all_toggle(self, e):
+        """全选/取消全选账号"""
+        self._account_select_all = e.control.value
+        # 获取当前正在显示的账号（过滤后的）
+        visible_accs = [
+            acc for acc in self._accounts 
+            if not self._account_search_text or 
+            self._account_search_text in (acc.name or "").lower() or 
+            self._account_search_text in (acc.user_name or "").lower() or
+            self._account_search_text in str(acc.id)
+        ]
+        
+        for acc in visible_accs:
+            if self._account_select_all:
+                self._selected_account_ids.add(acc.id)
+            else:
+                if acc.id in self._selected_account_ids:
+                    self._selected_account_ids.remove(acc.id)
+        
+        self._refresh_account_pool()
+
     def _refresh_account_pool(self):
-        """刷新账号池选择器 UI"""
+        """刷新账号池选择器 UI - 支持过滤与独立展示"""
         if hasattr(self, "account_pool_column"):
             items = []
-            for acc in self._accounts:
+            # 过滤逻辑
+            filtered_accounts = [
+                acc for acc in self._accounts 
+                if not self._account_search_text or 
+                self._account_search_text in (acc.name or "").lower() or 
+                self._account_search_text in (acc.user_name or "").lower() or
+                self._account_search_text in str(acc.id)
+            ]
+
+            for acc in filtered_accounts:
                 is_suspended = (acc.status == "suspended_proxy")
                 
                 # 状态标识
@@ -98,17 +143,27 @@ class BatchPostPage:
                 display_name = acc.name or acc.user_name or f"账号-{acc.id}"
                 
                 # Checkbox
-                cb = ft.Checkbox(
-                    label=f"{display_name} ({proxy_label}) [权重: {weight_dots}]",
-                    value=acc.id in self._selected_account_ids,
-                    data=acc.id,
-                    fill_color=COLORS.ERROR if is_suspended else COLORS.PRIMARY,
-                    on_change=self._on_account_select_change
+                items.append(
+                    ft.Checkbox(
+                        label=f"{display_name} ({proxy_label}) [权重: {weight_dots}]",
+                        value=acc.id in self._selected_account_ids,
+                        data=acc.id,
+                        on_change=self._on_account_select_change, # 修正为正确的名称
+                        disabled=is_suspended,
+                        label_size=11,
+                    )
                 )
-                items.append(cb)
-                
             self.account_pool_column.controls = items
-            self.page.update()
+            
+            # 更新已选计数提示
+            if hasattr(self, "account_pool_title"):
+                count = len(self._selected_account_ids)
+                self.account_pool_title.value = f"参与账号池 ({count}/{len(self._accounts)})"
+            
+            try:
+                self.page.update()
+            except:
+                pass
 
     def _refresh_forum_pool(self):
         """刷新贴吧池选择器 UI（用于兼容的本地吧列表）"""
@@ -177,6 +232,11 @@ class BatchPostPage:
         acc_id = e.control.data
         if e.control.value: self._selected_account_ids.add(acc_id)
         else: self._selected_account_ids.discard(acc_id)
+        # 同步更新标题已选计数提示
+        if hasattr(self, "account_pool_title"):
+            count = len(self._selected_account_ids)
+            self.account_pool_title.value = f"参与账号池 ({count}/{len(self._accounts)})"
+            self.account_pool_title.update()
 
     def _on_forum_select_change(self, e):
         fname = e.control.data
@@ -681,12 +741,18 @@ class BatchPostPage:
         except Exception as ex:
             pass # 请求抛出异常一样判定为不存活
             
-        # 3. 结果写入缓存并再次刷新UI
+        # 3. 结果写入缓存并持久化到数据库
+        final_status = "alive" if is_alive else "dead"
+        self._survival_cache[tid] = final_status
+        
+        # 寻找对应的物料ID进行持久化
+        mid = next((m.id for m in self._materials if m.posted_tid == tid), None)
+        if mid:
+            await self.db.update_material_survival_status(mid, final_status)
+
         if is_alive:
-            self._survival_cache[tid] = "alive"
             self._show_snackbar("响应成功：贴子目前健康正常开放访问", "success")
         else:
-            self._survival_cache[tid] = "dead"
             self._show_snackbar("探测失败：贴子异常或已被抽除", "error")
             
         await self.load_data()
@@ -716,21 +782,32 @@ class BatchPostPage:
         
         try:
             import aiotieba
+            tid_to_mid = {m.posted_tid: m.id for m in self._materials if m.posted_tid}
             async with aiotieba.Client() as client:
                 for tid in tids_to_check:
                     try:
                         res = await client.get_posts(tid)
+                        final_status = "unknown"
                         if res and res.forum and res.forum.fid > 0:
-                            self._survival_cache[tid] = "alive"
+                            final_status = "alive"
                             alive_count += 1
                         else:
-                            self._survival_cache[tid] = "dead"
+                            final_status = "dead"
                             dead_count += 1
+                        
+                        self._survival_cache[tid] = final_status
+                        # 执行数据库持久化
+                        mid = tid_to_mid.get(tid)
+                        if mid:
+                            await self.db.update_material_survival_status(mid, final_status)
+                            
                     except Exception:
                         self._survival_cache[tid] = "dead"
+                        mid = tid_to_mid.get(tid)
+                        if mid:
+                            await self.db.update_material_survival_status(mid, "dead")
                         dead_count += 1
                     # 轻度休眠以防止高并发拦截
-                    import asyncio
                     await asyncio.sleep(0.5)
         except Exception:
             pass
@@ -1881,7 +1958,21 @@ class BatchPostPage:
             label="文案提取模式", value="random", width=200,
             options=[ft.dropdown.Option("random", "随机混用 (防抽混淆)"), ft.dropdown.Option("strict", "严格配对 (发多资源)")]
         )
-        self.account_pool_column = ft.Column(spacing=5, height=150, scroll=ft.ScrollMode.ADAPTIVE)
+        # 账号池 UI 增强
+        self.account_search_field = ft.TextField(
+            hint_text="搜索账号、ID...",
+            prefix_icon=icons.SEARCH,
+            on_change=self._on_account_search_change,
+            height=35, text_size=11, content_padding=5,
+        )
+        self.account_all_toggle = ft.Switch(
+            label="全选本组", 
+            value=False, 
+            on_change=self._on_account_select_all_toggle,
+            scale=0.8
+        )
+        self.account_pool_title = ft.Text("参与账号池 (勾选启用)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.W_500)
+        self.account_pool_column = ft.Column(spacing=5, expand=True, scroll=ft.ScrollMode.ADAPTIVE)
         self.start_btn = ft.ElevatedButton(
             "制定矩阵任务", 
             icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
@@ -1920,52 +2011,17 @@ class BatchPostPage:
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
-                    # 第一栏：核心操作区 (expand=3，最宽，容纳 Tabs 主体)
+                    # 第一栏：矩阵策略中心 + 控制参数 (Left, expand=2)
                     ft.Column([
-                        # 标题行：图标按钮替代 TextButton，节省横向空间
-                        ft.Row([
-                            ft.Text("全局指令集", size=14, weight=ft.FontWeight.W_500),
-                            ft.Row([
-                                ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
-                                ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
-                                ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
-                                ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
-                                ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
-                            ], spacing=0),
-                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        # 目标贴吧选择区
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text("目标贴吧 / TARGET FORUMS (必填)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.BOLD),
-                                self.forum_select_btn,
-                                self.manual_forum_input,
-                            ], spacing=8),
-                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
-                        ),
-                        # 底部标签页（物料池 / 任务流水 / 任务队列）
-                        self.bottom_tabs,
-                    ], expand=3, spacing=15),  # 3 份宽度，主内容区
-
-                    # 右侧面板：矩阵策略中心（上） + 控制参数（下），垂直堆叠
-                    ft.Column([
-                        # 上方卡片：矩阵策略中心
                         ft.Text("矩阵策略中心", size=14, weight=ft.FontWeight.W_500),
                         ft.Container(
                             content=ft.Column([
                                 self.strategy_dropdown,
                                 self.pairing_mode_dropdown,
-                                ft.Text("参与账号池 (勾选启用)", size=12, color="onSurfaceVariant"),
-                                ft.Container(
-                                    content=self.account_pool_column,
-                                    border=ft.border.all(1, with_opacity(0.1, "onSurface")),
-                                    border_radius=8,
-                                    padding=10,
-                                ),
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
-                        # 下方卡片：控制参数
-                        ft.Text("控制参数", size=14, weight=ft.FontWeight.W_500),
+                        ft.Text("定时与控制", size=14, weight=ft.FontWeight.W_500),
                         ft.Container(
                             content=ft.Column([
                                 self.post_count,
@@ -1978,13 +2034,53 @@ class BatchPostPage:
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
-                    ], expand=2, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),  # 右侧面板，支持滚动防止底部被截断
-                ],
-                    expand=True,
-                    vertical_alignment=ft.CrossAxisAlignment.START,  # 顶部对齐
-                ),
-            ], expand=True, spacing=20),  # 外层 Column 必须 expand=True，否则内部 Row 无法分配空间
-            padding=20, expand=True,
+                    ], expand=2, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),
+
+                    # 第二栏：核心操作区 (Center, expand=5，最宽)
+                    ft.Column([
+                        ft.Row([
+                            ft.Text("全局指令集", size=14, weight=ft.FontWeight.W_500),
+                            ft.Row([
+                                ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
+                                ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
+                                ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
+                                ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
+                                ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
+                            ], spacing=0),
+                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                        
+                        # 目标贴吧选择区
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("目标贴吧 / TARGET FORUMS (必填)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.BOLD),
+                                self.forum_select_btn,
+                                self.manual_forum_input,
+                            ], spacing=8),
+                            padding=10, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
+                        ),
+                        # 底部标签页
+                        self.bottom_tabs,
+                    ], expand=5, spacing=15),
+
+                    # 第三栏：账号池管理 (Right, expand=3)
+                    ft.Column([
+                        ft.Row([
+                            self.account_pool_title,
+                            ft.IconButton(icons.REFRESH_ROUNDED, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新账号状态"),
+                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Row([self.account_search_field, self.account_all_toggle], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, spacing=10),
+                                ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
+                                ft.Container(content=self.account_pool_column, expand=True),
+                            ], spacing=10),
+                            expand=True,
+                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
+                        ),
+                    ], expand=3, spacing=12),
+                ], expand=True, vertical_alignment=ft.CrossAxisAlignment.START),
+            ], expand=True, spacing=20),
+            padding=ft.padding.only(left=20, right=20, top=10, bottom=20), expand=True,
         )
 
     def build(self) -> ft.Control:

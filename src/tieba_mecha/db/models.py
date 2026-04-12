@@ -231,6 +231,7 @@ class MaterialPool(Base):
     bump_count: Mapped[int] = mapped_column(Integer, default=0, comment="已回帖(自顶)次数")
     last_bumped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次回帖时间")
 
+    survival_status: Mapped[str] = mapped_column(String(20), default="unknown", comment="存活状态: unknown/alive/dead")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="注入时间")
     
     __table_args__ = (
