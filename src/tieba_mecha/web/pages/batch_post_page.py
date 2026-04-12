@@ -1419,13 +1419,18 @@ class BatchPostPage:
                                 select_all_cb, 
                                 ft.IconButton(icons.DELETE_SWEEP, icon_color="error", tooltip="删除选中项并同步取消关注", on_click=on_bulk_unfollow_click),
                                 ft.IconButton(
-                                icons.SETTINGS, 
-                                icon_color="green", 
-                                tooltip="安全原初打法配置",
-                                on_click=lambda _: self.page.run_task(self._open_safety_config_dialog, final_selected)
-                            )
+                                    icons.SETTINGS, 
+                                    icon_color="green", 
+                                    tooltip="安全原初打法配置",
+                                    on_click=lambda _: self.page.run_task(self._open_safety_config_dialog, final_selected)
+                                )
                             ], spacing=5),
-                            forums_container
+                            ft.Container(
+                                content=forums_container,
+                                border=ft.border.all(1, with_opacity(0.1, "onSurface")),
+                                border_radius=8,
+                                padding=5
+                            )
                         ], tight=True),
                         padding=10
                     )
