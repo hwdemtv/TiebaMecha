@@ -6,7 +6,7 @@ from ..flet_compat import COLORS
 from datetime import datetime
 from typing import List, Optional
 
-from ..components import create_gradient_button, CoreButtonWithLabel
+from ..components import create_gradient_button, CoreButtonWithLabel, GRADIENT_CYAN
 from ..components.icons import (
     GROUP_WORK, PERSON, SWAP_HORIZ, ARROW_BACK_IOS_NEW,
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,

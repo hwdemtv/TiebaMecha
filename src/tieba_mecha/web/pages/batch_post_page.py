@@ -524,7 +524,11 @@ class BatchPostPage:
                                             icon_size=14,
                                             icon_color=status_color,
                                             tooltip="点击查看拒稿原因详情",
-                                            data=m.last_error,
+                                            data={
+                                                "error": m.last_error,
+                                                "account_id": m.posted_account_id,
+                                                "fname": m.posted_fname
+                                            },
                                             on_click=self._show_rejection_detail,
                                             visible=(m.status == "failed")
                                         )
@@ -663,6 +667,7 @@ class BatchPostPage:
             title=ft.Row([ft.Icon(icons.EDIT_DOCUMENT, color="blue"), ft.Text("人工干预弹药库")]),
             content=ft.Column([
                 ft.Text("⚠ 若该物料已经过 AI 魔法改写，二次修改将会覆盖当前的缓存值。"),
+                ft.Text("- 链接格式保持原样，不要修改、删除或替换\n- 保留原文的核心信息和关键数据\n- 改写时围绕链接所指向的资源进行自然描述，并在描述文字与链接之间插入两个换行符"),
                 edit_title,
                 edit_content
             ], tight=True, spacing=15),
@@ -1101,10 +1106,10 @@ class BatchPostPage:
                     effective_title = seo_title if seo_title else f"网盘资源分享 - {code}"
                     # 执行混淆防御
                     final_url = self._obfuscate_link(original_url)
-                    new_content = f"{desc} 👉 {final_url}" if desc else final_url
+                    new_content = f"{desc}\n\n{final_url}" if desc else final_url
                 else:
                     effective_title = seo_title if seo_title else f"主页输入【{code}】立刻查看网盘资源"
-                    new_content = f"{desc} 👉 主页搜【{code}】马上查阅" if desc else f"主页搜【{code}】马上查阅"
+                    new_content = f"{desc}\n\n主页搜【{code}】马上查阅" if desc else f"主页搜【{code}】马上查阅"
                 
                 pairs.append((effective_title, new_content))
 
@@ -1147,6 +1152,153 @@ class BatchPostPage:
         await self._render_filtered_links()
         self.page.open(self.link_dialog)
         self.page.update()
+
+    async def _open_forum_dialog(self, e):
+        """[第一阶段] 安全原初打法配置"""
+        
+        # 获取本地已同步的吧名列表
+        local_fnames = await self.db.get_all_unique_fnames()
+        selected_fnames = set()
+        
+        # 1. 搜索与全选控制
+        search_field = ft.TextField(
+            label="搜索贴吧名...",
+            prefix_icon=icons.SEARCH,
+            dense=True,
+            text_size=12,
+            expand=True
+        )
+        
+        select_all_cb = ft.Checkbox(label="全选", value=False)
+        
+        # 2. 贴吧容器
+        forums_list_container = ft.Column(spacing=5, scroll=ft.ScrollMode.ADAPTIVE, height=300)
+        
+        def render_forums(keyword=""):
+            forums_list_container.controls.clear()
+            for fn in local_fnames:
+                if keyword and keyword.lower() not in fn.lower(): continue
+                forums_list_container.controls.append(
+                    ft.Checkbox(label=fn, value=(fn in selected_fnames), data=fn, on_change=on_item_check)
+                )
+            self.page.update()
+
+        def on_item_check(e):
+            fn = e.control.data
+            if e.control.value: selected_fnames.add(fn)
+            else: selected_fnames.discard(fn)
+
+        async def on_lock_safety(_):
+            """锁定安全配置，进入火力配置阶段"""
+            self.page.close(safety_dialog)
+            await self._open_firepower_dialog(selected_fnames)
+
+        safety_dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Row([search_field, select_all_cb], spacing=10),
+                    ft.Text("开启专属保护开关后，会强制优先调用原生关注小号出战:", size=11, color="onSurfaceVariant"),
+                    ft.Container(
+                        content=forums_list_container,
+                        padding=10,
+                        border=ft.border.all(1, with_opacity(0.1, "onSurface")),
+                        border_radius=8,
+                    ),
+                ], tight=True, spacing=15),
+                width=450,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(safety_dialog)),
+                ft.FilledButton(
+                    "防抽网络编织完毕锁定", 
+                    icon=icons.LOCK_ROUNDED, 
+                    bgcolor="green",
+                    on_click=on_lock_safety
+                ),
+            ],
+        )
+        
+        render_forums()
+        self.page.open(safety_dialog)
+
+    async def _open_firepower_dialog(self, pre_selected_fnames: set):
+        """[第二阶段] 配置火力抛射靶场"""
+        
+        final_fnames = pre_selected_fnames.copy()
+        
+        # 手动输入框 (全域轰炸组使用)
+        manual_input = ft.TextField(
+            label="全域轰炸组 (手动输入，英文逗号分隔)", 
+            multiline=True, 
+            min_lines=3, 
+            text_size=12,
+            value=",".join(pre_selected_fnames)
+        )
+        
+        # 本地展示列表
+        local_grid = ft.GridView(
+            runs_count=3,
+            max_extent=150,
+            child_aspect_ratio=3.0,
+            spacing=5,
+            run_spacing=5,
+        )
+        
+        def refresh_local_grid():
+            local_grid.controls.clear()
+            for fn in final_fnames:
+                local_grid.controls.append(
+                    ft.Container(
+                        content=ft.Text(fn, size=11),
+                        padding=5,
+                        bgcolor=with_opacity(0.1, "primary"),
+                        border_radius=4
+                    )
+                )
+            self.page.update()
+
+        async def on_confirm(_):
+            # 合并手动输入的内容
+            if manual_input.value:
+                manual_fnames = [f.strip() for f in manual_input.value.split(",") if f.strip()]
+                for fn in manual_fnames: final_fnames.add(fn)
+            
+            # 关闭弹窗并注入
+            self.page.close(fire_dialog)
+            
+            # 业务逻辑：注入到物料池
+            # (这里复用之前的 pairs 注入逻辑，简化起见这里按原逻辑执行)
+            # 注意：用户图2的逻辑似乎是先选吧，再点“锁定发射坐标”
+            # 我这里将选中的吧存入临时状态，供主界面的“锁定发射坐标”使用
+            self._temp_target_fnames = list(final_fnames)
+            self._show_snackbar(f"已锁定 {len(final_fnames)} 个发射坐标点", "success")
+            
+        tabs = ft.Tabs(
+            selected_index=0,
+            tabs=[
+                ft.Tab(text="本地自留区", icon=icons.GPS_FIXED, content=ft.Container(content=local_grid, padding=10, height=200)),
+                ft.Tab(text="全域轰炸组", icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED, content=ft.Container(content=manual_input, padding=10, height=200)),
+            ],
+            expand=True
+        )
+
+        fire_dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.TARGET, color="red"), ft.Text("配置火力抛射靶场")]),
+            content=ft.Container(
+                content=ft.Column([
+                    tabs
+                ], tight=True),
+                width=500,
+            ),
+            actions=[
+                ft.TextButton("关闭", on_click=lambda _: self.page.close(fire_dialog)),
+                ft.FilledButton("锁定发射坐标", icon=icons.CHECK, on_click=on_confirm),
+            ],
+        )
+        
+        refresh_local_grid()
+        self.page.open(fire_dialog)
 
     async def _on_shortlink_search_change(self, e):
         self._search_keyword = e.control.value.lower()
@@ -1342,7 +1494,15 @@ class BatchPostPage:
         
         # 2. 物料录入与表格
         self._quick_title = ft.TextField(label="快速配置标签(可选)", expand=1, text_size=12, dense=True)
-        self._quick_content = ft.TextField(label="正文主段落 (将混合零宽防御)*", expand=2, text_size=12, dense=True)
+        self._quick_content = ft.TextField(
+            label="正文主段落 (将混合零宽防御)*", 
+            expand=2, 
+            text_size=12, 
+            dense=True,
+            multiline=True,
+            min_lines=1,
+            max_lines=5
+        )
         self._add_btn = ft.IconButton(icon=icons.ADD_BOX, icon_color="primary", on_click=self._add_material_row, tooltip="写好就塞进去")
         
         self._material_table = ft.DataTable(
@@ -1402,7 +1562,8 @@ class BatchPostPage:
         )
         self.account_pool_column = ft.Column(spacing=5, height=150, scroll=ft.ScrollMode.ADAPTIVE)
         self.start_btn = ft.ElevatedButton(
-            "制定矩阵任务", icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
+            "锁定发射坐标", 
+            icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
             on_click=self._on_start_click,
             style=ft.ButtonStyle(color="white", bgcolor="primary")
         )
@@ -1427,7 +1588,7 @@ class BatchPostPage:
         header = ft.Row([
             ft.IconButton(icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._navigate("dashboard")),
             ft.Column([
-                ft.Text("矩阵发帖终端 / MATRIX POST TERMINAL", size=20, weight=ft.FontWeight.BOLD, color="primary"),
+                ft.Text("火力抛射靶场 / ARTILLERY RANGE", size=20, weight=ft.FontWeight.BOLD, color="primary"),
                 ft.Text("多账号轮换、多内容池混淆及多贴吧矩阵发布引擎", size=11, color="onSurfaceVariant"),
             ], spacing=0),
         ])
@@ -1866,14 +2027,62 @@ class BatchPostPage:
             self.log_list.controls.pop()
 
     def _show_rejection_detail(self, e):
-        """显示拒稿的具体原因弹窗"""
-        error_msg = e.control.data or "未知拒稿原因（可能是由于网络中断或百度未返回明确代码）"
+        """显示拒稿的具体原因弹窗 (增强版：附带战术建议 + 账号/贴吧详情)"""
+        data = e.control.data
+        if isinstance(data, dict):
+            error_msg = data.get("error") or "未知拒稿原因"
+            account_id = data.get("account_id") or "未知"
+            fname = data.get("fname") or "未知吧"
+        else:
+            error_msg = data or "未知拒稿原因"
+            account_id = "未知"
+            fname = "未知吧"
+        
+        # 获取战术建议
+        from ...core.batch_post import BatchPostManager
+        advice = BatchPostManager.get_tactical_advice(error_msg)
+
         confirm_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.ERROR_OUTLINE, color="error"), ft.Text("发帖被拦截详情")]),
+            title=ft.Row([ft.Icon(icons.ERROR_OUTLINE, color="error"), ft.Text("发帖被拦截详情 / INTERCEPTED")]),
             content=ft.Container(
-                content=ft.Text(error_msg, selectable=True),
-                width=400,
-                padding=10
+                content=ft.Column([
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Row([ft.Icon(icons.FORUM, size=12, color="primary"), ft.Text(f"吧名: {fname}", size=11, weight=ft.FontWeight.W_500)], spacing=5),
+                            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                            bgcolor=with_opacity(0.1, "primary"),
+                            border_radius=4
+                        ),
+                        ft.Container(
+                            content=ft.Row([ft.Icon(icons.PERSON, size=12, color="orange"), ft.Text(f"账号ID: {account_id}", size=11, weight=ft.FontWeight.W_500)], spacing=5),
+                            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                            bgcolor=with_opacity(0.1, "orange"),
+                            border_radius=4
+                        ),
+                    ], spacing=10),
+                    ft.Divider(height=10, color="transparent"),
+                    ft.Text("原始错误信息 / RAW ERROR:", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
+                    ft.Container(
+                        content=ft.Text(error_msg, selectable=True, color="error", size=13),
+                        padding=10,
+                        bgcolor=with_opacity(0.1, "error"),
+                        border_radius=5
+                    ),
+                    ft.Divider(height=10, color="transparent"),
+                    ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green", size=16), ft.Text("战术情报分析 / STRATEGY", size=12, weight=ft.FontWeight.BOLD)]),
+                    ft.Text(f"【拦截诱因】: {advice['reason']}", size=12, color="onSurface"),
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("【操作指导】:", size=11, color="green", weight=ft.FontWeight.BOLD),
+                            ft.Text(advice['action'], size=11, color="onSurfaceVariant"),
+                        ], tight=True, spacing=5),
+                        padding=10,
+                        bgcolor=with_opacity(0.05, "green"),
+                        border=ft.border.all(1, with_opacity(0.2, "green")),
+                        border_radius=8
+                    )
+                ], tight=True, spacing=10),
+                width=450,
             ),
             actions=[
                 ft.TextButton("我已知晓", on_click=lambda _: self.page.close(confirm_dialog))

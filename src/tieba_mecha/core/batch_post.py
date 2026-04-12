@@ -170,6 +170,40 @@ class BatchPostManager:
         else:
             return task.accounts[step % len(task.accounts)]
 
+    @staticmethod
+    def get_tactical_advice(err_msg: str) -> dict:
+        """战术情报分析：将生硬的报错转化为实战建议"""
+        advice_map = {
+            "用户没有权限": {
+                "reason": "等级不足、被封禁或未关注该吧。",
+                "action": "1. 运行【全域签到】提升等级(需≥4级)；\n2. 开启【安全原初打法】优先用关注老号；\n3. 检查账号是否被该吧吧务列入黑名单。"
+            },
+            "由于吧务设置": {
+                "reason": "触发了该贴吧吧务自定义的小号/关键字拦截规则。",
+                "action": "1. 启用 AI 强力改写混淆文案特征；\n2. 使用更高等级(>7级)的账号出战；\n3. 检查文案中是否含有直链。"
+            },
+            "内容中含有": {
+                "reason": "触发了百度平台级敏感词库拦截。",
+                "action": "1. 开启 AI 深度改写；\n2. 增加零宽字符密度；\n3. 尝试将敏感关键词用拼音或谐音替换。"
+            },
+            "验证码": {
+                "reason": "发帖频率过高或账号处于风控高度侦察态。",
+                "action": "1. 显著增加发帖延迟(建议>600s)；\n2. 前往【安全本营】进行一次拟人化养号维护；\n3. 更换代理 IP。"
+            },
+            "贴吧升级中": {
+                "reason": "目标贴吧由于后台维护暂时关闭发帖功能。",
+                "action": "1. 暂时跳过该点位；\n2. 1-2小时后再试。"
+            }
+        }
+        
+        for key, info in advice_map.items():
+            if key in err_msg:
+                return info
+        return {
+            "reason": "未知干扰，可能是由于网络不稳定或百度返回了非标准代码。",
+            "action": "1. 尝试对该账号进行手工登录验证；\n2. 检查代理节点是否依然存活。"
+        }
+
     async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple]) -> int:
         """
         靶场智能撮合核心：优先寻找本号已关注且 is_post_target=True 的原生号
