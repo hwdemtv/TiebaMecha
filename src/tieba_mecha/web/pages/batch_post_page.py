@@ -1223,62 +1223,91 @@ class BatchPostPage:
         self.page.open(safety_dialog)
 
     async def _open_firepower_dialog(self, pre_selected_fnames: set):
-        """[第二阶段] 配置火力抛射靶场"""
+        """[第二阶段] 配置火力抛射靶场 (带搜索、勾选与手动补充)"""
         
-        final_fnames = pre_selected_fnames.copy()
+        final_selected = pre_selected_fnames.copy()
+        local_fnames = await self.db.get_all_unique_fnames()
         
-        # 手动输入框 (全域轰炸组使用)
-        manual_input = ft.TextField(
-            label="全域轰炸组 (手动输入，英文逗号分隔)", 
-            multiline=True, 
-            min_lines=3, 
+        # 1. 搜索过滤与全选 (用于本地自留区)
+        search_field = ft.TextField(
+            label="过滤本地吧...",
+            prefix_icon=icons.SEARCH,
+            dense=True,
             text_size=12,
-            value=",".join(pre_selected_fnames)
+            expand=True
         )
         
-        # 本地展示列表
-        local_grid = ft.GridView(
-            runs_count=3,
-            max_extent=150,
-            child_aspect_ratio=3.0,
-            spacing=5,
-            run_spacing=5,
-        )
+        select_all_cb = ft.Checkbox(label="全选", value=False, scale=0.8)
         
-        def refresh_local_grid():
-            local_grid.controls.clear()
-            for fn in final_fnames:
-                local_grid.controls.append(
-                    ft.Container(
-                        content=ft.Text(fn, size=11),
-                        padding=5,
-                        bgcolor=with_opacity(0.1, "primary"),
-                        border_radius=4
+        # 2. 贴吧容器 (用于本地自留区)
+        forums_container = ft.Column(spacing=5, scroll=ft.ScrollMode.ADAPTIVE, height=300)
+        
+        def on_item_check(e):
+            fn = e.control.data
+            if e.control.value: final_selected.add(fn)
+            else: final_selected.discard(fn)
+
+        def render_local_list(keyword=""):
+            forums_container.controls.clear()
+            for fn in local_fnames:
+                if keyword and keyword.lower() not in fn.lower(): continue
+                forums_container.controls.append(
+                    ft.Checkbox(
+                        label=fn, 
+                        value=(fn in final_selected), 
+                        data=fn, 
+                        on_change=on_item_check,
                     )
                 )
             self.page.update()
 
+        search_field.on_change = lambda e: render_local_list(e.control.value)
+        
+        # 3. 手动输入框 (用于全域轰炸组)
+        manual_input = ft.TextField(
+            label="手动补充吧名 (英文逗号分隔)", 
+            placeholder="贴吧1, 贴吧2...",
+            multiline=True, 
+            min_lines=5, 
+            text_size=12,
+        )
+        
         async def on_confirm(_):
             # 合并手动输入的内容
             if manual_input.value:
                 manual_fnames = [f.strip() for f in manual_input.value.split(",") if f.strip()]
-                for fn in manual_fnames: final_fnames.add(fn)
+                for fn in manual_fnames: final_selected.add(fn)
             
-            # 关闭弹窗并注入
+            self._temp_target_fnames = list(final_selected)
             self.page.close(fire_dialog)
-            
-            # 业务逻辑：注入到物料池
-            # (这里复用之前的 pairs 注入逻辑，简化起见这里按原逻辑执行)
-            # 注意：用户图2的逻辑似乎是先选吧，再点“锁定发射坐标”
-            # 我这里将选中的吧存入临时状态，供主界面的“锁定发射坐标”使用
-            self._temp_target_fnames = list(final_fnames)
-            self._show_snackbar(f"已锁定 {len(final_fnames)} 个发射坐标点", "success")
-            
+            self._show_snackbar(f"🎯 已锁定 {len(final_selected)} 个发射坐标点，准备完毕", "success")
+
+        # 4. 构造页签
         tabs = ft.Tabs(
             selected_index=0,
             tabs=[
-                ft.Tab(text="本地自留区", icon=icons.GPS_FIXED, content=ft.Container(content=local_grid, padding=10, height=200)),
-                ft.Tab(text="全域轰炸组", icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED, content=ft.Container(content=manual_input, padding=10, height=200)),
+                ft.Tab(
+                    text="本地自留区", 
+                    icon=icons.GPS_FIXED, 
+                    content=ft.Container(
+                        content=ft.Column([
+                            ft.Row([search_field, select_all_cb, ft.Icon(icons.SETTINGS, color="green", size=20)], spacing=10),
+                            forums_container
+                        ], tight=True),
+                        padding=10
+                    )
+                ),
+                ft.Tab(
+                    text="全域轰炸组", 
+                    icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED, 
+                    content=ft.Container(
+                        content=ft.Column([
+                            ft.Text("在这里输入从未关注但在轰炸计划内的外部目标吧:", size=11, color="onSurfaceVariant"),
+                            manual_input,
+                        ], tight=True),
+                        padding=10
+                    )
+                ),
             ],
             expand=True
         )
@@ -1286,18 +1315,21 @@ class BatchPostPage:
         fire_dialog = ft.AlertDialog(
             title=ft.Row([ft.Icon(icons.TARGET, color="red"), ft.Text("配置火力抛射靶场")]),
             content=ft.Container(
-                content=ft.Column([
-                    tabs
-                ], tight=True),
+                content=tabs,
                 width=500,
             ),
             actions=[
                 ft.TextButton("关闭", on_click=lambda _: self.page.close(fire_dialog)),
-                ft.FilledButton("锁定发射坐标", icon=icons.CHECK, on_click=on_confirm),
+                ft.FilledButton(
+                    "锁定发射坐标", 
+                    icon=icons.CHECK, 
+                    style=ft.ButtonStyle(bgcolor="primary", color="white"),
+                    on_click=on_confirm
+                ),
             ],
         )
         
-        refresh_local_grid()
+        render_local_list()
         self.page.open(fire_dialog)
 
     async def _on_shortlink_search_change(self, e):
