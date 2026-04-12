@@ -213,7 +213,11 @@ class BatchPostPage:
             self.page.update()
 
         self.forum_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.RADAR_ROUNDED, color="red"), ft.Text("配置火力抛射靶场")]),
+            title=ft.Row([
+                ft.Icon(icons.RADAR_ROUNDED, color="red"), 
+                ft.Text("配置火力抛射靶场"),
+                ft.IconButton(icons.SECURITY, icon_color="green", on_click=lambda _: self._open_safety_config_dialog(), tooltip="配置安全本营")
+            ]),
             content=ft.Container(
                 content=ft.Tabs(
                     selected_index=0,
@@ -1154,7 +1158,11 @@ class BatchPostPage:
         self.page.update()
 
     async def _open_forum_dialog(self, e):
-        """[第一阶段] 安全原初打法配置"""
+        """直接进入火力配置主页面"""
+        await self._open_firepower_dialog(set(self._temp_target_fnames))
+
+    async def _open_safety_config_dialog(self, pre_selected: set):
+        """[子弹窗] 安全原初打法配置 - 配置完返回火力配置"""
         
         # 获取本地已同步的吧名列表
         local_fnames = await self.db.get_all_unique_fnames()
@@ -1221,8 +1229,9 @@ class BatchPostPage:
             self.page.open(confirm_dialog)
 
         async def on_lock_safety(_):
-            """锁定安全配置，进入火力配置阶段"""
+            """锁定安全配置，返回火力配置阶段"""
             self.page.close(safety_dialog)
+            # 配置已更新，重新打开火力配置弹窗（由外部变量同步状态）
             await self._open_firepower_dialog(selected_fnames)
 
         safety_dialog = ft.AlertDialog(
@@ -1259,7 +1268,7 @@ class BatchPostPage:
         self.page.open(safety_dialog)
 
     async def _open_firepower_dialog(self, pre_selected_fnames: set):
-        """[第二阶段] 配置火力抛射靶场 (带搜索、勾选与手动补充)"""
+        """[火力配置主页面] 配置火力抛射靶场"""
         
         final_selected = pre_selected_fnames.copy()
         local_fnames = await self.db.get_all_unique_fnames()
@@ -1350,6 +1359,19 @@ class BatchPostPage:
             self._temp_target_fnames = list(final_selected)
             self.page.close(fire_dialog)
             self._show_snackbar(f"🎯 已锁定 {len(final_selected)} 个发射坐标点，准备完毕", "success")
+
+        # 标题栏：包含安全配置入口
+        dialog_title = ft.Row([
+            ft.Icon(icons.SETTINGS_INPUT_COMPONENT_ROUNDED, color="blue"), 
+            ft.Text("配置火力抛射靶场"),
+            ft.VerticalDivider(width=20),
+            ft.TextButton(
+                "安全原初打法", 
+                icon=icons.SHIELD_ROUNDED, 
+                icon_color="green",
+                on_click=lambda _: self.page.run_task(self._open_safety_config_dialog, final_selected)
+            )
+        ], alignment=ft.MainAxisAlignment.START)
 
         # 4. 构造页签
         tabs = ft.Tabs(
