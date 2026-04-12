@@ -1363,7 +1363,7 @@ class BatchPostPage:
 
         # 标题栏：包含安全配置入口
         dialog_title = ft.Row([
-            ft.Icon(icons.SETTINGS_INPUT_COMPONENT_ROUNDED, color="blue"), 
+            ft.Icon(icons.SETTINGS_SUGGEST, color="blue"), 
             ft.Text("配置火力抛射靶场"),
             ft.VerticalDivider(width=20),
             ft.TextButton(
