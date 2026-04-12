@@ -1197,7 +1197,11 @@ class BatchPostPage:
             title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
             content=ft.Container(
                 content=ft.Column([
-                    ft.Row([search_field, select_all_cb], spacing=10),
+                    ft.Row([
+                        search_field, 
+                        select_all_cb,
+                        ft.IconButton(icons.DELETE_SWEEP, icon_color="error", tooltip="删除选中项并同步取消关注", on_click=on_bulk_unfollow_click),
+                    ], spacing=10),
                     ft.Text("开启专属保护开关后，会强制优先调用原生关注小号出战:", size=11, color="onSurfaceVariant"),
                     ft.Container(
                         content=forums_list_container,
