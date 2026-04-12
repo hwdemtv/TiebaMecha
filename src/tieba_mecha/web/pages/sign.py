@@ -333,13 +333,16 @@ class SignPage:
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
-                    # 左侧控制 (原右侧)
-                    ft.Column([
-                        self.main_action,
-                        settings_panel,
-                        daemon_panel,
-                    ], spacing=20),
-                    # 右侧列表 (原左侧)
+                    # 左侧控制面板 (固定宽度，可滚动)
+                    ft.Container(
+                        content=ft.Column([
+                            self.main_action,
+                            settings_panel,
+                            daemon_panel,
+                        ], spacing=20, scroll=ft.ScrollMode.AUTO),
+                        width=320,
+                    ),
+                    # 右侧执行队列 (自动扩展)
                     ft.Column([
                         ft.Row([
                             ft.Text("执行队列", size=14, weight=ft.FontWeight.W_500),
@@ -354,8 +357,8 @@ class SignPage:
                             border_radius=10,
                         ),
                     ], expand=True, spacing=10),
-                ], expand=True),
-            ], spacing=20),
+                ], expand=True, vertical_alignment=ft.CrossAxisAlignment.START),
+            ], spacing=20, expand=True),
             padding=20,
             expand=True,
         )

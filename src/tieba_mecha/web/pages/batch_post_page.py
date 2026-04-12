@@ -150,7 +150,7 @@ class BatchPostPage:
                         data=acc.id,
                         on_change=self._on_account_select_change, # 修正为正确的名称
                         disabled=is_suspended,
-                        label_size=11,
+                        label_style=ft.TextStyle(size=11),
                     )
                 )
             self.account_pool_column.controls = items
@@ -2060,7 +2060,7 @@ class BatchPostPage:
                         ),
                         # 底部标签页
                         self.bottom_tabs,
-                    ], expand=5, spacing=15),
+                    ], expand=6, spacing=15),
 
                     # 第三栏：账号池管理 (Right, expand=3)
                     ft.Column([
@@ -2077,7 +2077,7 @@ class BatchPostPage:
                             expand=True,
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
-                    ], expand=3, spacing=12),
+                    ], expand=2, spacing=12),
                 ], expand=True, vertical_alignment=ft.CrossAxisAlignment.START),
             ], expand=True, spacing=20),
             padding=ft.padding.only(left=20, right=20, top=10, bottom=20), expand=True,
