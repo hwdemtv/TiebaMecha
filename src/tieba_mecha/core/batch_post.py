@@ -452,7 +452,7 @@ class BatchPostManager:
                                 if err_code == 3250004:
                                     await log_error(f"检测到吧务封禁！账号 {account_id} 已在 {target_fname} 自动熔断。")
                                     await self.db.mark_forum_banned(account_id, target_fname, reason="Step 3 发射检测到吧务封禁")
-                                    try: await client.unfollow(target_fname)
+                                    try: await client.unfollow_forum(target_fname)
                                     except: pass
                                 elif err_code == 340001:
                                     await log_warn(f"{target_fname} 正在升级中，已跳过该点位。")
@@ -532,7 +532,7 @@ class BatchPostManager:
                     # 标记位熔断：不再删除记录，而是设为封禁并停止发帖许可
                     await self.db.mark_forum_banned(account_id, fname, reason="回帖触发吧务封禁 (3250004)")
                     try:
-                        await client.unfollow(fname)
+                        await client.unfollow_forum(fname)
                     except Exception as ue:
                         logger.warning(f"回帖熔断取消关注失败: {ue}")
                         
@@ -581,7 +581,7 @@ class BatchPostManager:
                 ) as client:
                     for fname in fnames:
                         try:
-                            await client.unfollow(fname)
+                            await client.unfollow_forum(fname)
                             await log_info(f"账号 {acc_id} 已成功取消关注 [{fname}]")
                         except Exception as e:
                             await log_error(f"账号 {acc_id} 取消关注 [{fname}] 失败: {str(e)}")
