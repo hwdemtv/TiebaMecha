@@ -530,7 +530,7 @@ class AutoBumpManager:
             from ..db.models import MaterialPool
             from sqlalchemy import select, and_
             
-            # 宽限期：45 分钟回一次
+            # 宽限期：45 分钟回一次，且总自顶次数不超过 50 次 (安全门控)
             threshold_time = datetime.now() - timedelta(minutes=45)
             
             stmt = select(MaterialPool).where(
@@ -539,6 +539,7 @@ class AutoBumpManager:
                     MaterialPool.is_auto_bump == True,
                     MaterialPool.posted_tid != None,
                     MaterialPool.posted_tid != 0,
+                    MaterialPool.bump_count < 50, # 强制安全限额
                     (MaterialPool.last_bumped_at == None) | (MaterialPool.last_bumped_at < threshold_time)
                 )
             )
@@ -548,7 +549,7 @@ class AutoBumpManager:
             if not candidates:
                 return
 
-            await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件，开始执行...")
+            await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件 (次数 < 50)，开始执行...")
             
             # 运行时 Skip-List：防止在同一次扫描中反复背刺已被封的账号
             banned_pairs = set() # (account_id, fname)
@@ -566,10 +567,26 @@ class AutoBumpManager:
                 if (target_account_id, material.posted_fname) in banned_pairs:
                     continue
 
-                # 构造回帖内容
-                bump_content = f"自顶一下：{material.title[:15]}..." 
+                # --- 拟人化随机文案引擎 ---
+                BUMP_TEMPLATES = [
+                    "赞一个，资源已取！", "支持楼主，感谢分享", "马住备用，技术贴支持", 
+                    "前排围观，顺便帮顶", "太实用了，楼主大气", "已收藏，感谢大佬",
+                    "这个必须顶上去", "好东西，mark一下", "分享即美德，赞！",
+                    "路过帮顶，支持原创", "感谢分享，整理辛苦了", "百度一下，支持此贴"
+                ]
+                RANDOM_EMOJIS = ["(๑•̀ㅂ• middle dot)و✧", "(￣▽￣)ノ", "[赞]", "✨", "🚀", "🔥", "👍", "🙏", "🍺"]
+                
+                # 基于物料标题和随机词库构造
+                base_text = random.choice(BUMP_TEMPLATES)
+                if random.random() < 0.4: # 40% 概率携带标题关键词
+                    keyword = material.title[:10]
+                    base_text = f"关于【{keyword}】：{base_text}"
+                
+                bump_content = f"{base_text} {random.choice(RANDOM_EMOJIS)}"
+                
                 if material.ai_status == "rewritten":
-                    bump_content = f"分享：{material.title}"
+                    # AI 改写过的物料使用略微不同的风格
+                    bump_content = f"分享好物：{material.title} {random.choice(RANDOM_EMOJIS)}"
                     
                 success = await self.post_manager.reply_to_thread(
                     target_account_id, 

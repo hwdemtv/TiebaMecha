@@ -12,7 +12,7 @@ from ..components.icons import (
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
     CHECK, VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, HISTORY_ROUNDED,
     GROUP_WORK_ROUNDED, PUBLIC, VPN_LOCK, CHECK_CIRCLE,
-    PENDING_OUTLINED, ERROR, HISTORY_TOGGLE_OFF
+    PENDING_OUTLINED, ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED
 )
 from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
@@ -30,6 +30,7 @@ class SignPage:
         self._matrix_tasks = [] # [(account, forum)]
         self._stats = {"total": 0, "success": 0, "failure": 0}
         self._is_signing = False
+        self._stop_requested = False
         self._mode = "single"  # single / matrix
 
     async def load_data(self):
@@ -215,14 +216,35 @@ class SignPage:
         # 操作区
         self.sync_btn = create_gradient_button("同步贴吧", icon=SYNC_ROUNDED, on_click=lambda e: self.page.run_task(self._do_sync, e))
         
+        # 主控按钮组件
+        self.sign_btn_icon = ft.Icon(PLAY_ARROW_ROUNDED, color="onSurface", size=30)
+        self.sign_btn_text = ft.Text("启动签到流", color="onSurfaceVariant", size=12, weight=ft.FontWeight.W_500)
+        
         self.main_action = ft.Container(
             content=ft.Column([
                 ft.Text("执行主控", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
-                CoreButtonWithLabel(
-                    label="启动签到流",
-                    icon=PLAY_ARROW_ROUNDED,
-                    on_click=lambda e: self.page.run_task(self._do_sign, e),
-                    size=70,
+                ft.Container(
+                    content=ft.Column([
+                        ft.Container(
+                            content=self.sign_btn_icon,
+                            gradient=ft.RadialGradient(
+                                colors=GRADIENT_CYAN,
+                                center=ft.alignment.center,
+                            ),
+                            width=70,
+                            height=70,
+                            border_radius=35,
+                            shadow=ft.BoxShadow(
+                                spread_radius=3,
+                                blur_radius=30,
+                                color=with_opacity(0.3, GRADIENT_CYAN[0]),
+                            ),
+                            ink=True,
+                            on_click=lambda e: self.page.run_task(self._do_sign, e),
+                            alignment=ft.alignment.center,
+                        ),
+                        self.sign_btn_text,
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
                 ),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             padding=10,
@@ -469,6 +491,13 @@ class SignPage:
         self.page.update()
 
     async def _do_sign(self, e):
+        if self._is_signing:
+            if not self._stop_requested:
+                self._stop_requested = True
+                self.status_text.value = "⛔ 正在申请中止执行，请等待当前任务结束..."
+                self.page.update()
+            return
+
         if self._mode == "single":
             await self._do_sign_single()
         else:
@@ -478,8 +507,13 @@ class SignPage:
         if self._is_signing or (self._stats['total'] - self._stats['success']) == 0: return
         
         self._is_signing = True
+        self._stop_requested = False
         self.progress_bar.visible = True
         self.progress_bar.value = 0
+        
+        # UI 切换为停止状态
+        self.sign_btn_icon.name = STOP_CIRCLE_ROUNDED
+        self.sign_btn_text.value = "停止签到流"
         self.page.update()
 
         # 修复：分母应为队列中所有贴吧的总数，因为 sign_all_forums 会遍历所有贴吧
@@ -493,6 +527,10 @@ class SignPage:
 
         try:
             async for result in sign_all_forums(self.db, delay_min=d_min, delay_max=d_max):
+                if self._stop_requested:
+                    self._show_snackbar("签到流已由用户手动中止", "warning")
+                    break
+                    
                 current += 1
                 self.progress_bar.value = current / total
                 self.status_text.value = f"正在签到: {result.fname} ({current}/{total})"
@@ -506,13 +544,19 @@ class SignPage:
                 
                 self.page.update()
             
-            self._show_snackbar("所有签到指令已执行完毕", "success")
+            if not self._stop_requested:
+                self._show_snackbar("所有签到指令已执行完毕", "success")
         except Exception as ex:
             self._show_snackbar(f"任务异常中止: {str(ex)}", "error")
         
         self._is_signing = False
+        self._stop_requested = False
         self.progress_bar.visible = False
         self.status_text.value = ""
+        
+        # UI 恢复
+        self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
+        self.sign_btn_text.value = "启动签到流"
         
         # 发送结束广播
         self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
@@ -523,8 +567,13 @@ class SignPage:
         if self._is_signing or not self._accounts: return
         
         self._is_signing = True
+        self._stop_requested = False
         self.progress_bar.visible = True
         self.progress_bar.value = 0
+        
+        # UI 切换为停止状态
+        self.sign_btn_icon.name = STOP_CIRCLE_ROUNDED
+        self.sign_btn_text.value = "停止签到流"
         self.page.update()
 
         try:
@@ -541,6 +590,10 @@ class SignPage:
 
         try:
             async for result in sign_all_accounts(self.db, d_min, d_max, ad_min, ad_max):
+                if self._stop_requested:
+                    self._show_snackbar("矩阵签到流已由用户手动中止", "warning")
+                    break
+                    
                 current_task_idx += 1
                     
                 self.progress_bar.value = current_task_idx / total_tasks
@@ -555,13 +608,20 @@ class SignPage:
                 
                 self.page.update()
             
-            self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
+            if not self._stop_requested:
+                self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
         except Exception as ex:
             self._show_snackbar(f"矩阵任务异常中止: {str(ex)}", "error")
         
         self._is_signing = False
+        self._stop_requested = False
         self.progress_bar.visible = False
         self.status_text.value = ""
+        
+        # UI 恢复
+        self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
+        self.sign_btn_text.value = "启动签到流"
+        
         # 发送结束广播
         self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
         await self.load_data()

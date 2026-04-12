@@ -515,7 +515,21 @@ class BatchPostPage:
                                 ft.DataCell(ft.Text(str(m.id))),
                                 ft.DataCell(ft.Text(display_t, tooltip=display_t)),
                                 ft.DataCell(ft.Text(display_c, tooltip=display_c)),
-                                ft.DataCell(ft.Row([ft.Icon(status_icon, color=status_color, size=14), ft.Text(status_text, color=status_color, size=12)], spacing=4)),
+                                ft.DataCell(
+                                    ft.Row([
+                                        ft.Icon(status_icon, color=status_color, size=14), 
+                                        ft.Text(status_text, color=status_color, size=12),
+                                        ft.IconButton(
+                                            icons.INFO,
+                                            icon_size=14,
+                                            icon_color=status_color,
+                                            tooltip="点击查看拒稿原因详情",
+                                            data=m.last_error,
+                                            on_click=self._show_rejection_detail,
+                                            visible=(m.status == "failed")
+                                        )
+                                    ], spacing=4)
+                                ),
                                 ft.DataCell(ft.Row([
                                     ft.Text(ai_text, color=ai_color, size=12),
                                     ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
@@ -525,12 +539,26 @@ class BatchPostPage:
                                     ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
                                     ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
                                 ], spacing=0)),
-                                ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8)),
+                                ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8, tooltip="待发布成功后，系统将自动开始循环回帖流程")),
                             ]
                         )
                     )
                 else:
-                    # 已发归档逻辑
+                    # 自顶状态逻辑增强：区分 开启/停止/上限
+                    is_limit_reached = (m.bump_count >= 50)
+                    bump_status_text = f"已顶{m.bump_count}"
+                    bump_color = "onSurfaceVariant"
+                    bump_tooltip = f"当前已累计自顶 {m.bump_count} 次"
+                    
+                    if is_limit_reached:
+                        bump_status_text = f"封顶({m.bump_count})"
+                        bump_color = "orange"
+                        bump_tooltip = "由于该贴已达到 50 次安全回帖上限，系统已自动停止进一步操作"
+                    elif not m.is_auto_bump and m.bump_count > 0:
+                        bump_status_text = f"暂停({m.bump_count})"
+                        bump_color = "onSurfaceVariant"
+                        bump_tooltip = "自顶功能当前处于手动关闭状态"
+
                     archive_rows.append(
                         ft.DataRow(
                             selected=m.id in self._selected_archive_ids,
@@ -549,7 +577,7 @@ class BatchPostPage:
                                 ], spacing=0)),
                                 ft.DataCell(ft.Row([
                                     ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
-                                    ft.Text(f"已顶{m.bump_count}", size=11, color="onSurfaceVariant")
+                                    ft.Text(bump_status_text, size=11, color=bump_color, tooltip=bump_tooltip)
                                 ], spacing=2)),
                             ]
                         )
@@ -776,31 +804,36 @@ class BatchPostPage:
         await self._refresh_material_table()
 
     async def _bulk_toggle_auto_bump(self, e):
-        # 批量切换选中项的自顶开关
-        if not self._selected_material_ids:
+        # 自动探测当前生效的选择集（排期池或归档库）
+        target_ids = list(self._selected_material_ids) if self._selected_material_ids else list(self._selected_archive_ids)
+        
+        if not target_ids:
             return
         
-        # 获取第一个选中的状态，作为基准进行翻转（或者全部设为统一值，这里采用统一设为 True 的逻辑，除非全是 True 才会全部设为 False）
+        # 统一逻辑：如果选中项中有任何一个未开启，则全部开启；否则全部关闭
         is_any_off = False
         async with self.db.async_session() as session:
             from ...db.models import MaterialPool
-            for mid in list(self._selected_material_ids):
+            for mid in target_ids:
                 m = await session.get(MaterialPool, mid)
                 if m and not m.is_auto_bump:
                     is_any_off = True
                     break
             
             target_val = is_any_off
-            for mid in list(self._selected_material_ids):
+            for mid in target_ids:
                 m = await session.get(MaterialPool, mid)
                 if m:
                     m.is_auto_bump = target_val
             await session.commit()
             
+        # 清空对应的选择集并刷新
+        count = len(target_ids)
         self._selected_material_ids.clear()
+        self._selected_archive_ids.clear()
         self._materials = await self.db.get_materials()
         await self._refresh_material_table()
-        self._show_snackbar(f"已批量{'开启' if target_val else '关闭'} {len(self._selected_material_ids)} 项自动回帖", "success")
+        self._show_snackbar(f"已批量{'开启' if target_val else '关闭'} {count} 项自动回帖", "success")
 
     async def _on_material_row_select(self, mid, selected):
         # Flet e.data 为字符串 "true"/"false"
@@ -1298,6 +1331,9 @@ class BatchPostPage:
 
         self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._archive_bulk_actions = ft.Row([
+            ft.FilledButton("批量自顶", icon=icons.BOLT,
+                            style=ft.ButtonStyle(bgcolor="primary", color="white"), 
+                            on_click=self._bulk_toggle_auto_bump),
             ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
@@ -1757,6 +1793,14 @@ class BatchPostPage:
                 )
                 self._show_snackbar("定时矩阵任务已加入全域队列", "success")
                 await self.load_data()
+
+                # --- 自动步进优化：将界面时间向后推移 ---
+                # 获取步进长度：如果有循环周期按周期跳，否则默认跳 1 小时
+                step_hours = int(self.interval_hours.value) if self.interval_hours.value and int(self.interval_hours.value) > 0 else 1
+                next_st = st + timedelta(hours=step_hours)
+                self.schedule_time.value = next_st.strftime("%Y-%m-%d %H:%M")
+                self.page.update()
+                
                 return
             except Exception as ex:
                 self._show_snackbar(f"定时解析失败: {str(ex)}", "error")
@@ -1820,6 +1864,23 @@ class BatchPostPage:
         self.log_list.controls.insert(0, ft.Text(f"[{now}] {msg}", size=11, color=color))
         if len(self.log_list.controls) > 100:
             self.log_list.controls.pop()
+
+    def _show_rejection_detail(self, e):
+        """显示拒稿的具体原因弹窗"""
+        error_msg = e.control.data or "未知拒稿原因（可能是由于网络中断或百度未返回明确代码）"
+        confirm_dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.ERROR_OUTLINE, color="error"), ft.Text("发帖被拦截详情")]),
+            content=ft.Container(
+                content=ft.Text(error_msg, selectable=True),
+                width=400,
+                padding=10
+            ),
+            actions=[
+                ft.TextButton("我已知晓", on_click=lambda _: self.page.close(confirm_dialog))
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(confirm_dialog)
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)
