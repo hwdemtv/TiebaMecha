@@ -26,6 +26,8 @@ class BatchPostPage:
         
         # Link survival status cache: tid -> "checking", "alive", "dead"
         self._survival_cache = {}
+        # Archive survival filter: "all", "alive", "dead"
+        self._archive_surv_filter = "all"
         self.connector = SmartLinkConnector(db)
         self._file_picker = ft.FilePicker(
             on_result=self._on_file_result,
@@ -502,6 +504,13 @@ class BatchPostPage:
                         continue
                 else:
                     if self._archive_search_text and self._archive_search_text.lower() not in m_title.lower() and self._archive_search_text.lower() not in m_posted_fname.lower():
+                        continue
+                    
+                    # 存活状态过滤
+                    surv_status = self._survival_cache.get(m.posted_tid, "unknown")
+                    if self._archive_surv_filter == "alive" and surv_status != "alive":
+                        continue
+                    if self._archive_surv_filter == "dead" and surv_status != "dead":
                         continue
 
                 display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
@@ -1651,6 +1660,11 @@ class BatchPostPage:
         except:
             pass
 
+    async def _on_archive_surv_filter_change(self, e):
+        """存活状态筛选切换"""
+        self._archive_surv_filter = list(e.selection)[0]
+        await self.load_data()
+
     def _build_material_view(self):
         """独立构建物料池 Tab 内容 - 增加搜索与批量控制"""
         material_search = ft.TextField(
@@ -1707,6 +1721,19 @@ class BatchPostPage:
                 ], spacing=10),
                 ft.Row([
                     archive_search,
+                    ft.SegmentedButton(
+                        segments=[
+                            ft.Segment(value="all", label=ft.Text("全部"), icon=ft.Icon(icons.LIST)),
+                            ft.Segment(value="alive", label=ft.Text("存活"), icon=ft.Icon(icons.CHECK_CIRCLE, color="green")),
+                            ft.Segment(value="dead", label=ft.Text("阵亡"), icon=ft.Icon(icons.REMOVE_CIRCLE, color="error")),
+                        ],
+                        selected={"all"},
+                        on_change=self._on_archive_surv_filter_change,
+                        show_selected_icon=False,
+                        style=ft.ButtonStyle(
+                            shape=ft.RoundedRectangleBorder(radius=8),
+                        )
+                    ),
                     self._archive_bulk_actions,
                 ], spacing=10),
                 ft.Container(
