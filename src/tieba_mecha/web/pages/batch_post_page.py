@@ -1165,11 +1165,10 @@ class BatchPostPage:
     async def _open_safety_config_dialog(self, pre_selected: set):
         """[子弹窗] 安全原初打法配置 - 配置完返回火力配置"""
         
-        # 获取本地已同步的吧名列表
-        local_fnames = await self.db.get_all_unique_fnames()
-        selected_fnames = set()
+        # 1. 获取包含安全状态 (is_post_target) 的贴吧详情字典列表
+        forums = await self.db.get_all_unique_forums()
         
-        # 1. 搜索与全选控制
+        # 2. 搜索与全选控制
         search_field = ft.TextField(
             label="搜索贴吧名...",
             prefix_icon=icons.SEARCH,
@@ -1180,20 +1179,28 @@ class BatchPostPage:
         
         select_all_cb = ft.Checkbox(label="全选", value=False)
         
-        # 2. 贴吧容器
+        # 3. 贴吧容器
         forums_list_container = ft.Column(spacing=5, scroll=ft.ScrollMode.ADAPTIVE, height=300)
         
-        def on_item_check(e):
-            fn = e.control.data
-            if e.control.value: selected_fnames.add(fn)
-            else: selected_fnames.discard(fn)
+        async def on_item_check(e):
+            fid = e.control.data
+            is_checked = e.control.value
+            await self.db.toggle_forum_post_target(fid, is_checked)
+            # 无需弹窗打扰用户，状态在后台自动更新
 
         def render_forums(keyword=""):
             forums_list_container.controls.clear()
-            for fn in local_fnames:
-                if keyword and keyword.lower() not in fn.lower(): continue
+            for f in forums:
+                if keyword and keyword.lower() not in f['fname'].lower(): continue
                 forums_list_container.controls.append(
-                    ft.Checkbox(label=fn, value=(fn in selected_fnames), data=fn, on_change=on_item_check)
+                    ft.Checkbox(
+                        label=f['fname'], 
+                        value=f['is_post_target'], 
+                        data=f['fid'], 
+                        on_change=lambda ev: self.page.run_task(on_item_check, ev),
+                        fill_color="green",
+                        label_style=ft.TextStyle(color="onSurface")
+                    )
                 )
             self.page.update()
 
@@ -1203,53 +1210,18 @@ class BatchPostPage:
             for cb in forums_list_container.controls:
                 if isinstance(cb, ft.Checkbox):
                     cb.value = select_all
-                    fn = cb.data
-                    if select_all:
-                        selected_fnames.add(fn)
-                    else:
-                        selected_fnames.discard(fn)
+                    self.page.run_task(self.db.toggle_forum_post_target, cb.data, select_all)
             forums_list_container.update()
+            self._show_snackbar(f"已批量{'开启' if select_all else '关闭'}安全权限", "info")
 
         select_all_cb.on_change = on_select_all_change
         search_field.on_change = lambda e: render_forums(e.control.value)
 
-        async def on_bulk_unfollow_click(_):
-            selected_to_purge = [fn for fn in list(selected_fnames)]
-            if not selected_to_purge:
-                self._show_snackbar("请先勾选需要清理的阵地", "warning")
-                return
-
-            async def do_purge(e):
-                self.page.close(confirm_dialog)
-                # 显式从 core 模块导入
-                from ...core.batch_post import BatchPostManager
-                pm = BatchPostManager(self.db)
-                self._show_snackbar(f"开始对 {len(selected_to_purge)} 个吧执行全局清理，请稍后...", "info")
-                
-                await pm.unfollow_forums_bulk(selected_to_purge)
-                
-                # 刷新状态
-                selected_fnames.clear()
-                nonlocal local_fnames
-                local_fnames = await self.db.get_all_unique_fnames()
-                render_forums()
-                self._show_snackbar("✅ 阵地清理完成，本地记录已抹除", "success")
-
-            confirm_dialog = ft.AlertDialog(
-                title=ft.Row([ft.Icon(icons.WARNING, color="orange"), ft.Text("确认全局清理并取关")]),
-                content=ft.Text(f"将对已选的 {len(selected_to_purge)} 个贴吧执行【全局取关】并彻底删除本地记录。\n是否继续？"),
-                actions=[
-                    ft.TextButton("取消", on_click=lambda _: self.page.close(confirm_dialog)),
-                    ft.ElevatedButton("确认清除", bgcolor="error", color="white", on_click=lambda e: self.page.run_task(do_purge, e))
-                ]
-            )
-            self.page.open(confirm_dialog)
-
         async def on_lock_safety(_):
             """锁定安全配置，返回火力配置阶段"""
             self.page.close(safety_dialog)
-            # 配置已更新，重新打开火力配置弹窗（由外部变量同步状态）
-            await self._open_firepower_dialog(selected_fnames)
+            # 配置已更新，将原来的火力准备 (pre_selected) 传回，不干涉火力配置
+            await self._open_firepower_dialog(pre_selected)
 
         safety_dialog = ft.AlertDialog(
             title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
@@ -1258,7 +1230,6 @@ class BatchPostPage:
                     ft.Row([
                         search_field, 
                         select_all_cb,
-                        ft.IconButton(icons.DELETE_SWEEP, icon_color="error", tooltip="删除选中项并同步取消关注", on_click=on_bulk_unfollow_click),
                     ], spacing=10),
                     ft.Text("开启专属保护开关后，会强制优先调用原生关注小号出战:", size=11, color="onSurfaceVariant"),
                     ft.Container(
