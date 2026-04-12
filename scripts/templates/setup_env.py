@@ -45,7 +45,7 @@ TIEBA_MECHA_SECRET_KEY={secret_key}
         env_file.write_text(env_content, encoding="utf-8")
         print("\n[成功] .env 配置文件已生成！")
         print(f"路径: {env_file}")
-        print("\n提示: 现在您可以运行 '启动机甲.bat' 访问 Web 界面了。")
+        print("\n提示: 现在您可以运行 '启动机甲.bat' 进入桌面指挥中心了。")
     except Exception as e:
         print(f"\n[失败] 写入文件时发生错误: {e}")
     

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import subprocess
 from enum import IntEnum
 from functools import wraps
