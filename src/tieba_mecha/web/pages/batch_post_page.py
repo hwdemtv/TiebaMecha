@@ -39,6 +39,7 @@ class BatchPostPage:
         self._selected_account_ids = set()
         self._selected_forum_names = set()
         self._selected_group_names = set()
+        self._temp_target_fnames = []  # 新增：用于在弹窗间流转的临时吧名列表
         self._initial_load_done = False
 
         # 初始化所有 UI 控件
