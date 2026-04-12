@@ -1344,7 +1344,7 @@ class BatchPostPage:
         # 3. 手动输入框 (用于全域轰炸组)
         manual_input = ft.TextField(
             label="手动补充吧名 (英文逗号分隔)", 
-            placeholder="贴吧1, 贴吧2...",
+            hint_text="贴吧1, 贴吧2...",
             multiline=True, 
             min_lines=5, 
             text_size=12,
