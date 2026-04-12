@@ -1387,7 +1387,12 @@ class BatchPostPage:
                                 search_field, 
                                 select_all_cb, 
                                 ft.IconButton(icons.DELETE_SWEEP, icon_color="error", tooltip="删除选中项并同步取消关注", on_click=on_bulk_unfollow_click),
-                                ft.Icon(icons.SETTINGS, color="green", size=20)
+                                ft.IconButton(
+                                icons.SETTINGS, 
+                                icon_color="green", 
+                                tooltip="安全原初打法配置",
+                                on_click=lambda _: self.page.run_task(self._open_safety_config_dialog, final_selected)
+                            )
                             ], spacing=5),
                             forums_container
                         ], tight=True),
@@ -1410,7 +1415,7 @@ class BatchPostPage:
         )
 
         fire_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.TARGET, color="red"), ft.Text("配置火力抛射靶场")]),
+            title=dialog_title,
             content=ft.Container(
                 content=tabs,
                 width=500,
