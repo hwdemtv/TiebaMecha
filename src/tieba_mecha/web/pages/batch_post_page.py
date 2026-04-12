@@ -1186,7 +1186,11 @@ class BatchPostPage:
             fid = e.control.data
             is_checked = e.control.value
             await self.db.toggle_forum_post_target(fid, is_checked)
-            # 无需弹窗打扰用户，状态在后台自动更新
+            # 同步更新内存状态，确保搜索重渲染时状态不丢失
+            for f in forums:
+                if f['fid'] == fid:
+                    f['is_post_target'] = is_checked
+                    break
 
         def render_forums(keyword=""):
             forums_list_container.controls.clear()
@@ -1211,6 +1215,11 @@ class BatchPostPage:
                 if isinstance(cb, ft.Checkbox):
                     cb.value = select_all
                     self.page.run_task(self.db.toggle_forum_post_target, cb.data, select_all)
+                    # 同步更新内存状态
+                    for f in forums:
+                        if f['fid'] == cb.data:
+                            f['is_post_target'] = select_all
+                            break
             forums_list_container.update()
             self._show_snackbar(f"已批量{'开启' if select_all else '关闭'}安全权限", "info")
 
