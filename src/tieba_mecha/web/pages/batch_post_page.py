@@ -1183,6 +1183,11 @@ class BatchPostPage:
         # 2. 贴吧容器
         forums_list_container = ft.Column(spacing=5, scroll=ft.ScrollMode.ADAPTIVE, height=300)
         
+        def on_item_check(e):
+            fn = e.control.data
+            if e.control.value: selected_fnames.add(fn)
+            else: selected_fnames.discard(fn)
+
         def render_forums(keyword=""):
             forums_list_container.controls.clear()
             for fn in local_fnames:
@@ -1192,10 +1197,21 @@ class BatchPostPage:
                 )
             self.page.update()
 
-        def on_item_check(e):
-            fn = e.control.data
-            if e.control.value: selected_fnames.add(fn)
-            else: selected_fnames.discard(fn)
+        def on_select_all_change(e):
+            """安全配置弹窗的全选处理"""
+            select_all = e.control.value
+            for cb in forums_list_container.controls:
+                if isinstance(cb, ft.Checkbox):
+                    cb.value = select_all
+                    fn = cb.data
+                    if select_all:
+                        selected_fnames.add(fn)
+                    else:
+                        selected_fnames.discard(fn)
+            forums_list_container.update()
+
+        select_all_cb.on_change = on_select_all_change
+        search_field.on_change = lambda e: render_forums(e.control.value)
 
         async def on_bulk_unfollow_click(_):
             selected_to_purge = [fn for fn in list(selected_fnames)]
@@ -1308,6 +1324,21 @@ class BatchPostPage:
             self.page.update()
 
         search_field.on_change = lambda e: render_local_list(e.control.value)
+        
+        def on_select_all_change(e):
+            """全选/取消全选当前显示列表中的所有贴吧"""
+            select_all = e.control.value
+            for cb in forums_container.controls:
+                if isinstance(cb, ft.Checkbox):
+                    cb.value = select_all
+                    fn = cb.data
+                    if select_all:
+                        final_selected.add(fn)
+                    else:
+                        final_selected.discard(fn)
+            forums_container.update()
+        
+        select_all_cb.on_change = on_select_all_change
         
         async def on_bulk_unfollow_click(_):
             selected_to_purge = [fn for fn in list(final_selected)]
