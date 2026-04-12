@@ -548,6 +548,60 @@ class BatchPostManager:
                 
                 return False
 
+    async def unfollow_forums_bulk(self, fnames: list[str], progress_callback=None):
+        """批量取消关注并清理数据库记录"""
+        from .account import get_account_credentials
+        
+        # 1. 识别受影响的账号
+        account_ids = await self.db.get_account_ids_following_forums(fnames)
+        
+        # 如果没有账号关注这些吧，直接清理数据库
+        if not account_ids:
+            await self.db.delete_forum_memberships_globally(fnames)
+            await self.db.delete_target_pool_by_fnames(fnames)
+            return True
+
+        total_actions = len(account_ids) * len(fnames)
+        current_action = 0
+        
+        for acc_id in account_ids:
+            creds = await get_account_credentials(self.db, acc_id)
+            if not creds: continue
+            
+            _, bduss, stoken, proxy_id, cuid, ua = creds
+            try:
+                # 这里的 create_client 已经包含 proxy 支持
+                async with await create_client(
+                    self.db, 
+                    bduss=bduss, 
+                    stoken=stoken,
+                    proxy_id=proxy_id,
+                    cuid=cuid,
+                    ua=ua
+                ) as client:
+                    for fname in fnames:
+                        try:
+                            await client.unfollow(fname)
+                            await log_info(f"账号 {acc_id} 已成功取消关注 [{fname}]")
+                        except Exception as e:
+                            await log_error(f"账号 {acc_id} 取消关注 [{fname}] 失败: {str(e)}")
+                        
+                        current_action += 1
+                        if progress_callback:
+                            await progress_callback(current_action, total_actions)
+                        
+                        # 批量操作期间的小休眠，防止触发高频拦截
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+            except Exception as e:
+                await log_error(f"创建客户端执行取关任务失败(ID:{acc_id}): {e}")
+
+        # 2. 清理数据库记录
+        del_membership_count = await self.db.delete_forum_memberships_globally(fnames)
+        del_target_count = await self.db.delete_target_pool_by_fnames(fnames)
+        
+        await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")
+        return True
+
 
 class AutoBumpManager:
     """自动回帖(自顶)调度管理器"""
@@ -638,55 +692,3 @@ class AutoBumpManager:
                     banned_pairs.add((target_account_id, material.posted_fname))
                     await log_warn(f"物料 [{material.id}] 自顶失败")
 
-    async def unfollow_forums_bulk(self, fnames: list[str], progress_callback=None):
-        """批量取消关注并清理数据库记录"""
-        from .account import get_account_credentials
-        
-        # 1. 识别受影响的账号
-        account_ids = await self.db.get_account_ids_following_forums(fnames)
-        
-        # 如果没有账号关注这些吧，直接清理数据库
-        if not account_ids:
-            await self.db.delete_forum_memberships_globally(fnames)
-            await self.db.delete_target_pool_by_fnames(fnames)
-            return True
-
-        total_actions = len(account_ids) * len(fnames)
-        current_action = 0
-        
-        for acc_id in account_ids:
-            creds = await get_account_credentials(self.db, acc_id)
-            if not creds: continue
-            
-            try:
-                # 这里的 create_client 已经包含 proxy 支持
-                async with await create_client(
-                    self.db, 
-                    bduss=creds['bduss'], 
-                    stoken=creds['stoken'],
-                    proxy_id=creds.get('proxy_id'),
-                    cuid=creds.get('cuid', ''),
-                    ua=creds.get('user_agent', '')
-                ) as client:
-                    for fname in fnames:
-                        try:
-                            await client.unfollow(fname)
-                            await log_info(f"账号 {acc_id} 已成功取消关注 [{fname}]")
-                        except Exception as e:
-                            await log_error(f"账号 {acc_id} 取消关注 [{fname}] 失败: {str(e)}")
-                        
-                        current_action += 1
-                        if progress_callback:
-                            await progress_callback(current_action, total_actions)
-                        
-                        # 批量操作期间的小休眠，防止触发高频拦截
-                        await asyncio.sleep(random.uniform(0.5, 1.5))
-            except Exception as e:
-                await log_error(f"创建客户端执行取关任务失败(ID:{acc_id}): {e}")
-
-        # 2. 清理数据库记录
-        del_membership_count = await self.db.delete_forum_memberships_globally(fnames)
-        del_target_count = await self.db.delete_target_pool_by_fnames(fnames)
-        
-        await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")
-        return True
