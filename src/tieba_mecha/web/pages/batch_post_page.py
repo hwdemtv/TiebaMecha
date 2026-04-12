@@ -1660,9 +1660,11 @@ class BatchPostPage:
         except:
             pass
 
-    async def _on_archive_surv_filter_change(self, e):
-        """存活状态筛选切换"""
-        self._archive_surv_filter = list(e.selection)[0]
+    async def _on_archive_surv_filter_click(self, mode):
+        """存活状态筛选切换 (自定义 UI 回调)"""
+        self._archive_surv_filter = mode
+        # 重新加载 Tab 的内容布局（因为自定义按钮需要刷新颜色）
+        self.bottom_tabs.tabs[2].content = self._build_archive_view()
         await self.load_data()
 
     def _build_material_view(self):
@@ -1721,19 +1723,32 @@ class BatchPostPage:
                 ], spacing=10),
                 ft.Row([
                     archive_search,
-                    ft.SegmentedButton(
-                        segments=[
-                            ft.Segment(value="all", label=ft.Text("全部"), icon=ft.Icon(icons.LIST)),
-                            ft.Segment(value="alive", label=ft.Text("存活"), icon=ft.Icon(icons.CHECK_CIRCLE, color="green")),
-                            ft.Segment(value="dead", label=ft.Text("阵亡"), icon=ft.Icon(icons.REMOVE_CIRCLE, color="error")),
-                        ],
-                        selected={"all"},
-                        on_change=self._on_archive_surv_filter_change,
-                        show_selected_icon=False,
-                        style=ft.ButtonStyle(
-                            shape=ft.RoundedRectangleBorder(radius=8),
-                        )
-                    ),
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Text("全部", size=11, color="white" if self._archive_surv_filter == "all" else "onSurfaceVariant"),
+                            padding=ft.padding.symmetric(6, 12),
+                            bgcolor="primary" if self._archive_surv_filter == "all" else with_opacity(0.1, "onSurface"),
+                            border_radius=8,
+                            on_click=lambda _: self.page.run_task(self._on_archive_surv_filter_click, "all"),
+                            animate=200
+                        ),
+                        ft.Container(
+                            content=ft.Row([ft.Icon(icons.CHECK_CIRCLE, size=12, color="green" if self._archive_surv_filter == "alive" else "onSurfaceVariant"), ft.Text("存活", size=11, color="white" if self._archive_surv_filter == "alive" else "onSurfaceVariant")], spacing=4),
+                            padding=ft.padding.symmetric(6, 12),
+                            bgcolor="green" if self._archive_surv_filter == "alive" else with_opacity(0.1, "onSurface"),
+                            border_radius=8,
+                            on_click=lambda _: self.page.run_task(self._on_archive_surv_filter_click, "alive"),
+                            animate=200
+                        ),
+                        ft.Container(
+                            content=ft.Row([ft.Icon(icons.REMOVE_CIRCLE, size=12, color="error" if self._archive_surv_filter == "dead" else "onSurfaceVariant"), ft.Text("阵亡", size=11, color="white" if self._archive_surv_filter == "dead" else "onSurfaceVariant")], spacing=4),
+                            padding=ft.padding.symmetric(6, 12),
+                            bgcolor="error" if self._archive_surv_filter == "dead" else with_opacity(0.1, "onSurface"),
+                            border_radius=8,
+                            on_click=lambda _: self.page.run_task(self._on_archive_surv_filter_click, "dead"),
+                            animate=200
+                        ),
+                    ], spacing=5),
                     self._archive_bulk_actions,
                 ], spacing=10),
                 ft.Container(
