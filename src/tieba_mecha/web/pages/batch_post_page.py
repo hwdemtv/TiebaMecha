@@ -1938,8 +1938,8 @@ class BatchPostPage:
 
         # 3. 参数配置
         self.post_count = ft.TextField(label="发布总数 (帖)", value="10", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True)
-        self.min_delay = ft.TextField(label="最小延迟 (秒)", value="60", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True)
-        self.max_delay = ft.TextField(label="最大延迟 (秒)", value="300", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True)
+        self.min_delay = ft.TextField(label="最小延迟 (秒)", value="60", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True)
+        self.max_delay = ft.TextField(label="最大延迟 (秒)", value="300", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True)
         self.use_ai_switch = ft.Switch(label="启用 AI 智能改写", value=True)
         self.use_schedule = ft.Switch(label="定时执行计划", value=False, on_change=lambda e: self._toggle_schedule(e))
         self.schedule_time = ft.TextField(
@@ -1964,6 +1964,7 @@ class BatchPostPage:
             prefix_icon=icons.SEARCH,
             on_change=self._on_account_search_change,
             height=35, text_size=11, content_padding=5,
+            expand=True,
         )
         self.account_all_toggle = ft.Switch(
             label="全选本组", 
