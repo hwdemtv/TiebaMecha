@@ -1188,6 +1188,38 @@ class BatchPostPage:
             if e.control.value: selected_fnames.add(fn)
             else: selected_fnames.discard(fn)
 
+        async def on_bulk_unfollow_click(_):
+            selected_to_purge = [fn for fn in list(selected_fnames)]
+            if not selected_to_purge:
+                self._show_snackbar("请先勾选需要清理的阵地", "warning")
+                return
+
+            async def do_purge(e):
+                self.page.close(confirm_dialog)
+                # 显式从 core 模块导入
+                from ...core.batch_post import BatchPostManager
+                pm = BatchPostManager(self.db)
+                self._show_snackbar(f"开始对 {len(selected_to_purge)} 个吧执行全局清理，请稍后...", "info")
+                
+                await pm.unfollow_forums_bulk(selected_to_purge)
+                
+                # 刷新状态
+                selected_fnames.clear()
+                nonlocal local_fnames
+                local_fnames = await self.db.get_all_unique_fnames()
+                render_forums()
+                self._show_snackbar("✅ 阵地清理完成，本地记录已抹除", "success")
+
+            confirm_dialog = ft.AlertDialog(
+                title=ft.Row([ft.Icon(icons.WARNING, color="orange"), ft.Text("确认全局清理并取关")]),
+                content=ft.Text(f"将对已选的 {len(selected_to_purge)} 个贴吧执行【全局取关】并彻底删除本地记录。\n是否继续？"),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda _: self.page.close(confirm_dialog)),
+                    ft.ElevatedButton("确认清除", bgcolor="error", color="white", on_click=lambda e: self.page.run_task(do_purge, e))
+                ]
+            )
+            self.page.open(confirm_dialog)
+
         async def on_lock_safety(_):
             """锁定安全配置，进入火力配置阶段"""
             self.page.close(safety_dialog)
