@@ -593,6 +593,24 @@ class Database:
             await session.commit()
             return True
 
+    async def get_account_ids_following_forums(self, fnames: list[str]) -> list[int]:
+        """获取关注了指定贴吧列表的所有账号 ID"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Forum.account_id).where(Forum.fname.in_(fnames))
+            )
+            return sorted(list(set(result.scalars().all())))
+
+    async def delete_forum_memberships_globally(self, fnames: list[str]) -> int:
+        """从所有账号的关注列表中全局移除指定贴吧"""
+        from sqlalchemy import delete
+        async with self.async_session() as session:
+            result = await session.execute(
+                delete(Forum).where(Forum.fname.in_(fnames))
+            )
+            await session.commit()
+            return result.rowcount or 0
+
     # ========== SignLog CRUD ==========
 
     async def add_sign_log(
@@ -1235,6 +1253,16 @@ class Database:
                     added_count += 1
             await session.commit()
         return added_count
+
+    async def delete_target_pool_by_fnames(self, fnames: list[str]) -> int:
+        """从全局靶场池批量移除指定贴吧"""
+        from sqlalchemy import delete
+        async with self.async_session() as session:
+            result = await session.execute(
+                delete(TargetPool).where(TargetPool.fname.in_(fnames))
+            )
+            await session.commit()
+            return result.rowcount or 0
 
     async def toggle_forum_post_target(self, fid: int, is_post_target: bool) -> None:
         """切换本号某个特定贴吧的发帖许可状态"""
