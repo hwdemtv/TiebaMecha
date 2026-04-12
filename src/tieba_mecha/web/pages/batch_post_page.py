@@ -1259,7 +1259,8 @@ class BatchPostPage:
         """[火力配置主页面] 配置火力抛射靶场"""
         
         final_selected = pre_selected_fnames.copy()
-        local_fnames = await self.db.get_all_unique_fnames()
+        # 本地自留区应该只展示拥有安全原初权限 (is_post_target=True) 的贴吧
+        local_fnames = await self.db.get_native_post_targets()
         
         # 1. 搜索过滤与全选 (用于本地自留区)
         search_field = ft.TextField(
@@ -1282,17 +1283,36 @@ class BatchPostPage:
 
         def render_local_list(keyword=""):
             forums_container.controls.clear()
-            for fn in local_fnames:
-                if keyword and keyword.lower() not in fn.lower(): continue
+            
+            if not local_fnames:
                 forums_container.controls.append(
-                    ft.Checkbox(
-                        label=fn, 
-                        value=(fn in final_selected), 
-                        data=fn, 
-                        on_change=on_item_check,
+                    ft.Container(
+                        content=ft.Text(
+                            "尚无任何贴吧被赋予专属原生保护权限\n\n请点击右上角的【绿色齿轮图标】前往【安全原初打法配置】开启专治防线", 
+                            color="onSurfaceVariant", 
+                            text_align="center", 
+                            size=12
+                        ),
+                        alignment=ft.alignment.center,
+                        expand=True,
+                        padding=ft.padding.only(top=40)
                     )
                 )
+            else:
+                for fn in local_fnames:
+                    if keyword and keyword.lower() not in fn.lower(): continue
+                    forums_container.controls.append(
+                        ft.Checkbox(
+                            label=fn, 
+                            value=(fn in final_selected), 
+                            data=fn, 
+                            on_change=on_item_check,
+                            fill_color="green"
+                        )
+                    )
             self.page.update()
+
+        render_local_list()
 
         search_field.on_change = lambda e: render_local_list(e.control.value)
         
