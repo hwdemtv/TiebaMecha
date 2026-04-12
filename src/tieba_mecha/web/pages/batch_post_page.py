@@ -23,6 +23,9 @@ class BatchPostPage:
         self._accounts = []
         self._materials = [] # now mapped to DB MaterialPool
         self._all_fnames = []
+        
+        # Link survival status cache: tid -> "checking", "alive", "dead"
+        self._survival_cache = {}
         self.connector = SmartLinkConnector(db)
         self._file_picker = ft.FilePicker(
             on_result=self._on_file_result,
@@ -568,6 +571,25 @@ class BatchPostPage:
                         bump_color = "onSurfaceVariant"
                         bump_tooltip = "自顶功能当前处于手动关闭状态"
 
+                    
+                    # 存活探测状态判定
+                    surv_status = self._survival_cache.get(m.posted_tid, "unknown")
+                    surv_icon = icons.HEALTH_AND_SAFETY
+                    surv_color = "grey"
+                    surv_tooltip = "探测链接存活状态"
+                    if surv_status == "checking":
+                        surv_icon = icons.HOURGLASS_EMPTY
+                        surv_color = "blue"
+                        surv_tooltip = "探测中..."
+                    elif surv_status == "alive":
+                        surv_icon = icons.CHECK_CIRCLE
+                        surv_color = "green"
+                        surv_tooltip = "探测完毕：该外链健康存活"
+                    elif surv_status == "dead":
+                        surv_icon = icons.REMOVE_CIRCLE
+                        surv_color = "error"
+                        surv_tooltip = "已被抽除或无法访问"
+
                     archive_rows.append(
                         ft.DataRow(
                             selected=m.id in self._selected_archive_ids,
@@ -582,7 +604,12 @@ class BatchPostPage:
                                         icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
                                         on_click=lambda e, tid=m.posted_tid: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}") if tid else self._show_snackbar("该贴被系统吞没或未传回TID", "warning")
                                     ),
-                                    ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="该贴被干了？重新回炉排期"),
+                                    ft.IconButton(
+                                        surv_icon, icon_color=surv_color, tooltip=surv_tooltip,
+                                        data={"tid": m.posted_tid},
+                                        on_click=self._on_check_link_survival
+                                    ),
+                                    ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="被屏蔽了？重置为待发状态"),
                                 ], spacing=0)),
                                 ft.DataCell(ft.Row([
                                     ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
@@ -617,11 +644,90 @@ class BatchPostPage:
                 m.is_auto_bump = val
                 await session.commit()
                 self._show_snackbar(f"物料 [{mid}] 自动回帖已{'开启' if val else '关闭'}", "info")
-        # 同步 self._materials 列表中的状态 (如果是内存列表)
         for m in self._materials:
             if m.id == mid:
                 m.is_auto_bump = val
                 break
+
+    async def _on_check_link_survival(self, e):
+        """处理单条贴子存活状态探测"""
+        tid = e.control.data.get("tid")
+        if not tid:
+            self._show_snackbar("该条归档未绑定TID记录，无法探测", "warning")
+            return
+            
+        # 1. 挂起状态并刷新UI
+        self._survival_cache[tid] = "checking"
+        await self.load_data()
+        
+        # 2. 执行网络探测
+        is_alive = False
+        try:
+            import aiotieba
+            async with aiotieba.Client() as client:
+                res = await client.get_posts(tid)
+                # 存活特征：返回了有效的 fid
+                if res and res.forum and res.forum.fid > 0:
+                    is_alive = True
+        except Exception as ex:
+            pass # 请求抛出异常一样判定为不存活
+            
+        # 3. 结果写入缓存并再次刷新UI
+        if is_alive:
+            self._survival_cache[tid] = "alive"
+            self._show_snackbar("响应成功：贴子目前健康正常开放访问", "success")
+        else:
+            self._survival_cache[tid] = "dead"
+            self._show_snackbar("探测失败：贴子异常或已被抽除", "error")
+            
+        await self.load_data()
+
+    async def _bulk_check_survival_status(self, e):
+        """批量处理选中的贴子存活状态探测"""
+        if not self._selected_archive_ids:
+            self._show_snackbar("请先在列表中勾选想要探测的归档条目", "warning")
+            return
+            
+        # 提取目标 TIDs
+        tids_to_check = []
+        for m in self._materials:
+            if m.id in self._selected_archive_ids and m.status == "success" and m.posted_tid:
+                tids_to_check.append(m.posted_tid)
+                self._survival_cache[m.posted_tid] = "checking"
+                
+        if not tids_to_check:
+            self._show_snackbar("所选条目中没有包含有效 TID 的贴子", "warning")
+            return
+            
+        # 先更新到 checking 状态
+        await self.load_data()
+        
+        alive_count = 0
+        dead_count = 0
+        
+        try:
+            import aiotieba
+            async with aiotieba.Client() as client:
+                for tid in tids_to_check:
+                    try:
+                        res = await client.get_posts(tid)
+                        if res and res.forum and res.forum.fid > 0:
+                            self._survival_cache[tid] = "alive"
+                            alive_count += 1
+                        else:
+                            self._survival_cache[tid] = "dead"
+                            dead_count += 1
+                    except Exception:
+                        self._survival_cache[tid] = "dead"
+                        dead_count += 1
+                    # 轻度休眠以防止高并发拦截
+                    import asyncio
+                    await asyncio.sleep(0.5)
+        except Exception:
+            pass
+            
+        self._show_snackbar(f"批量探测完毕: {alive_count} 条存活健在，{dead_count} 条已掉线", "info")
+        await self.load_data()
 
     async def _add_material_row(self, e):
         t = self._quick_title.value.strip() or "暂无标题"
@@ -1659,6 +1765,9 @@ class BatchPostPage:
             ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
+            ft.FilledButton("批量存活探测", icon=icons.RADAR,
+                            style=ft.ButtonStyle(bgcolor="teal", color="white"), 
+                            on_click=self._bulk_check_survival_status),
             self._archive_selected_count_text,
         ], visible=False, spacing=10)
         
