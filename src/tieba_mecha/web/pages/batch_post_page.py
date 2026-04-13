@@ -545,6 +545,27 @@ class BatchPostPage:
         if hasattr(self, "_stats_text"):
             self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})"
 
+        # 归档存活统计逻辑
+        alive_count = 0
+        dead_count = 0
+        for m in self._materials:
+            if m.status == "success" and m.posted_tid:
+                surv = self._survival_cache.get(m.posted_tid)
+                if surv == "alive":
+                    alive_count += 1
+                elif surv == "dead":
+                    dead_count += 1
+        
+        if hasattr(self, "_archive_all_count_text"):
+            self._archive_all_count_text.value = f" ({success})"
+            self._archive_all_count_text.color = "white" if self._archive_surv_filter == "all" else "onSurfaceVariant"
+        if hasattr(self, "_archive_alive_count_text"):
+            self._archive_alive_count_text.value = f" ({alive_count})"
+            self._archive_alive_count_text.color = "white" if self._archive_surv_filter == "alive" else "onSurfaceVariant"
+        if hasattr(self, "_archive_dead_count_text"):
+            self._archive_dead_count_text.value = f" ({dead_count})"
+            self._archive_dead_count_text.color = "white" if self._archive_surv_filter == "dead" else "onSurfaceVariant"
+
         if hasattr(self, "bottom_tabs"):
             for tab in self.bottom_tabs.tabs:
                 if tab.icon == "list_alt_rounded":
@@ -1802,7 +1823,10 @@ class BatchPostPage:
                     archive_search,
                     ft.Row([
                         ft.Container(
-                            content=ft.Text("全部", size=11, color="white" if self._archive_surv_filter == "all" else "onSurfaceVariant"),
+                            content=ft.Row([
+                                ft.Text("全部", size=11, color="white" if self._archive_surv_filter == "all" else "onSurfaceVariant"),
+                                self._archive_all_count_text
+                            ], spacing=2),
                             padding=ft.padding.symmetric(6, 12),
                             bgcolor="primary" if self._archive_surv_filter == "all" else with_opacity(0.1, "onSurface"),
                             border_radius=8,
@@ -1810,7 +1834,11 @@ class BatchPostPage:
                             animate=200
                         ),
                         ft.Container(
-                            content=ft.Row([ft.Icon(icons.CHECK_CIRCLE, size=12, color="green" if self._archive_surv_filter == "alive" else "onSurfaceVariant"), ft.Text("存活", size=11, color="white" if self._archive_surv_filter == "alive" else "onSurfaceVariant")], spacing=4),
+                            content=ft.Row([
+                                ft.Icon(icons.CHECK_CIRCLE, size=12, color="green" if self._archive_surv_filter == "alive" else "onSurfaceVariant"), 
+                                ft.Text("存活", size=11, color="white" if self._archive_surv_filter == "alive" else "onSurfaceVariant"),
+                                self._archive_alive_count_text
+                            ], spacing=2),
                             padding=ft.padding.symmetric(6, 12),
                             bgcolor="green" if self._archive_surv_filter == "alive" else with_opacity(0.1, "onSurface"),
                             border_radius=8,
@@ -1818,7 +1846,11 @@ class BatchPostPage:
                             animate=200
                         ),
                         ft.Container(
-                            content=ft.Row([ft.Icon(icons.REMOVE_CIRCLE, size=12, color="error" if self._archive_surv_filter == "dead" else "onSurfaceVariant"), ft.Text("阵亡", size=11, color="white" if self._archive_surv_filter == "dead" else "onSurfaceVariant")], spacing=4),
+                            content=ft.Row([
+                                ft.Icon(icons.REMOVE_CIRCLE, size=12, color="error" if self._archive_surv_filter == "dead" else "onSurfaceVariant"), 
+                                ft.Text("阵亡", size=11, color="white" if self._archive_surv_filter == "dead" else "onSurfaceVariant"),
+                                self._archive_dead_count_text
+                            ], spacing=2),
                             padding=ft.padding.symmetric(6, 12),
                             bgcolor="error" if self._archive_surv_filter == "dead" else with_opacity(0.1, "onSurface"),
                             border_radius=8,
@@ -1857,6 +1889,11 @@ class BatchPostPage:
             border_color=with_opacity(0.2, "onSurface")
         )
         self._stats_text = ft.Text("状态分布:  ⏳待发(0)   ✅成功(0)   ❌失败(0)", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant")
+        
+        # 归档统计文本
+        self._archive_all_count_text = ft.Text(" (0)", size=10, weight=ft.FontWeight.BOLD)
+        self._archive_alive_count_text = ft.Text(" (0)", size=10, weight=ft.FontWeight.BOLD)
+        self._archive_dead_count_text = ft.Text(" (0)", size=10, weight=ft.FontWeight.BOLD)
         
         # 批量操作 UI 容器
         self._material_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
