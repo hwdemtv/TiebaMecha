@@ -71,9 +71,13 @@ class SignPage:
                 import json
                 raw_sched = await self.db.get_setting("schedule", "{}")
                 sched = json.loads(raw_sched) if raw_sched else {}
-                if hasattr(self, 'daemon_switch'):
-                    self.daemon_switch.value = sched.get("enabled", False)
                     self.daemon_time.value = sched.get("sign_time", "08:00")
+                    
+                    # 同步已保存的执行模式说明
+                    saved_mode = sched.get("mode", "single")
+                    mode_zh = "矩阵全扫" if saved_mode == "matrix" else "单账号模式"
+                    if hasattr(self, 'daemon_mode_info'):
+                        self.daemon_mode_info.value = f"当前生效模式: {mode_zh}"
                 
                 # 智能格式化加载行为频率参数 (抹除不必要的 .0)
                 async def _get_fmt_val(key, default):
@@ -293,6 +297,7 @@ class SignPage:
 
         # 定时守护配置面板
         self.daemon_switch = ft.Switch(label="启用周期执行", value=False, label_position=ft.LabelPosition.RIGHT)
+        self.daemon_mode_info = ft.Text("当前生效模式: 单账号模式", size=10, color="onSurfaceVariant")
         self.daemon_time = ft.TextField(
             label="触发时间", 
             value="08:00", 
@@ -316,6 +321,7 @@ class SignPage:
             content=ft.Column([
                 ft.Text("守护进程 / DAEMON", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
                 ft.Container(content=self.daemon_switch, padding=ft.padding.only(left=-10)),
+                self.daemon_mode_info,
                 self.daemon_time,
                 ft.Divider(height=5, color="transparent"),
                 self.daemon_save_btn,
@@ -643,7 +649,8 @@ class SignPage:
         import json
         schedule = {
             "enabled": self.daemon_switch.value,
-            "sign_time": self.daemon_time.value
+            "sign_time": self.daemon_time.value,
+            "mode": self._mode
         }
         await self.db.set_setting("schedule", json.dumps(schedule))
         
@@ -656,6 +663,11 @@ class SignPage:
         try:
             from tieba_mecha.core.daemon import daemon_instance
             await daemon_instance.reload(self.db)
+            
+            # 更新已保存的模式说明
+            mode_zh = "矩阵全扫" if self._mode == "matrix" else "单账号模式"
+            self.daemon_mode_info.value = f"当前生效模式: {mode_zh}"
+            
             self._show_snackbar("✔️ 守护进程配置已保存，定时重载完毕！", "success")
         except Exception as err:
             self._show_snackbar(f"❌ 守护进程重载失败: {err}", "error")
