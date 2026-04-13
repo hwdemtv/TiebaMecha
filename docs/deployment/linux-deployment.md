@@ -92,12 +92,19 @@ nohup python3 start_web.py > server.log 2>&1 &
 
 ## 5. 版本更新与维护
 
-### 使用 Git 拉取更新
-```bash
-cd TiebaMecha
-git pull origin master
-# 重启服务使新代码生效
-```
+### 使用 Git 拉取更新与重启
+1.  **进入项目并同步**：
+    ```bash
+    cd ~/TiebaMecha && git pull origin master
+    ```
+2.  **重启服务（无需进入虚拟环境）**：
+    ```bash
+    sudo systemctl restart tieba-mecha
+    ```
+3.  **检查日志确认**：
+    ```bash
+    sudo journalctl -u tieba-mecha -f
+    ```
 
 ### 手动热修复 (Hotfix)
 若仅需修复单个文件，可直接使用 `nano` 编辑对应文件：
