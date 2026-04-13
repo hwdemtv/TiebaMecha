@@ -19,7 +19,7 @@ async def do_sign_task():
     success_count = 0
     fail_count = 0
 
-    async for result in sign_all_forums(db, delay=2.0):
+    async for result in sign_all_forums(db, delay_min=2.0, delay_max=5.0):
         if result.success:
             success_count += 1
         else:
