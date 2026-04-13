@@ -71,13 +71,13 @@ class SignPage:
                 import json
                 raw_sched = await self.db.get_setting("schedule", "{}")
                 sched = json.loads(raw_sched) if raw_sched else {}
-                    self.daemon_time.value = sched.get("sign_time", "08:00")
-                    
-                    # 同步已保存的执行模式说明
-                    saved_mode = sched.get("mode", "single")
-                    mode_zh = "矩阵全扫" if saved_mode == "matrix" else "单账号模式"
-                    if hasattr(self, 'daemon_mode_info'):
-                        self.daemon_mode_info.value = f"当前生效模式: {mode_zh}"
+                self.daemon_time.value = sched.get("sign_time", "08:00")
+                
+                # 同步已保存的执行模式说明
+                saved_mode = sched.get("mode", "single")
+                mode_zh = "矩阵全扫" if saved_mode == "matrix" else "单账号模式"
+                if hasattr(self, 'daemon_mode_info'):
+                    self.daemon_mode_info.value = f"当前生效模式: {mode_zh}"
                 
                 # 智能格式化加载行为频率参数 (抹除不必要的 .0)
                 async def _get_fmt_val(key, default):
