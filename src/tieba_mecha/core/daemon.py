@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .sign import sign_all_forums
+from .sign import sign_all_forums, sign_all_accounts
 from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
@@ -12,20 +12,44 @@ from .auth import get_auth_manager
 from ..db.crud import get_db
 
 async def do_sign_task():
-    """执行定时签到任务的内部包裹"""
-    print(f"[{datetime.now()}] [DAEMON] 开始执行定时全域签到...")
+    """执行定时签到任务的内部包裹（自适应模式）"""
     db = await get_db()
+    
+    # 1. 获取执行模式
+    raw_sched = await db.get_setting("schedule", "{}")
+    schedule = json.loads(raw_sched)
+    mode = schedule.get("mode", "single")
+    
+    # 2. 获取行为频率参数
+    try:
+        d_min = float(await db.get_setting("sign_delay_min", "5"))
+        d_max = float(await db.get_setting("sign_delay_max", "15"))
+        ad_min = float(await db.get_setting("sign_acc_delay_min", "30"))
+        ad_max = float(await db.get_setting("sign_acc_delay_max", "120"))
+    except:
+        d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
+
+    print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: {mode.upper()} | 吧间延迟: {d_min}-{d_max}s")
     
     success_count = 0
     fail_count = 0
 
-    async for result in sign_all_forums(db, delay_min=2.0, delay_max=5.0):
-        if result.success:
-            success_count += 1
-        else:
-            fail_count += 1
+    if mode == "matrix":
+        print(f"[{datetime.now()}] [DAEMON] 正在执行全矩阵跨账号扫号...")
+        async for result in sign_all_accounts(db, d_min, d_max, ad_min, ad_max):
+            if result.get("success"):
+                success_count += 1
+            else:
+                fail_count += 1
+    else:
+        # 单账号模式
+        async for result in sign_all_forums(db, delay_min=d_min, delay_max=d_max):
+            if result.success:
+                success_count += 1
+            else:
+                fail_count += 1
 
-    print(f"[{datetime.now()}] [DAEMON] 签到完成: 成功 {success_count}, 失败 {fail_count}")
+    print(f"[{datetime.now()}] [DAEMON] 任务闭环 | 成功: {success_count} | 失败: {fail_count}")
 
 async def do_auto_monitor_task():
     """执行自动化规则监控的内部包裹"""
