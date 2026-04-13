@@ -68,7 +68,7 @@ class TiebaMechaApp:
                     selected_icon=icons.RADAR,
                     label="指挥中心",
                 ),
-                # --- 👤 账号管理 ---
+                # --- 👤 账号资源 ---
                 ft.NavigationRailDestination(
                     icon=icons.ACCOUNT_CIRCLE_OUTLINED,
                     selected_icon=icons.ACCOUNT_CIRCLE,
@@ -80,39 +80,43 @@ class TiebaMechaApp:
                     label="代理池",
                 ),
 
-                # --- 📝 内容管理 ---
+                # --- ⚡ 核心执行 ---
                 ft.NavigationRailDestination(
                     icon=icons.BOLT_OUTLINED,
                     selected_icon=icons.BOLT,
                     label="全域签到",
                 ),
                 ft.NavigationRailDestination(
+                    icon=icons.SEND_ROUNDED,
+                    selected_icon=icons.SEND_ROUNDED,
+                    label="批量发帖",
+                ),
+                ft.NavigationRailDestination(
                     icon=icons.FORUM_OUTLINED,
                     selected_icon=icons.FORUM,
                     label="帖子管理",
                 ),
-                ft.NavigationRailDestination(
-                    icon=icons.TRAVEL_EXPLORE_OUTLINED,
-                    selected_icon=icons.TRAVEL_EXPLORE,
-                    label="数据爬取",
-                ),
-                # --- 🤖 自动化 ---
+
+                # --- 🤖 智能策略 ---
                 ft.NavigationRailDestination(
                     icon=icons.SHIELD_OUTLINED,
                     selected_icon=icons.SHIELD,
                     label="自动化规则",
                 ),
                 ft.NavigationRailDestination(
-                    icon=icons.SEND_ROUNDED,
-                    selected_icon=icons.SEND_ROUNDED,
-                    label="批量发帖",
+                    icon=icons.TRAVEL_EXPLORE_OUTLINED,
+                    selected_icon=icons.TRAVEL_EXPLORE,
+                    label="数据爬取",
                 ),
-                # --- ⚙️ 系统 ---
+
+                # --- 🧩 插件中心 ---
                 ft.NavigationRailDestination(
                     icon=icons.EXTENSION_OUTLINED,
                     selected_icon=icons.EXTENSION,
                     label="插件中心",
                 ),
+                
+                # --- ⚙️ 系统设置 ---
                 ft.NavigationRailDestination(
                     icon=icons.SETTINGS_OUTLINED,
                     selected_icon=icons.SETTINGS,
@@ -502,10 +506,10 @@ class TiebaMechaApp:
             1: "accounts",
             2: "proxy",
             3: "sign",
-            4: "posts",
-            5: "crawl",
+            4: "batch_post",
+            5: "posts",
             6: "rules",
-            7: "batch_post",
+            7: "crawl",
             8: "plugins",
             9: "settings",
         }
