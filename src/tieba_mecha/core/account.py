@@ -127,7 +127,10 @@ async def add_account(
             user_name = uname
             status = "active"
         else:
-            status = f"invalid: {error[:50]}" if error else "invalid"
+            if "封禁" in error or "屏蔽" in error:
+                status = "banned"
+            else:
+                status = f"invalid: {error[:50]}" if error else "invalid"
 
     account = await db.add_account(
         name=name,
@@ -221,6 +224,8 @@ async def verify_account(bduss: str, stoken: str = "", cuid: str = "", ua: str =
             error_msg = "连接超时，请检查网络设置或代理"
         elif "connection" in error_msg.lower():
             error_msg = "网络连接失败，请检查网络"
+        elif "封禁" in error_msg or "屏蔽" in error_msg:
+            error_msg = "账号已被百度全吧封禁或屏蔽"
 
         # 打印错误便于调试
         print(f"验证账号失败: {error_msg}")
@@ -292,7 +297,10 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
     if valid:
         status = "active"
     else:
-        status = f"invalid: {error[:50]}" if error else "invalid"
+        if "封禁" in error or "屏蔽" in error:
+            status = "banned"
+        else:
+            status = f"invalid: {error[:50]}" if error else "invalid"
 
     # 更新数据库
     updated = await db.update_account(

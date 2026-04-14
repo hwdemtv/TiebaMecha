@@ -164,3 +164,13 @@ LINK_OFF = "link_off"
 # 粘贴相关
 CONTENT_PASTE = "content_paste"
 CONTENT_PASTE_GO = "content_paste_go"
+
+# 补充缺失图案
+PEOPLE_OUTLINE_ROUNDED = "people_outline_rounded"
+HUB_ROUNDED = "hub_rounded"
+GROUPS_ROUNDED = "groups_rounded"
+GPS_FIXED_ROUNDED = "gps_fixed_rounded"
+GPS_OFF_ROUNDED = "gps_off_rounded"
+LABEL_ROUNDED = "label_rounded"
+PERSON_ADD_ALT_1_ROUNDED = "person_add_alt_1_rounded"
+MORE_VERT_ROUNDED = "more_vert_rounded"

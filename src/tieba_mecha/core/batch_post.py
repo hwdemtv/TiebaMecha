@@ -58,7 +58,11 @@ class BionicDelay:
         if 1 <= hour <= 7:
             delay *= random.uniform(1.5, 2.2)
             
-        # 3. 边界裁剪
+        # 3. 追加 ±20% 的真实随机扰动 (Jitter) 以破坏机器固定节拍
+        jitter = random.uniform(0.8, 1.2)
+        delay *= jitter
+        
+        # 4. 边界裁剪
         return max(min_sec * 0.8, min(delay, max_sec * 2.5))
 
     @staticmethod
@@ -448,12 +452,18 @@ class BatchPostManager:
                                 success = True
                             else:
                                 err_msg = str(res_json.get('error') or res_json)
-                                # 识别封禁逻辑
-                                if err_code == 3250004:
-                                    await log_error(f"检测到吧务封禁！账号 {account_id} 已在 {target_fname} 自动熔断。")
-                                    await self.db.mark_forum_banned(account_id, target_fname, reason="Step 3 发射检测到吧务封禁")
-                                    try: await client.unfollow_forum(target_fname)
-                                    except: pass
+                                # 识别全局级封禁与吧务封禁逻辑
+                                if err_code == 4 or "封禁" in err_msg or "屏蔽" in err_msg:
+                                    if err_code == 3250004 or "本吧" in err_msg or "此吧" in err_msg:
+                                        # 局部封禁：仅在该吧熔断
+                                        await log_error(f"检测到吧务封禁！账号 {account_id} 已在 {target_fname} 自动熔断。")
+                                        await self.db.mark_forum_banned(account_id, target_fname, reason="Step 3 发射检测到吧务封禁")
+                                        try: await client.unfollow_forum(target_fname)
+                                        except: pass
+                                    else:
+                                        # 全局封禁：账号级隔离
+                                        await log_error(f"🚨 警报：检测到全局封禁特征！账号 {account_id} 已遭到百度彻底封杀。")
+                                        await self.db.update_account_status(account_id, "banned")
                                 elif err_code == 340001:
                                     await log_warn(f"{target_fname} 正在升级中，已跳过该点位。")
                                     continue

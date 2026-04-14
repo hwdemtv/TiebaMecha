@@ -24,6 +24,11 @@ class AccountsPage:
         self._search_text = ""
         self._filter_status = "all"
         self._selected_ids = set()
+        
+        # 吧库管理相关状态
+        self._matrix_stats = []
+        self._matrix_search_text = ""
+        self._active_tab_index = 0
 
     async def load_data(self):
         """加载数据"""
@@ -37,18 +42,67 @@ class AccountsPage:
         
         # 加载代理列表用于下拉框
         self._proxies = await self.db.get_active_proxies()
+
+        # 加载全吧库统计
+        self._matrix_stats = await self.db.get_forum_matrix_stats()
         
         self.refresh_ui()
 
     def refresh_ui(self):
         """刷新 UI"""
-        if hasattr(self, "account_list"):
-            self.account_list.controls = self._build_account_items()
-            self.page.update()
+        if self._active_tab_index == 0:
+            if hasattr(self, "account_list"):
+                self.account_list.controls = self._build_account_items()
+                # 统计封禁损耗
+                banned_count = sum(1 for a in getattr(self, "_accounts", []) if getattr(a, "status", "") == "banned")
+                if banned_count > 0:
+                    self.account_stats_info.text = f"🚨 战损报警：检测到 {banned_count} 个已封禁账号"
+                    self.account_stats_info.visible = True
+                else:
+                    self.account_stats_info.visible = False
+                self.page.update()
+        else:
+            if hasattr(self, "matrix_list"):
+                self.matrix_list.controls = self._build_matrix_items()
+                self._update_matrix_header()
+                self.page.update()
 
     def build(self) -> ft.Control:
-        # 标题区域
-        header = ft.Row(
+        # 主标签页切换逻辑
+        self.tabs = ft.Tabs(
+            selected_index=0,
+            animation_duration=300,
+            tabs=[
+                ft.Tab(
+                    text="账号档案中心",
+                    icon=icons.PEOPLE_OUTLINE_ROUNDED,
+                    content=self._build_accounts_tab(),
+                ),
+                ft.Tab(
+                    text="全域战略吧库",
+                    icon=icons.HUB_ROUNDED,
+                    content=self._build_strategic_tab(),
+                ),
+            ],
+            expand=True,
+            on_change=self._on_tab_change,
+        )
+
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    self._build_main_header(),
+                    self.tabs,
+                ],
+                spacing=10,
+            ),
+            padding=ft.padding.only(left=20, right=20, top=10, bottom=10),
+            expand=True,
+        )
+
+    def _build_main_header(self):
+        """主页面顶部导航栏"""
+        return ft.Row(
             controls=[
                 ft.Container(
                     content=ft.IconButton(
@@ -64,22 +118,29 @@ class AccountsPage:
                 ),
                 ft.Column(
                     controls=[
-                        ft.Text("账号中心 / ACCOUNT CENTER", size=20, weight=ft.FontWeight.BOLD, color="primary"),
-                        ft.Text("管理您的百度贴吧账号及其关联代理", size=11, color="onSurfaceVariant"),
+                        ft.Text("矩阵资源管理 / MATRIX HUB", size=20, weight=ft.FontWeight.BOLD, color="primary"),
+                        ft.Text("指挥中心：账号兵力部署与战略靶场调度", size=11, color="onSurfaceVariant"),
                     ],
                     spacing=0,
                 ),
                 ft.Container(expand=True),
-                create_gradient_button(
-                    text="添加账号",
-                    icon=icons.PERSON_ADD_ROUNDED,
-                    on_click=self._show_add_dialog,
-                ),
+                ft.Row([
+                    ft.Text("Antigravity AI 矩阵指挥模块", size=10, color=with_opacity(0.3, "onSurface")),
+                    ft.Icon(icons.SHIELD_ROUNDED, size=16, color=with_opacity(0.3, "onSurface")),
+                ]),
             ],
             alignment=ft.MainAxisAlignment.START,
         )
 
-    
+    def _build_accounts_tab(self) -> ft.Control:
+        """账号管理标签页"""
+        # 添加账号按钮
+        add_btn = create_gradient_button(
+            text="接入账号",
+            icon=icons.PERSON_ADD_ROUNDED,
+            on_click=self._show_add_dialog,
+        )
+
         # 搜索与过滤栏
         search_field = ft.TextField(
             hint_text="搜索账号、用户名或UID...",
@@ -99,6 +160,7 @@ class AccountsPage:
                 ft.dropdown.Option("active", "🟢 正常"),
                 ft.dropdown.Option("expired", "🔴 已失效"),
                 ft.dropdown.Option("error", "🟡 异常"),
+                ft.dropdown.Option("banned", "💔 已封禁"),
             ],
             value=self._filter_status,
             on_change=self._on_filter_change,
@@ -109,10 +171,14 @@ class AccountsPage:
             border_radius=10,
         )
 
+        self.account_stats_info = ft.Text("", size=12, color="error", visible=False)
+
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
             ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=self._bulk_verify_accounts, visible=False),
             ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=self._bulk_delete_accounts, style=ft.ButtonStyle(color="error"), visible=False),
+            ft.Container(expand=True),
+            self.account_stats_info
         ], spacing=10, visible=True)
 
         # 账号列表容器
@@ -122,24 +188,260 @@ class AccountsPage:
             expand=True,
         )
 
-        # 主布局
-        return ft.Container(
-            content=ft.Column(
-                controls=[
-                    header,
-                    ft.Row([search_field, status_filter], spacing=10),
-                    self.bulk_bar,
-                    ft.Divider(color=with_opacity(0.1, "primary"), height=10),
-                    ft.Container(
-                        content=self.account_list,
-                        expand=True,
-                    ),
-                ],
-                spacing=10,
-            ),
-            padding=20,
-            expand=True,
+        return ft.Column(
+            controls=[
+                ft.Row([search_field, status_filter, add_btn], spacing=10),
+                self.bulk_bar,
+                ft.Divider(color=with_opacity(0.1, "primary"), height=1),
+                ft.Container(
+                    content=self.account_list,
+                    expand=True,
+                ),
+            ],
+            spacing=10,
         )
+
+    def _build_strategic_tab(self) -> ft.Control:
+        """全域战略吧库标签页"""
+        # 工具栏
+        search_field = ft.TextField(
+            hint_text="搜索吧名或标签...",
+            prefix_icon=icons.SEARCH,
+            border_radius=10,
+            text_size=13,
+            on_change=self._on_matrix_search_change,
+            bgcolor=with_opacity(0.05, "onSurface"),
+            border_color=with_opacity(0.1, "primary"),
+            expand=True,
+            height=45,
+        )
+
+        sync_btn = ft.IconButton(
+            icon=icons.SYNC_ROUNDED,
+            tooltip="全域同步关注列表",
+            icon_color="primary",
+            on_click=self._on_sync_matrix,
+        )
+
+        self.matrix_header_info = ft.Text("战略贴吧总数: 0 | 矩阵覆盖率: 0%", size=12, color="onSurfaceVariant")
+
+        # 列表容器
+        self.matrix_list = ft.ListView(
+            expand=True,
+            spacing=10,
+            padding=10,
+        )
+
+        return ft.Column(
+            controls=[
+                ft.Row([search_field, sync_btn], spacing=10),
+                self.matrix_header_info,
+                ft.Divider(color=with_opacity(0.1, "primary"), height=1),
+                ft.Container(
+                    content=self.matrix_list,
+                    expand=True,
+                ),
+            ],
+            spacing=10,
+        )
+
+    def _on_tab_change(self, e):
+        self._active_tab_index = e.control.selected_index
+        self.refresh_ui()
+
+    def _on_matrix_search_change(self, e):
+        self._matrix_search_text = e.control.value
+        self.refresh_ui()
+
+    async def _on_sync_matrix(self, e):
+        """全域同步关注列表"""
+        from ...core.sign import sync_forums_to_db
+        
+        self._show_snackbar("🚀 指令下达：正在启动全域矩阵关注同步...", "info")
+        
+        try:
+            # 标记按钮状态或显示进度 (可选)
+            added = await sync_forums_to_db(self.db)
+            
+            # 重新加载统计数据
+            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            self.refresh_ui()
+            
+            self._show_snackbar(f"✅ 全域同步完成！矩阵新增 {added} 个战略支点", "success")
+        except Exception as ex:
+            self._show_snackbar(f"❌ 同步失败: {str(ex)}", "error")
+
+    async def _on_toggle_target(self, fname: str, is_target: bool):
+        """一键标记/取消战略目标"""
+        try:
+            if is_target:
+                await self.db.upsert_target_pools([fname], "未分类")
+                self._show_snackbar(f"🎯 已将 '{fname}' 锁定为火力打击目标", "success")
+            else:
+                await self.db.delete_target_pool_by_fnames([fname])
+                self._show_snackbar(f"🏳️ 已从打击名单中移除 '{fname}'", "info")
+            
+            # 重新加载数据
+            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            self.refresh_ui()
+        except Exception as e:
+            self._show_snackbar(f"操作失败: {str(e)}", "error")
+
+    def _show_tag_edit_dialog(self, stat: dict):
+        """显示修改吧组标签对话框"""
+        fname = stat['fname']
+        tag_input = ft.TextField(
+            label="所属吧组 / 标签",
+            hint_text="使用英文逗号分隔多个标签 (如: IT,资源,北京)",
+            value=stat['post_group'],
+            text_size=13,
+            autofocus=True,
+        )
+
+        async def on_save(_):
+            group = tag_input.value.strip() if tag_input.value else ""
+            await self.db.bulk_update_target_group([fname], group)
+            self.page.close(dialog)
+            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            self.refresh_ui()
+            self._show_snackbar(f"🏷️ '{fname}' 标签已更新", "success")
+
+        dialog = ft.AlertDialog(
+            title=ft.Text(f"修改吧组分类: {fname}"),
+            content=ft.Container(content=tag_input, padding=10),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("保存", on_click=lambda e: self.page.run_task(on_save, e))
+            ]
+        )
+        self.page.open(dialog)
+
+    def _update_matrix_header(self):
+        """更新吧库头部统计信息"""
+        total = len(self._matrix_stats)
+        covered = sum(1 for s in self._matrix_stats if s['account_count'] > 0)
+        percent = (covered / total * 100) if total > 0 else 0
+        self.matrix_header_info.value = f"战略资源: {total} 个贴吧 | 矩阵实存火力涵盖: {covered} 个 (覆盖率 {percent:.1f}%)"
+
+    def _build_matrix_items(self) -> list[ft.Control]:
+        """构建战略贴吧列表项"""
+        items = []
+        search_lower = self._matrix_search_text.lower()
+        
+        for stat in self._matrix_stats:
+            fname = stat['fname']
+            if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
+                continue
+                
+            acc_count = stat['account_count']
+            groups = stat['post_group']
+            is_target = stat['is_target']
+            
+            # 分组标签 chips
+            group_chips = []
+            if groups:
+                for g in groups.split(","):
+                    group_chips.append(
+                        ft.Container(
+                            content=ft.Text(g.strip(), size=10, color=COLORS.PRIMARY),
+                            bgcolor=with_opacity(0.1, COLORS.PRIMARY),
+                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                            border_radius=4,
+                        )
+                    )
+            
+            if is_target:
+                group_chips.insert(0, 
+                    ft.Container(
+                        content=ft.Text("TARGET", size=9, weight="bold", color="white"),
+                        bgcolor="error",
+                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                        border_radius=4,
+                        tooltip="火力打击组标的"
+                    )
+                )
+
+            item = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        # 吧名
+                        ft.Column([
+                            ft.Text(fname, size=16, weight="bold"),
+                            ft.Row(group_chips, spacing=5) if group_chips else ft.Text("未分类", size=10, color="onSurfaceVariant")
+                        ], spacing=4, expand=True),
+                        
+                        # 覆盖详情
+                        ft.Column([
+                            ft.Row([
+                                ft.Icon(icons.GROUPS_ROUNDED, size=16, color="primary"),
+                                ft.Text(f"{acc_count} 账号部署", size=12, weight="bold"),
+                            ], spacing=4),
+                            ft.Text(
+                                    stat.get('account_names') or "暂无兵力驻守", 
+                                    size=10, 
+                                    color="onSurfaceVariant", 
+                                    italic=True,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    width=200,
+                                    text_align=ft.TextAlign.RIGHT
+                            )
+                        ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.END),
+                        
+                        # 成功率统计
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text(f"{stat['success_count']}", size=14, weight="bold", color="primary"),
+                                ft.Text("击穿数", size=9, color="onSurfaceVariant")
+                            ], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            width=60,
+                            padding=5,
+                            border=ft.border.only(left=ft.border.BorderSide(1, with_opacity(0.1, "primary"))),
+                        ),
+                        # 操作菜单
+                        ft.PopupMenuButton(
+                            items=[
+                                ft.PopupMenuItem(
+                                    text="投放火力 (设为 Target)",
+                                    icon=icons.GPS_FIXED_ROUNDED,
+                                    on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, True)
+                                ),
+                                ft.PopupMenuItem(
+                                    text="移除火力 (取消 Target)",
+                                    icon=icons.GPS_OFF_ROUNDED,
+                                    on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, False)
+                                ),
+                                ft.PopupMenuItem(
+                                    text="修改分组/标签",
+                                    icon=icons.LABEL_ROUNDED,
+                                    on_click=lambda e, s=stat: self._show_tag_edit_dialog(s)
+                                ),
+                                ft.PopupMenuItem(
+                                    text="全环境同步关注",
+                                    icon=icons.PERSON_ADD_ALT_1_ROUNDED,
+                                    # on_click=...
+                                ),
+                            ],
+                            icon=icons.MORE_VERT_ROUNDED,
+                        )
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                padding=12,
+                border_radius=10,
+                border=ft.border.all(1, with_opacity(0.1, "primary")),
+                bgcolor=with_opacity(0.02, "primary") if is_target else with_opacity(0.01, "onSurface"),
+            )
+            items.append(item)
+            
+        if not items:
+            items.append(ft.Container(
+                content=ft.Text("没有找到符合条件的战略资源", color="onSurfaceVariant"),
+                padding=50,
+                alignment=ft.alignment.center,
+            ))
+            
+        return items
 
     def _build_account_items(self) -> list[ft.Control]:
         items = []
@@ -186,6 +488,7 @@ class AccountsPage:
             if status == "active": status_color = COLORS.GREEN_ACCENT_400
             elif status == "expired": status_color = COLORS.ERROR
             elif status == "error": status_color = COLORS.AMBER
+            elif status == "banned": status_color = COLORS.RED_ACCENT_400
             
             # 查找关联代理名称
             proxy_info = "直连"
@@ -230,7 +533,17 @@ class AccountsPage:
                                         bgcolor="primary",
                                         padding=ft.padding.symmetric(horizontal=6, vertical=2),
                                         border_radius=4,
-                                        visible=is_active,
+                                        visible=is_active and status != "banned",
+                                    ),
+                                    ft.Container(
+                                        content=ft.Row([
+                                            ft.Icon(icons.HEART_BROKEN, size=10, color="white"),
+                                            ft.Text("已封禁", size=9, weight=ft.FontWeight.BOLD, color="white")
+                                        ], spacing=2),
+                                        bgcolor="error",
+                                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                                        border_radius=4,
+                                        visible=status == "banned",
                                     ),
                                 ], spacing=8),
                                 ft.Row([
@@ -324,8 +637,12 @@ class AccountsPage:
         self.refresh_ui()
 
     def _on_item_hover(self, e):
-        e.control.bgcolor = with_opacity(0.08, "primary") if e.data == "true" else \
-                           (with_opacity(0.03, "primary") if self._active_id else with_opacity(0.02, "onSurface"))
+        """账号卡片悬停高亮"""
+        is_hovered = e.data == "true"
+        e.control.bgcolor = (
+            with_opacity(0.08, "primary") if is_hovered
+            else (with_opacity(0.03, "primary") if e.control.border else with_opacity(0.02, "onSurface"))
+        )
         e.control.update()
 
     async def _show_add_dialog(self, e):
@@ -662,10 +979,6 @@ class AccountsPage:
             ],
         )
         self.page.open(dialog)
-
-    def _on_search_change(self, e):
-        self._search_text = e.control.value
-        self.refresh_ui()
 
     def _on_filter_change(self, e):
         self._filter_status = e.control.value
