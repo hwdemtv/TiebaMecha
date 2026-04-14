@@ -1,6 +1,6 @@
 [project]
 name = "tieba-mecha"
-version = "1.1.2"
+version = "1.2.0"
 description = "Cyber-Mecha style Baidu Tieba management tool with CLI and Web UI"
 authors = [{ name = "Developer" }]
 requires-python = ">=3.10,<3.15"
