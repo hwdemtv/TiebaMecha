@@ -207,14 +207,18 @@ async def verify_account(bduss: str, stoken: str = "", cuid: str = "", ua: str =
         async with await create_client(None, bduss, stoken, cuid=cuid, ua=ua) as client:
             user_info = await client.get_self_info()
             if user_info and user_info.user_id:
-                # 优先使用 nick_name（用户昵称），其次 show_name，再 user_name，最后用 user_id
-                # UserInfo 对象包含: nick_name, show_name, user_name, log_name 等字段
                 display_name = (
                     getattr(user_info, 'nick_name', '')
                     or getattr(user_info, 'show_name', '')
                     or getattr(user_info, 'user_name', '')
                     or f"用户_{user_info.user_id}"
                 )
+                
+                # --- 增强探测：识别“活死人”封禁状态 ---
+                # 在某些全吧封禁情况下，get_self_info 依然能拿到 UID，但状态标记位(如 is_mask/is_ban)会置为 True
+                if getattr(user_info, 'is_mask', False) or getattr(user_info, 'is_ban', False):
+                    return False, user_info.user_id, display_name, "账号已被百度全吧封禁(Mask/Ban)"
+                
                 return True, user_info.user_id, display_name, ""
             else:
                 return False, 0, "", "无法获取用户信息，请检查凭证是否有效"
