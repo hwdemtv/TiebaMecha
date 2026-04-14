@@ -215,9 +215,11 @@ async def verify_account(bduss: str, stoken: str = "", cuid: str = "", ua: str =
                 )
                 
                 # --- 增强探测：识别“活死人”封禁状态 ---
-                # 在某些全吧封禁情况下，get_self_info 依然能拿到 UID，但状态标记位(如 is_mask/is_ban)会置为 True
-                if getattr(user_info, 'is_mask', False) or getattr(user_info, 'is_ban', False):
-                    return False, user_info.user_id, display_name, "账号已被百度全吧封禁(Mask/Ban)"
+                # 在某些全吧封禁情况下，get_self_info 依然能拿到 UID，但状态标记位(如 is_blocked)会置为 True
+                if (getattr(user_info, 'is_blocked', False) 
+                    or getattr(user_info, 'is_mask', False) 
+                    or getattr(user_info, 'is_ban', False)):
+                    return False, user_info.user_id, display_name, "账号已被百度全吧封禁(Blocked/Mask/Ban)"
                 
                 return True, user_info.user_id, display_name, ""
             else:
