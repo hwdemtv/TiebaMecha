@@ -251,8 +251,11 @@ class TiebaMechaApp:
 
                         is_valid, uid, uname, msg = await verify_account(bduss, stoken)
                         status = "active" if is_valid else "expired"
-                        if not is_valid and "network" in msg.lower():
-                            status = "error" # 网络问题不代表过期
+                        if not is_valid:
+                            if "timeout" in msg.lower() or "connection" in msg.lower() or "网络" in msg:
+                                status = "error" # 网络问题不代表过期
+                            elif "封禁" in msg or "屏蔽" in msg:
+                                status = "banned"
 
                         await self.db.update_account_status(acc.id, status)
 
@@ -518,29 +521,33 @@ class TiebaMechaApp:
 
     async def _navigate(self, page_name: str):
         """页面路由跳转核心逻辑"""
-        if self.current_page == page_name and self.content_area.content:
-            return
+        try:
+            self.current_page = page_name
 
-        self.current_page = page_name
+            # 尝试从缓存获取页面对象
+            if page_name in self._pages_cache:
+                page_obj = self._pages_cache[page_name]
+            else:
+                # 懒加载页面模块
+                module_name, class_name = PAGE_MODULES.get(page_name, ("dashboard", "DashboardPage"))
+                from importlib import import_module
+                module = import_module(f".pages.{module_name}", package=__name__.rsplit(".", 1)[0])
+                page_class = getattr(module, class_name)
 
-        # 尝试从缓存获取页面对象
-        if page_name in self._pages_cache:
-            page_obj = self._pages_cache[page_name]
-        else:
-            # 懒加载页面模块
-            module_name, class_name = PAGE_MODULES.get(page_name, ("dashboard", "DashboardPage"))
-            from importlib import import_module
-            module = import_module(f".pages.{module_name}", package=__name__.rsplit(".", 1)[0])
-            page_class = getattr(module, class_name)
+                page_obj = page_class(self.page, self.db, self._navigate_sync)
+                self._pages_cache[page_name] = page_obj  # 缓存页面对象
 
-            page_obj = page_class(self.page, self.db, self._navigate_sync)
-            self._pages_cache[page_name] = page_obj  # 缓存页面对象
-
-        self.content_area.content = page_obj.build()
-        # 先刷新框架，再异步加载数据
-        self.page.update()
-        if hasattr(page_obj, "load_data"):
-            await page_obj.load_data()
+            # 每次导航都重新 build 并挂载（确保 UI 控件引用一致）
+            self.content_area.content = page_obj.build()
+            # 先刷新框架，再异步加载数据
+            self.page.update()
+            if hasattr(page_obj, "load_data"):
+                await page_obj.load_data()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.page.show_snack_bar(ft.SnackBar(content=ft.Text(f"路由错误: {e}"), bgcolor="error"))
+            self.page.update()
 
     def _navigate_sync(self, page_name: str):
         """供子页面使用的同步导航回调"""

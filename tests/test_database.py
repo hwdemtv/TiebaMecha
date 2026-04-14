@@ -14,6 +14,8 @@ class TestDatabase:
     async def test_database_initialization(self, temp_db_path):
         """Test database can be initialized."""
         db = Database(temp_db_path)
+        import inspect
+        print(f"DEBUG: Database class source file: {inspect.getfile(Database)}")
         await db.init_db()
         await db.close()
 
@@ -170,16 +172,21 @@ class TestAccountCRUD:
         acc3 = await db.add_account(name="acc3", bduss="bduss3")
 
         # Suspend acc3
-        await db.update_account(acc3.id, status="suspended_proxy")
+        res = await db.update_account(acc3.id, status="suspended_proxy")
+        # Verify it's really in DB
+        async with db.async_session() as session:
+            check = await session.get(Account, acc3.id)
+            assert check.status == "suspended_proxy"
 
         # Deactivate acc1
         await db.set_active_account(acc2.id)
 
         matrix = await db.get_matrix_accounts()
-
-        # Only acc2 should be in matrix (active and not suspended)
-        assert len(matrix) == 1
-        assert matrix[0].id == acc2.id
+        # Now Matrix includes all non-suspended accounts (acc1 and acc2)
+        assert len(matrix) == 2
+        ids = [a.id for a in matrix]
+        assert acc2.id in ids
+        assert acc1.id in ids
 
     async def test_get_accounts_by_proxy(self, db):
         """Test getting accounts by proxy ID."""

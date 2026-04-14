@@ -253,6 +253,7 @@ class Database:
                 cuid=cuid,
                 user_agent=user_agent,
                 post_weight=post_weight,
+                status="active" if is_first else "pending", # 确保初次添加就有明确状态
             )
             session.add(account)
             await session.commit()
@@ -328,7 +329,8 @@ class Database:
             account = await session.get(Account, account_id)
             if account:
                 for key, value in kwargs.items():
-                    if hasattr(account, key):
+                    # SQLAlchemy 映射属性检测优化
+                    if hasattr(Account, key):
                         setattr(account, key, value)
                 await session.commit()
                 await session.refresh(account)
@@ -336,12 +338,11 @@ class Database:
             return None
 
     async def get_matrix_accounts(self) -> list[Account]:
-        """获取矩阵可用账号：is_active=True 且 status != 'suspended_proxy'"""
+        """获取矩阵可用账号：过滤掉挂起及封禁状态"""
         async with self.async_session() as session:
             result = await session.execute(
                 select(Account).where(
-                    Account.is_active == True,
-                    Account.status != "suspended_proxy"
+                    Account.status.notin_(["suspended", "suspended_proxy", "banned"])
                 ).order_by(Account.post_weight.desc())
             )
             return list(result.scalars().all())
@@ -1020,13 +1021,6 @@ class Database:
                 return True
             return False
 
-    async def get_matrix_accounts(self) -> list[Account]:
-        """获取矩阵发帖可用账号列表"""
-        async with self.async_session() as session:
-            result = await session.execute(
-                select(Account).order_by(Account.post_weight.desc())
-            )
-            return list(result.scalars().all())
 
     async def get_all_unique_fnames(self) -> list[str]:
         """获取所有贴吧唯一名称"""
@@ -1210,6 +1204,108 @@ class Database:
             result = await session.execute(stmt.distinct())
             return result.scalars().all()
 
+    async def get_forum_matrix_stats(self) -> list[dict]:
+        """
+        获取矩阵全局吧库统计数据。
+        汇总所有账号关注的贴吧，并补充 TargetPool 中的吧组/标签信息。
+        返回格式: [{'fname', 'account_count', 'account_names', 'post_group', 'is_target', 'success_count'}]
+        """
+        from sqlalchemy import func
+        async with self.async_session() as session:
+            # 1. 汇总所有账号关注的贴吧 (去重汇总)
+            # 使用聚合函数获取详细数据
+            stmt = (
+                select(
+                    Forum.fname,
+                    func.count(Forum.account_id).label("account_count"),
+                    func.group_concat(Account.name).label("account_names")
+                )
+                .join(Account, Forum.account_id == Account.id)
+                .group_by(Forum.fname)
+            )
+            
+            result = await session.execute(stmt)
+            forum_rows = result.all()
+            
+            # 2. 获取 TargetPool 中的扩展信息
+            target_stmt = select(TargetPool)
+            target_result = await session.execute(target_stmt)
+            target_map = {t.fname: t for t in target_result.scalars().all()}
+            
+            # 3. 合并数据
+            stats_list = []
+            for row in forum_rows:
+                fname = row.fname
+                target_info = target_map.get(fname)
+                
+                stats_list.append({
+                    "fname": fname,
+                    "account_count": row.account_count,
+                    "account_names": row.account_names,
+                    "post_group": target_info.post_group if target_info else "",
+                    "is_target": target_info is not None,
+                    "success_count": target_info.success_count if target_info else 0,
+                    "is_active": target_info.is_active if target_info else True
+                })
+            
+            # 4. 补充在 TargetPool 中但目前没有任何号关注的吧 (空降预备役)
+            followed_fnames = {row.fname for row in forum_rows}
+            for fname, target in target_map.items():
+                if fname not in followed_fnames:
+                    stats_list.append({
+                        "fname": fname,
+                        "account_count": 0,
+                        "account_names": "",
+                        "post_group": target.post_group,
+                        "is_target": True,
+                        "success_count": target.success_count,
+                        "is_active": target.is_active
+                    })
+            
+            # 按兵力部署多少排序
+            return sorted(stats_list, key=lambda x: x["account_count"], reverse=True)
+
+    async def upsert_target_pools(self, fnames: list[str], post_group: str = "") -> int:
+        """将若干吧名批量加入 TargetPool (已存在则跳过)。返回新增的数量。"""
+        added = 0
+        async with self.async_session() as session:
+            for fname in fnames:
+                existing = await session.execute(
+                    select(TargetPool).where(TargetPool.fname == fname)
+                )
+                if existing.scalar_one_or_none() is None:
+                    session.add(TargetPool(fname=fname, post_group=post_group))
+                    added += 1
+            await session.commit()
+        return added
+
+    async def delete_target_pool_by_fnames(self, fnames: list[str]) -> int:
+        """从 TargetPool 中删除指定的贴吧列表。返回删除的数量。"""
+        from sqlalchemy import delete as sql_delete
+        deleted = 0
+        async with self.async_session() as session:
+            for fname in fnames:
+                result = await session.execute(
+                    sql_delete(TargetPool).where(TargetPool.fname == fname)
+                )
+                deleted += result.rowcount
+            await session.commit()
+        return deleted
+
+    async def bulk_update_target_group(self, fnames: list[str], post_group: str) -> None:
+        """批量更新 TargetPool 中指定贴吧的分组/标签。若该贴吧不在池中则先插入。"""
+        async with self.async_session() as session:
+            for fname in fnames:
+                existing = await session.execute(
+                    select(TargetPool).where(TargetPool.fname == fname)
+                )
+                pool = existing.scalar_one_or_none()
+                if pool:
+                    pool.post_group = post_group
+                else:
+                    session.add(TargetPool(fname=fname, post_group=post_group))
+            await session.commit()
+
     async def get_target_pool_groups(self) -> list[str]:
         """获取靶场池所有存在的分组名"""
         async with self.async_session() as session:
@@ -1284,6 +1380,32 @@ class Database:
             )
             await session.commit()
             return result.rowcount or 0
+
+    async def bulk_update_target_group(self, fnames: list[str], group: str) -> int:
+        """批量更新贴吧的行业分类/吧组标签"""
+        if not fnames: return 0
+        async with self.async_session() as session:
+            # 确保这些 fname 在 TargetPool 中存在，不存在则先插入
+            existing_result = await session.execute(
+                select(TargetPool.fname).where(TargetPool.fname.in_(fnames))
+            )
+            existing_fnames = set(existing_result.scalars().all())
+            
+            # 插入缺失的
+            missing_fnames = set(fnames) - existing_fnames
+            for fname in missing_fnames:
+                session.add(TargetPool(fname=fname, post_group=group))
+            
+            # 更新已存在的
+            if existing_fnames:
+                await session.execute(
+                    update(TargetPool)
+                    .where(TargetPool.fname.in_(list(existing_fnames)))
+                    .values(post_group=group)
+                )
+            
+            await session.commit()
+            return len(fnames)
 
     async def toggle_forum_post_target(self, fid: int, is_post_target: bool) -> None:
         """切换本号某个特定贴吧的发帖许可状态"""
