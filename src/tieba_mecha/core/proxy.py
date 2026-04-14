@@ -12,18 +12,24 @@ async def get_best_proxy_config(db: Database, proxy_id: int | None = None) -> Op
         proxy = await db.get_proxy(proxy_id)
         if proxy and proxy.is_active:
             return _build_proxy_config(proxy)
-            
-        # 仅在指定了代理但失效时，且启用了自动容灾，才尝试 Fallback
+
+    # 获取可用的代理列表
+    proxies = await db.get_active_proxies()
+    if not proxies:
+        return None
+
+    # 如果指定了代理 ID 但失效，且启用了自动容灾，才尝试 Fallback
+    if proxy_id:
         is_fallback_enabled = await db.get_setting("proxy_fallback", "true") == "true"
         if is_fallback_enabled:
-            proxies = await db.get_active_proxies()
-            if proxies:
-                # 随机选择一个较稳定的代理（前 3 个）
-                top_proxies = sorted(proxies, key=lambda p: p.fail_count)[:3]
-                proxy = random.choice(top_proxies)
-                return _build_proxy_config(proxy)
-    
-    return None
+            # 随机选择一个较稳定的代理（前 3 个）
+            top_proxies = sorted(proxies, key=lambda p: p.fail_count)[:3]
+            proxy = random.choice(top_proxies)
+            return _build_proxy_config(proxy)
+        return None
+
+    # 未指定 proxy_id 时，返回第一个可用代理
+    return _build_proxy_config(proxies[0])
 
 def _build_proxy_config(proxy) -> ProxyConfig:
     """内部工具函数：从模型构建 ProxyConfig，含解密逻辑"""

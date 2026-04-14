@@ -779,59 +779,79 @@ class BatchPostPage:
         await self.load_data()
 
     async def _bulk_check_survival_status(self, e):
-        """批量处理选中的贴子存活状态探测"""
+        """批量处理选中的贴子存活状态探测 (增强版：带实时进度提示)"""
         if not self._selected_archive_ids:
             self._show_snackbar("请先在列表中勾选想要探测的归档条目", "warning")
             return
             
         # 提取目标 TIDs
-        tids_to_check = []
+        targets = []
         for m in self._materials:
             if m.id in self._selected_archive_ids and m.status == "success" and m.posted_tid:
-                tids_to_check.append(m.posted_tid)
+                targets.append(m)
                 self._survival_cache[m.posted_tid] = "checking"
                 
-        if not tids_to_check:
+        if not targets:
             self._show_snackbar("所选条目中没有包含有效 TID 的贴子", "warning")
             return
             
-        # 先更新到 checking 状态
+        # 1. 启动进度提示
+        self.archive_progress_bar.visible = True
+        self.archive_progress_bar.value = 0
+        self.archive_status_text.visible = True
+        self.archive_status_text.value = f"正在初始化探测任务 (0/{len(targets)})..."
+        self._add_log(f"🚀 开始对 {len(targets)} 条贴子执行批量存活探测...")
+        
+        # 先更新到 checking 状态显示给用户
         await self.load_data()
         
         alive_count = 0
         dead_count = 0
+        total = len(targets)
         
         try:
             import aiotieba
-            tid_to_mid = {m.posted_tid: m.id for m in self._materials if m.posted_tid}
             async with aiotieba.Client() as client:
-                for tid in tids_to_check:
+                for i, m in enumerate(targets):
+                    tid = m.posted_tid
+                    self.archive_status_text.value = f"正在探测 ({i+1}/{total}): {m.title[:15]}..."
+                    self.archive_progress_bar.value = (i + 1) / total
+                    self.page.update()
+                    
                     try:
                         res = await client.get_posts(tid)
                         final_status = "unknown"
                         if res and res.forum and res.forum.fid > 0:
                             final_status = "alive"
                             alive_count += 1
+                            self._add_log(f"✅ [存活] {m.posted_fname} | TID:{tid}")
                         else:
                             final_status = "dead"
                             dead_count += 1
+                            self._add_log(f"❌ [阵亡] {m.posted_fname} | TID:{tid}", "error")
                         
                         self._survival_cache[tid] = final_status
                         # 执行数据库持久化
-                        mid = tid_to_mid.get(tid)
-                        if mid:
-                            await self.db.update_material_survival_status(mid, final_status)
+                        await self.db.update_material_survival_status(m.id, final_status)
                             
-                    except Exception:
+                    except Exception as ex:
                         self._survival_cache[tid] = "dead"
-                        mid = tid_to_mid.get(tid)
-                        if mid:
-                            await self.db.update_material_survival_status(mid, "dead")
+                        await self.db.update_material_survival_status(m.id, "dead")
                         dead_count += 1
+                        self._add_log(f"⚠️ [错误] {m.posted_fname} | TID:{tid} | {str(ex)}", "error")
+
+                    # 每探测 5 条刷新一次大表，平衡性能与体验
+                    if (i + 1) % 5 == 0:
+                        await self._refresh_material_table()
+
                     # 轻度休眠以防止高并发拦截
                     await asyncio.sleep(0.5)
-        except Exception:
-            pass
+        except Exception as ex:
+            self._add_log(f"探测任务异常中止: {str(ex)}", "error")
+        finally:
+            self.archive_progress_bar.visible = False
+            self.archive_status_text.visible = False
+            self.page.update()
             
         self._show_snackbar(f"批量探测完毕: {alive_count} 条存活健在，{dead_count} 条已掉线", "info")
         await self.load_data()
@@ -1820,6 +1840,10 @@ class BatchPostPage:
                     ft.IconButton(icons.REFRESH, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新档案"),
                 ], spacing=10),
                 ft.Row([
+                    self.archive_status_text,
+                    self.archive_progress_bar,
+                ], spacing=10),
+                ft.Row([
                     archive_search,
                     ft.Row([
                         ft.Container(
@@ -1926,6 +1950,10 @@ class BatchPostPage:
                             on_click=self._bulk_check_survival_status),
             self._archive_selected_count_text,
         ], visible=False, spacing=10)
+        
+        # 归档探测进度控件
+        self.archive_progress_bar = ft.ProgressBar(value=0, visible=False, color="teal", expand=True)
+        self.archive_status_text = ft.Text("准备探测...", size=11, color="onSurfaceVariant", visible=False)
         
         # 2. 物料录入与表格
         self._quick_title = ft.TextField(label="快速配置标签(可选)", expand=1, text_size=12, dense=True)
@@ -2378,16 +2406,23 @@ class BatchPostPage:
                 selected_forums.extend(g_fnames)
 
         manual_forums = [f.strip() for f in self.manual_forum_input.value.replace("，", ",").split(",") if f.strip()]
-        fnames = list(set(selected_forums + manual_forums))
+        dialog_forums = getattr(self, "_temp_target_fnames", [])
+        fnames = list(set(selected_forums + manual_forums + dialog_forums))
 
         # Validation
         pending_m = [m for m in self._materials if m.status == "pending"]
-        pairing_mode = self.pairing_mode_dropdown.value
-        strategy = self.strategy_dropdown.value
         
         if not fnames or not pending_m:
-            self._show_snackbar("发射拦截：请补全目标贴吧库，并确保排期池内有处于 [待发(pending)] 的有效子弹", "error")
+            error_details = []
+            if not fnames: error_details.append("目标贴吧库为空")
+            if not pending_m: error_details.append("排期池无待发物料 (需手动回炉或重新导入)")
+            
+            print(f"[VALIDATION FAIL] {', '.join(error_details)}")
+            self._show_snackbar(f"发射拦截：{', '.join(error_details)}", "error")
             return
+            
+        pairing_mode = self.pairing_mode_dropdown.value
+        strategy = self.strategy_dropdown.value
             
         if self.use_schedule.value:
             try:
