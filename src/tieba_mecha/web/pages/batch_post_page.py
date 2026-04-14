@@ -252,96 +252,6 @@ class BatchPostPage:
         """全选/取消贴吧 (保留兼容旧版逻辑)"""
         self._toggle_select_all(self.forum_pool_column, e.control.value)
 
-    def _open_forum_dialog(self, e):
-        """打开新型双轨矩阵靶场选择器"""
-        if not hasattr(self, "global_group_column"):
-            self.global_group_column = ft.Column(spacing=2, height=120, scroll=ft.ScrollMode.ADAPTIVE)
-        self._refresh_forum_pool()
-
-        def confirm_selection(e):
-            num_native = sum(1 for cb in self.forum_pool_column.controls if isinstance(cb, ft.Checkbox) and cb.value)
-            num_global = sum(1 for cb in self.global_group_column.controls if isinstance(cb, ft.Checkbox) and cb.value)
-            
-            if num_native > 0 and num_global > 0:
-                self.forum_select_btn.text = f"混合火力: {num_native}个自留吧 + {num_global}个靶场组"
-            elif num_native > 0:
-                self.forum_select_btn.text = f"精确定向: {num_native}个自留吧"
-            elif num_global > 0:
-                self.forum_select_btn.text = f"全域轰炸: {num_global}个靶场组"
-            else:
-                self.forum_select_btn.text = "点击配置火力抛射矩阵"
-                
-            self.forum_select_btn.style = ft.ButtonStyle(
-                color="white" if (num_native > 0 or num_global > 0) else "onSurfaceVariant",
-                bgcolor="error" if num_global > 0 else ("primary" if num_native > 0 else None)
-            )
-            self.page.close(self.forum_dialog)
-            self.page.update()
-
-        self.forum_dialog = ft.AlertDialog(
-            title=ft.Row([
-                ft.Icon(icons.RADAR_ROUNDED, color="red"), 
-                ft.Text("配置火力抛射靶场"),
-                ft.IconButton(icons.SECURITY, icon_color="green", on_click=lambda _: self._open_safety_config_dialog(), tooltip="配置安全本营")
-            ]),
-            content=ft.Container(
-                content=ft.Tabs(
-                    selected_index=0,
-                    animation_duration=200,
-                    tabs=[
-                        ft.Tab(
-                            text="🟢 本地自留区",
-                            icon=icons.SHIELD_ROUNDED,
-                            content=ft.Column([
-                                ft.Row([
-                                    ft.TextField(
-                                        hint_text="过滤本地吧...",
-                                        prefix_icon=icons.SEARCH,
-                                        height=35, text_size=11, expand=True,
-                                        on_change=lambda e: self._filter_checkboxes(self.forum_pool_column, e.control.value)
-                                    ),
-                                    ft.Checkbox(label="全选", on_change=lambda e: self._toggle_select_all(self.forum_pool_column, e.control.value)),
-                                    ft.IconButton(icons.SETTINGS, on_click=self._open_native_forum_config, icon_color="green", tooltip="配置安全本营")
-                                ], spacing=5),
-                                ft.Container(
-                                    content=self.forum_pool_column if self._native_forums else ft.Container(content=ft.Text("尚无任何贴吧被赋予原生保护权限\n请点击右上方按钮开启防线", color="onSurfaceVariant", text_align="center", size=11), alignment=ft.alignment.center, height=180),
-                                    height=180, border=ft.border.all(1, with_opacity(0.1, "green")),
-                                    border_radius=8, padding=10,
-                                ),
-                            ], tight=True, spacing=5),
-                        ),
-                        ft.Tab(
-                            text="🔥 全域轰炸组",
-                            icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED,
-                            content=ft.Column([
-                                ft.Row([
-                                    ft.TextField(
-                                        hint_text="过滤靶场组...",
-                                        prefix_icon=icons.SEARCH,
-                                        height=35, text_size=11, expand=True,
-                                        on_change=lambda e: self._filter_checkboxes(self.global_group_column, e.control.value)
-                                    ),
-                                    ft.Checkbox(label="全选", on_change=lambda e: self._toggle_select_all(self.global_group_column, e.control.value)),
-                                    ft.IconButton(icons.ADD_BOX, on_click=self._open_add_target_pool_dialog, icon_color="error", tooltip="录入新靶群")
-                                ], spacing=5),
-                                ft.Container(
-                                    content=self.global_group_column,
-                                    height=180, border=ft.border.all(1, with_opacity(0.1, "error")),
-                                    border_radius=8, padding=10,
-                                ),
-                            ], tight=True, spacing=5),
-                        )
-                    ],
-                ),
-                width=450,
-                height=300
-            ),
-            actions=[
-                ft.TextButton("关闭", on_click=lambda _: self.page.close(self.forum_dialog)),
-                ft.FilledButton("锁定发射坐标", icon=icons.CHECK, on_click=confirm_selection),
-            ],
-        )
-        self.page.open(self.forum_dialog)
 
     async def _open_native_forum_config(self, e):
         """配置本机原发安全圈的弹窗 - 增加搜索与全选"""
@@ -1621,9 +1531,20 @@ class BatchPostPage:
                 manual_fnames = [f.strip() for f in manual_input.value.split(",") if f.strip()]
                 for fn in manual_fnames: final_selected.add(fn)
             
+            count = len(final_selected)
             self._temp_target_fnames = list(final_selected)
+            
+            # 同步更新主界面按钮状态
+            if count > 0:
+                self.forum_select_btn.text = f"🎯 火力已锁定: {count} 个目标点"
+                self.forum_select_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
+            else:
+                self.forum_select_btn.text = "点击选择目标贴吧"
+                self.forum_select_btn.style = ft.ButtonStyle(color="onSurfaceVariant", bgcolor=None)
+
             self.page.close(fire_dialog)
             self._show_snackbar(f"🎯 已锁定 {len(final_selected)} 个发射坐标点，准备完毕", "success")
+            self.page.update()
 
         # 标题栏：包含安全配置入口
         dialog_title = ft.Row([
