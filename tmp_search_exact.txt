@@ -1,0 +1,31 @@
+    @handle_exception(search_exact.ExactSearches)
+    async def search_exact(
+        self,
+        fname_or_fid: str | int,
+        query: str,
+        /,
+        pn: int = 1,
+        *,
+        rn: int = 30,
+        search_type: SearchType = SearchType.ALL,
+        only_thread: bool = False,
+    ) -> search_exact.ExactSearches:
+        """
+        贴吧搜索
+
+        Args:
+            fname_or_fid (str | int): 查询的贴吧名或fid 优先贴吧名
+            query (str): 查询文本
+            pn (int, optional): 页码. Defaults to 1.
+            rn (int, optional): 请求的条目数. Defaults to 30.
+            search_type (SearchType, optional): 查询模式 默认查询全部. Defaults to SearchType.ALL.
+            only_thread (bool, optional): 是否仅查询主题帖. Defaults to False.
+
+        Returns:
+            ExactSearches: 搜索结果列表
+        """
+
+        fname = fname_or_fid if isinstance(fname_or_fid, str) else await self.__get_fname(fname_or_fid)
+
+        return await search_exact.request(self._http_core, fname, query, pn, rn, search_type, only_thread)
+
