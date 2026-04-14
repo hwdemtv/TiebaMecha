@@ -342,7 +342,7 @@ class Database:
         async with self.async_session() as session:
             result = await session.execute(
                 select(Account).where(
-                    Account.status.notin_(["suspended", "suspended_proxy", "banned"])
+                    Account.status.notin_(["suspended", "suspended_proxy", "banned", "expired"])
                 ).order_by(Account.post_weight.desc())
             )
             return list(result.scalars().all())
