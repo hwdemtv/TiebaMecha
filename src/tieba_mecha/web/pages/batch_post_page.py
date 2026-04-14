@@ -72,10 +72,10 @@ class BatchPostPage:
                     # 只同步已探测过的有效状态，checking 状态不持久化以防卡死
                     self._survival_cache[m.posted_tid] = m.survival_status
 
-            # 首次加载初始化默认选择
+            # 首次加载初始化默认选择：仅勾选状态正常的账号
             if not self._initial_load_done:
                 for acc in self._accounts:
-                    if acc.status != "suspended_proxy":
+                    if acc.status == "active":
                         self._selected_account_ids.add(acc.id)
                 self._initial_load_done = True
             
@@ -134,18 +134,29 @@ class BatchPostPage:
 
             for acc in filtered_accounts:
                 is_suspended = (acc.status == "suspended_proxy")
+                is_banned = (acc.status == "banned")
+                is_expired = (acc.status == "expired")
                 
                 # 状态标识
-                proxy_label = "🔴 代理失效" if is_suspended else ("🟢 代理正常" if acc.proxy_id else "🟡 裸连警告")
+                proxy_label = "🟢 代理正常" if acc.proxy_id else "🟡 裸连警告"
+                if is_suspended: proxy_label = "🔴 代理失效"
+                
+                status_icon = "🟢"
+                if is_banned: status_icon = "💔 封禁"
+                elif is_expired: status_icon = "🔘 失效"
+                elif acc.status == "error": status_icon = "🟡 异常"
+                
                 weight_dots = "●" * (acc.post_weight // 2) + "○" * (5 - acc.post_weight // 2)
                 
                 # 获取显示名称，增加针对空名称的容错回退
                 display_name = acc.name or acc.user_name or f"账号-{acc.id}"
                 
+                item_label = f"{status_icon} | {display_name} ({proxy_label})"
+                
                 # Checkbox
                 items.append(
                     ft.Checkbox(
-                        label=f"{display_name} ({proxy_label}) [权重: {weight_dots}]",
+                        label=item_label,
                         value=acc.id in self._selected_account_ids,
                         data=acc.id,
                         on_change=self._on_account_select_change, # 修正为正确的名称
