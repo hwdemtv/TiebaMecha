@@ -1680,7 +1680,6 @@ class BatchPostPage:
                     )
                 ),
             ],
-            expand=True
         )
 
         fire_dialog = ft.AlertDialog(
@@ -1688,6 +1687,7 @@ class BatchPostPage:
             content=ft.Container(
                 content=tabs,
                 width=500,
+                height=450,
             ),
             actions=[
                 ft.TextButton("关闭", on_click=lambda _: self.page.close(fire_dialog)),
