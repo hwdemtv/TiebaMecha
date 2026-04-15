@@ -544,7 +544,7 @@ class BatchPostManager:
                     try:
                         await client.unfollow_forum(fname)
                     except Exception as ue:
-                        logger.warning(f"回帖熔断取消关注失败: {ue}")
+                        await log_warn(f"回帖熔断取消关注失败: {ue}")
                         
                     # 寻找关联物料并关闭自动回帖，防止持续背刺
                     async with self.db.async_session() as session:
@@ -623,13 +623,20 @@ class AutoBumpManager:
         """扫描并处理所有待自顶的物料"""
         from datetime import datetime, timedelta
         
-        # 获取开启了自动回帖、发帖成功、且距离上次回帖超过 45 分钟的物料
+        # 1. 读取全局配置
+        try:
+            max_bump_count = int(await self.db.get_setting("max_bump_count", "20"))
+            bump_cooldown_minutes = int(await self.db.get_setting("bump_cooldown_minutes", "45"))
+            bump_matrix_enabled = (await self.db.get_setting("bump_matrix_enabled", "0")) == "1"
+        except Exception:
+            max_bump_count, bump_cooldown_minutes, bump_matrix_enabled = 20, 45, False
+            
+        # 2. 获取开启了自动回帖、发帖成功、且满足冷却时间的物料
         async with self.db.async_session() as session:
             from ..db.models import MaterialPool
             from sqlalchemy import select, and_
             
-            # 宽限期：45 分钟回一次，且总自顶次数不超过 50 次 (安全门控)
-            threshold_time = datetime.now() - timedelta(minutes=45)
+            threshold_time = datetime.now() - timedelta(minutes=bump_cooldown_minutes)
             
             stmt = select(MaterialPool).where(
                 and_(
@@ -637,7 +644,7 @@ class AutoBumpManager:
                     MaterialPool.is_auto_bump == True,
                     MaterialPool.posted_tid != None,
                     MaterialPool.posted_tid != 0,
-                    MaterialPool.bump_count < 50, # 强制安全限额
+                    MaterialPool.bump_count < max_bump_count, # 动态安全阈值
                     (MaterialPool.last_bumped_at == None) | (MaterialPool.last_bumped_at < threshold_time)
                 )
             )
@@ -647,17 +654,33 @@ class AutoBumpManager:
             if not candidates:
                 return
 
-            await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件 (次数 < 50)，开始执行...")
+            await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件 (上限: {max_bump_count})，开始执行...")
             
             # 运行时 Skip-List：防止在同一次扫描中反复背刺已被封的账号
             banned_pairs = set() # (account_id, fname)
             
             # 获取当前全局活跃号作为后备
             default_acc = await self.db.get_active_account()
+            
+            # 如果开启了矩阵式协同，预加载所有可用账号池
+            matrix_pool = []
+            if bump_matrix_enabled:
+                matrix_pool = await self.db.get_matrix_accounts()
 
             for material in candidates:
-                # 【原号出战策略】优先选用发帖时的原号进行回帖 (Section 4.2)
-                target_account_id = material.posted_account_id or (default_acc.id if default_acc else None)
+                # --- 账号选取策略：原号出战 vs 矩阵轮询 ---
+                if bump_matrix_enabled and matrix_pool:
+                    # 矩阵轮询算法：利用 (物料ID + 已顶次数) 作为种子选取账号，确保同一个物料能轮换使用不同账号
+                    # 过滤掉发帖原号，避免看起来不够“协同”
+                    potential_accounts = [acc for acc in matrix_pool if acc.id != material.posted_account_id]
+                    if not potential_accounts:
+                        # 如果没有其他可用号，回落到原号
+                        target_account_id = material.posted_account_id or (default_acc.id if default_acc else None)
+                    else:
+                        target_account_id = potential_accounts[material.bump_count % len(potential_accounts)].id
+                else:
+                    target_account_id = material.posted_account_id or (default_acc.id if default_acc else None)
+                
                 if not target_account_id:
                     continue
                 
@@ -672,18 +695,17 @@ class AutoBumpManager:
                     "这个必须顶上去", "好东西，mark一下", "分享即美德，赞！",
                     "路过帮顶，支持原创", "感谢分享，整理辛苦了", "百度一下，支持此贴"
                 ]
-                RANDOM_EMOJIS = ["(๑•̀ㅂ• middle dot)و✧", "(￣▽￣)ノ", "[赞]", "✨", "🚀", "🔥", "👍", "🙏", "🍺"]
+                RANDOM_EMOJIS = ["(๑•̀ㅂ• dot)و✧", "(￣▽￣)ノ", "[赞]", "✨", "🚀", "🔥", "👍", "🙏", "🍺"]
                 
                 # 基于物料标题和随机词库构造
                 base_text = random.choice(BUMP_TEMPLATES)
                 if random.random() < 0.4: # 40% 概率携带标题关键词
-                    keyword = material.title[:10]
+                    keyword = (material.title or "")[:10]
                     base_text = f"关于【{keyword}】：{base_text}"
                 
                 bump_content = f"{base_text} {random.choice(RANDOM_EMOJIS)}"
                 
                 if material.ai_status == "rewritten":
-                    # AI 改写过的物料使用略微不同的风格
                     bump_content = f"分享好物：{material.title} {random.choice(RANDOM_EMOJIS)}"
                     
                 success = await self.post_manager.reply_to_thread(
@@ -698,7 +720,6 @@ class AutoBumpManager:
                     await log_info(f"物料 [{material.id}] 自顶成功 (账号:{target_account_id} | TID:{material.posted_tid})")
                     await asyncio.sleep(random.uniform(5, 15))
                 else:
-                    # 如果失败是因为封禁，记入本次运行的 Skip-List
                     banned_pairs.add((target_account_id, material.posted_fname))
-                    await log_warn(f"物料 [{material.id}] 自顶失败")
+                    await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{target_account_id})")
 
