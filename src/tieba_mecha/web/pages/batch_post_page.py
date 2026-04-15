@@ -72,6 +72,10 @@ class BatchPostPage:
                     # 只同步已探测过的有效状态，checking 状态不持久化以防卡死
                     self._survival_cache[m.posted_tid] = m.survival_status
 
+            # [自顶配置同步] 加载 max_bump_count 到内存缓存
+            max_bump_raw = await self.db.get_setting("max_bump_count")
+            self._max_bump_count = int(max_bump_raw) if max_bump_raw else 20
+            
             # 首次加载初始化默认选择：仅勾选状态正常的账号
             if not self._initial_load_done:
                 for acc in self._accounts:
@@ -118,6 +122,44 @@ class BatchPostPage:
                     self._selected_account_ids.remove(acc.id)
         
         self._refresh_account_pool()
+
+    async def _save_bump_config(self, e):
+        """保存自顶配置到数据库"""
+        try:
+            # 读取并校验最大次数 (5-100)
+            try:
+                max_count = int(self.bump_max_count_field.value)
+                max_count = max(5, min(100, max_count))  # 限制范围 5-100
+            except (ValueError, AttributeError):
+                max_count = 20  # 默认值
+                self.bump_max_count_field.value = str(max_count)
+            
+            # 读取并校验冷却时间 (10-1440)
+            try:
+                cooldown = int(self.bump_cooldown_field.value)
+                cooldown = max(10, min(1440, cooldown))  # 限制范围 10-1440
+            except (ValueError, AttributeError):
+                cooldown = 45  # 默认值
+                self.bump_cooldown_field.value = str(cooldown)
+            
+            # 矩阵模式开关
+            matrix_enabled = "1" if self.bump_matrix_switch.value else "0"
+            
+            # 写入数据库
+            await self.db.set_setting("max_bump_count", str(max_count))
+            await self.db.set_setting("bump_cooldown_minutes", str(cooldown))
+            await self.db.set_setting("bump_matrix_enabled", matrix_enabled)
+            
+            # 同步更新内存缓存
+            self._max_bump_count = max_count
+            
+            # 刷新物料表以反映新的封顶判断
+            await self._refresh_material_table()
+            
+            self._show_snackbar(f"自顶配置已保存: 最大{max_count}次, 冷却{cooldown}分钟, 矩阵{'开启' if matrix_enabled == '1' else '关闭'}", "success")
+        except Exception as ex:
+            await log_error(f"[UI ERROR] _save_bump_config failed: {ex}")
+            self._show_snackbar(f"保存配置失败: {str(ex)}", "error")
 
     def _refresh_account_pool(self):
         """刷新账号池选择器 UI - 支持过滤与独立展示"""
@@ -568,7 +610,9 @@ class BatchPostPage:
                     )
                 else:
                     # 自顶状态逻辑增强：区分 开启/停止/上限
-                    is_limit_reached = (m.bump_count >= 50)
+                    # 使用动态配置的 max_bump_count（默认 20）
+                    max_bump = getattr(self, "_max_bump_count", 20)
+                    is_limit_reached = (m.bump_count >= max_bump)
                     bump_status_text = f"已顶{m.bump_count}"
                     bump_color = "onSurfaceVariant"
                     bump_tooltip = f"当前已累计自顶 {m.bump_count} 次"
@@ -576,7 +620,7 @@ class BatchPostPage:
                     if is_limit_reached:
                         bump_status_text = f"封顶({m.bump_count})"
                         bump_color = "orange"
-                        bump_tooltip = "由于该贴已达到 50 次安全回帖上限，系统已自动停止进一步操作"
+                        bump_tooltip = f"由于该贴已达到 {max_bump} 次安全回帖上限，系统已自动停止进一步操作"
                     elif not m.is_auto_bump and m.bump_count > 0:
                         bump_status_text = f"暂停({m.bump_count})"
                         bump_color = "onSurfaceVariant"
@@ -1955,6 +1999,36 @@ class BatchPostPage:
             label="文案提取模式", value="random", width=200,
             options=[ft.dropdown.Option("random", "随机混用 (防抽混淆)"), ft.dropdown.Option("strict", "严格配对 (发多资源)")]
         )
+        
+        # 4.1 自顶配置控件
+        self.bump_max_count_field = ft.TextField(
+            label="最大次数 (5-100)",
+            value="20",
+            expand=True,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            text_size=12,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            dense=True,
+        )
+        self.bump_cooldown_field = ft.TextField(
+            label="冷却 (分钟, 10-1440)",
+            value="45",
+            expand=True,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            text_size=12,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            dense=True,
+        )
+        self.bump_matrix_switch = ft.Switch(
+            label="矩阵协同模式",
+            value=False,
+        )
+        self.bump_config_save_btn = ft.FilledButton(
+            "保存配置",
+            icon=icons.SAVE,
+            on_click=self._save_bump_config,
+            style=ft.ButtonStyle(bgcolor="primary", color="white"),
+        )
         # 账号池 UI 增强
         self.account_search_field = ft.TextField(
             hint_text="搜索账号、ID...",
@@ -2016,6 +2090,11 @@ class BatchPostPage:
                             content=ft.Column([
                                 self.strategy_dropdown,
                                 self.pairing_mode_dropdown,
+                                ft.Divider(height=5, color="transparent"),
+                                ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
+                                ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
+                                self.bump_matrix_switch,
+                                self.bump_config_save_btn,
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
