@@ -1036,7 +1036,7 @@ class AccountsPage:
         count = len(self._selected_ids)
         self._show_snackbar(f"开始批量验证 {count} 个账号...", "info")
         for aid in list(self._selected_ids):
-            await verify_account(self.db, aid)
+            await refresh_account(self.db, aid)
         self._selected_ids.clear()
         self._update_bulk_bar()
         await self.load_data()
