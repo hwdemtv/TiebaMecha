@@ -1,6 +1,7 @@
 """Database CRUD operations"""
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -576,7 +577,7 @@ class Database:
 
     async def check_and_reset_daily_sign(self) -> None:
         """智能检测并重置跨天的签到状态（包含断签检测）"""
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         
         async with self.async_session() as session:
             now = datetime.now()
@@ -780,7 +781,7 @@ class Database:
         Returns:
             (删除的任务数, 删除的文件数)
         """
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         from pathlib import Path
 
         cutoff = datetime.now() - timedelta(days=days)
@@ -1024,7 +1025,6 @@ class Database:
 
     async def get_pending_batch_tasks(self) -> list[BatchPostTask]:
         """获取所有待执行（或到达执行时间）的定时任务"""
-        from datetime import datetime
         now = datetime.now()
         async with self.async_session() as session:
             result = await session.execute(
@@ -1160,7 +1160,6 @@ class Database:
             m = await session.get(MaterialPool, material_id)
             if m:
                 m.status = status
-                from datetime import datetime
                 m.last_used_at = datetime.now()
                 if posted_time is not None:
                     m.posted_time = posted_time
@@ -1189,7 +1188,6 @@ class Database:
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
             if m:
-                from datetime import datetime
                 m.bump_count += 1
                 m.last_bumped_at = datetime.now()
                 await session.commit()
@@ -1381,7 +1379,6 @@ class Database:
 
     async def update_target_pool_status(self, fname: str, is_success: bool, error_reason: str = "") -> None:
         """记录靶场投递结果并发动熔断"""
-        from datetime import datetime
         async with self.async_session() as session:
             result = await session.execute(select(TargetPool).where(TargetPool.fname == fname))
             pool = result.scalar()
@@ -1544,7 +1541,7 @@ class Database:
 
     async def clear_old_notifications(self, days: int = 30) -> int:
         """清除指定天数前的已读通知"""
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         async with self.async_session() as session:
             cutoff = datetime.now() - timedelta(days=days)
             from sqlalchemy import delete
