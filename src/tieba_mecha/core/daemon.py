@@ -115,7 +115,13 @@ async def do_batch_post_tasks():
             
             # 执行完毕后处理：如果是循环任务，更新下一次执行时间；否则标记完成
             if task.interval_hours > 0:
-                next_time = datetime.now() + __import__("datetime").timedelta(hours=task.interval_hours)
+                # [风控增强] 强制最小循环间隔为6小时，防止频繁触发导致封号
+                MIN_INTERVAL_HOURS = 6
+                actual_interval = max(task.interval_hours, MIN_INTERVAL_HOURS)
+                if task.interval_hours < MIN_INTERVAL_HOURS:
+                    print(f"[DAEMON] ⚠️ 循环间隔过短 ({task.interval_hours}h)，已自动调整为 {actual_interval}h")
+                
+                next_time = datetime.now() + __import__("datetime").timedelta(hours=actual_interval)
                 await db.update_batch_task(task.id, status="pending", schedule_time=next_time, progress=0)
                 print(f"[DAEMON] 循环任务 ID={task.id} 已完成本轮，下次执行: {next_time}")
             else:
