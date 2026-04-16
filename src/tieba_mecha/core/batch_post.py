@@ -369,6 +369,155 @@ class TimeWindowDispatcher:
         return (min_delay * multiplier, max_delay * multiplier)
 
 
+class AutoWeightCalculator:
+    """
+    自动权重计算器：根据账号多维度指标自动计算推荐发帖权重。
+    
+    计算因素及权重：
+    - 平均贴吧等级 (30%): 无等级=1, 1-3级=3, 4-6级=5, 7-10级=7, 10+级=10
+    - 签到成功率 (25%): success/(total||1) * 10
+    - 账号状态 (20%): active=10, pending=7, error=3, 其他=1
+    - 代理绑定 (15%): 已绑定=10, 未绑定=5
+    - 验证时效 (10%): 7天内=10, 30天内=7, 30天+=3, 从未=1
+    """
+    
+    # 各因素权重配置
+    WEIGHT_LEVEL = 0.30      # 等级权重
+    WEIGHT_SIGN = 0.25       # 签到成功率权重
+    WEIGHT_STATUS = 0.20    # 账号状态权重
+    WEIGHT_PROXY = 0.15     # 代理绑定权重
+    WEIGHT_VERIFIED = 0.10  # 验证时效权重
+    
+    @classmethod
+    def calc_level_score(cls, avg_level: float) -> float:
+        """根据平均等级计算得分 (1-10)"""
+        if avg_level <= 0:
+            return 1.0
+        elif avg_level <= 3:
+            return 3.0
+        elif avg_level <= 6:
+            return 5.0
+        elif avg_level <= 10:
+            return 7.0
+        else:
+            return 10.0
+    
+    @classmethod
+    def calc_sign_score(cls, success: int, total: int) -> float:
+        """根据签到成功率计算得分 (1-10)"""
+        if total == 0:
+            return 5.0  # 无历史数据，给予中等分数
+        rate = success / max(total, 1)
+        return min(10.0, rate * 10.0)
+    
+    @classmethod
+    def calc_status_score(cls, status: str) -> float:
+        """根据账号状态计算得分 (1-10)"""
+        status_scores = {
+            "active": 10.0,
+            "pending": 7.0,
+            "error": 3.0,
+            "suspended_proxy": 2.0,
+            "suspended": 1.0,
+            "banned": 1.0,
+            "expired": 1.0,
+        }
+        return status_scores.get(status.lower(), 1.0)
+    
+    @classmethod
+    def calc_proxy_score(cls, has_proxy: bool) -> float:
+        """根据代理绑定情况计算得分 (1-10)"""
+        return 10.0 if has_proxy else 5.0
+    
+    @classmethod
+    def calc_verified_score(cls, last_verified: datetime | None) -> float:
+        """根据验证时效计算得分 (1-10)"""
+        if last_verified is None:
+            return 1.0  # 从未验证
+        
+        from datetime import timedelta
+        days_since = (datetime.now() - last_verified).days
+        
+        if days_since <= 7:
+            return 10.0
+        elif days_since <= 30:
+            return 7.0
+        elif days_since <= 60:
+            return 5.0
+        else:
+            return 2.0
+    
+    @classmethod
+    def calculate(cls, account: 'Account', forums: list['Forum'] = None) -> tuple[int, dict]:
+        """
+        计算账号的推荐权重。
+        
+        Args:
+            account: Account 对象
+            forums: 该账号关联的 Forum 对象列表，可选
+            
+        Returns:
+            (推荐权重 1-10, 详细得分字典)
+        """
+        # 1. 计算平均等级得分
+        if forums:
+            levels = [f.level for f in forums if f.level > 0]
+            avg_level = sum(levels) / len(levels) if levels else 0.0
+        else:
+            avg_level = 0.0
+        level_score = cls.calc_level_score(avg_level)
+        
+        # 2. 计算签到成功率得分
+        if forums:
+            total_signs = sum(f.history_total for f in forums)
+            success_signs = sum(f.history_success for f in forums)
+        else:
+            total_signs, success_signs = 0, 0
+        sign_score = cls.calc_sign_score(success_signs, total_signs)
+        
+        # 3. 账号状态得分
+        status_score = cls.calc_status_score(account.status)
+        
+        # 4. 代理绑定得分
+        proxy_score = cls.calc_proxy_score(account.proxy_id is not None)
+        
+        # 5. 验证时效得分
+        verified_score = cls.calc_verified_score(account.last_verified)
+        
+        # 6. 加权计算总分
+        total_score = (
+            level_score * cls.WEIGHT_LEVEL +
+            sign_score * cls.WEIGHT_SIGN +
+            status_score * cls.WEIGHT_STATUS +
+            proxy_score * cls.WEIGHT_PROXY +
+            verified_score * cls.WEIGHT_VERIFIED
+        )
+        
+        # 7. 映射到 1-10 范围
+        final_weight = max(1, min(10, round(total_score)))
+        
+        # 8. 构建详细得分报告
+        details = {
+            "account_id": account.id,
+            "account_name": account.name,
+            "avg_level": round(avg_level, 1),
+            "level_score": round(level_score, 1),
+            "total_signs": total_signs,
+            "success_rate": round(success_signs / max(total_signs, 1) * 100, 1),
+            "sign_score": round(sign_score, 1),
+            "status": account.status,
+            "status_score": round(status_score, 1),
+            "has_proxy": account.proxy_id is not None,
+            "proxy_score": round(proxy_score, 1),
+            "days_since_verified": (datetime.now() - account.last_verified).days if account.last_verified else None,
+            "verified_score": round(verified_score, 1),
+            "total_score": round(total_score, 1),
+            "recommended_weight": final_weight,
+        }
+        
+        return final_weight, details
+
+
 class BionicDelay:
     """拟人化随机延迟驱动器 (基于高斯分布与生物钟权重)"""
     @staticmethod
