@@ -591,3 +591,113 @@ class TestCaptchaEvents:
         
         remaining = await db.get_captcha_events()
         assert len(remaining) == 0
+
+
+@pytest.mark.asyncio
+class TestMaterialsPaginated:
+    """Tests for get_materials_paginated."""
+
+    async def test_paginated_empty(self, db):
+        """Test paginated query with no data."""
+        materials, total = await db.get_materials_paginated()
+        assert total == 0
+        assert materials == []
+
+    async def test_paginated_page_size(self, db):
+        """Test paginated respects page_size."""
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            for i in range(25):
+                session.add(MaterialPool(title=f"标题{i}", content=f"内容{i}", status="success", posted_tid=1))
+            await session.commit()
+
+        materials, total = await db.get_materials_paginated(page=1, page_size=10)
+        assert total == 25
+        assert len(materials) == 10
+
+    async def test_paginated_page_2(self, db):
+        """Test second page returns remaining items."""
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            for i in range(25):
+                session.add(MaterialPool(title=f"标题{i}", content=f"内容{i}", status="success", posted_tid=1))
+            await session.commit()
+
+        materials, total = await db.get_materials_paginated(page=2, page_size=10)
+        assert total == 25
+        assert len(materials) == 10
+
+    async def test_paginated_page_3_partial(self, db):
+        """Test last page with partial items."""
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            for i in range(25):
+                session.add(MaterialPool(title=f"标题{i}", content=f"内容{i}", status="success", posted_tid=1))
+            await session.commit()
+
+        materials, total = await db.get_materials_paginated(page=3, page_size=10)
+        assert total == 25
+        assert len(materials) == 5
+
+    async def test_paginated_filter_by_survival_status(self, db):
+        """Test filtering by survival status."""
+        # Create materials with different survival statuses
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            for i in range(5):
+                m = MaterialPool(title=f"活{i}", content="c", status="success", posted_tid=1)
+                m.survival_status = "alive"
+                session.add(m)
+            for i in range(3):
+                m = MaterialPool(title=f"死{i}", content="c", status="success", posted_tid=1)
+                m.survival_status = "dead"
+                session.add(m)
+            await session.commit()
+
+        alive_mat, alive_total = await db.get_materials_paginated(survival_status="alive")
+        assert alive_total == 5
+        assert len(alive_mat) == 5
+
+        dead_mat, dead_total = await db.get_materials_paginated(survival_status="dead")
+        assert dead_total == 3
+        assert len(dead_mat) == 3
+
+    async def test_paginated_filter_by_account(self, db):
+        """Test filtering by account_id."""
+        acc1 = await db.add_account(name="账号1", bduss="a" * 192)
+        acc2 = await db.add_account(name="账号2", bduss="b" * 192)
+
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            for i in range(3):
+                m = MaterialPool(title=f"A{i}", content="c", status="success", posted_tid=1, posted_account_id=acc1.id)
+                m.survival_status = "alive"
+                session.add(m)
+            for i in range(2):
+                m = MaterialPool(title=f"B{i}", content="c", status="success", posted_tid=1, posted_account_id=acc2.id)
+                m.survival_status = "alive"
+                session.add(m)
+            await session.commit()
+
+        mat1, total1 = await db.get_materials_paginated(account_id=acc1.id)
+        assert total1 == 3
+
+        mat2, total2 = await db.get_materials_paginated(account_id=acc2.id)
+        assert total2 == 2
+
+    async def test_paginated_combined_filters(self, db):
+        """Test combining status and account filters."""
+        acc = await db.add_account(name="账号", bduss="a" * 192)
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            m1 = MaterialPool(title="活", content="c", status="success", posted_tid=1, posted_account_id=acc.id)
+            m1.survival_status = "alive"
+            session.add(m1)
+            m2 = MaterialPool(title="死", content="c", status="success", posted_tid=1, posted_account_id=acc.id)
+            m2.survival_status = "dead"
+            session.add(m2)
+            await session.commit()
+
+        mat, total = await db.get_materials_paginated(survival_status="alive", account_id=acc.id)
+        assert total == 1
+        assert mat[0].title == "活"

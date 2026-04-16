@@ -1186,6 +1186,41 @@ class Database:
             
             return list(account_stats.values())
 
+    async def get_materials_paginated(
+        self,
+        survival_status: str | None = None,
+        account_id: int | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[MaterialPool], int]:
+        """分页查询物料，返回 (列表, 总数)"""
+        async with self.async_session() as session:
+            from sqlalchemy import func, select as sa_select
+            base_where = [
+                MaterialPool.posted_tid.isnot(None),
+                MaterialPool.posted_tid != 0,
+            ]
+            if survival_status:
+                base_where.append(MaterialPool.survival_status == survival_status)
+            if account_id:
+                base_where.append(MaterialPool.posted_account_id == account_id)
+
+            # 总数
+            count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
+            total = (await session.execute(count_stmt)).scalar() or 0
+
+            # 分页数据
+            offset = (page - 1) * page_size
+            data_stmt = (
+                select(MaterialPool)
+                .where(*base_where)
+                .order_by(MaterialPool.id.desc())
+                .offset(offset)
+                .limit(page_size)
+            )
+            result = await session.execute(data_stmt)
+            return list(result.scalars().all()), total
+
     async def get_materials(self, status: str | None = None, limit: int | None = None) -> list[MaterialPool]:
         from sqlalchemy import text
         async with self.async_session() as session:

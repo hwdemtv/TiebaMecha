@@ -21,6 +21,8 @@ SEND = "send"
 SEND_ROUNDED = "send_rounded"
 EXTENSION = "extension"
 EXTENSION_OUTLINED = "extension_outlined"
+ANALYTICS = "analytics"
+ANALYTICS_OUTLINED = "analytics_outlined"
 SETTINGS = "settings"
 SETTINGS_OUTLINED = "settings_outlined"
 

@@ -27,6 +27,7 @@ PAGE_MODULES = {
     "batch_post": ("batch_post_page", "BatchPostPage"),
     "plugins": ("plugins_page", "PluginsPage"),
     "settings": ("settings", "SettingsPage"),
+    "survival": ("survival", "SurvivalPage"),
 }
 
 
@@ -121,6 +122,13 @@ class TiebaMechaApp:
                     icon=icons.SETTINGS_OUTLINED,
                     selected_icon=icons.SETTINGS,
                     label="全局设置",
+                ),
+
+                # --- 📊 存活分析 ---
+                ft.NavigationRailDestination(
+                    icon=icons.ANALYTICS_OUTLINED,
+                    selected_icon=icons.ANALYTICS,
+                    label="存活分析",
                 ),
             ],
             on_change=self._on_nav_change,
@@ -515,6 +523,7 @@ class TiebaMechaApp:
             7: "crawl",
             8: "plugins",
             9: "settings",
+            10: "survival",
         }
         page_name = dest_map.get(e.control.selected_index, "dashboard")
         self.page.run_task(self._navigate, page_name)
