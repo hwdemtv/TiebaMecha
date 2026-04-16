@@ -1037,7 +1037,8 @@ class BatchPostManager:
                             "success", 
                             posted_fname=target_fname, 
                             posted_tid=tid,
-                            posted_account_id=account_id
+                            posted_account_id=account_id,
+                            posted_time=datetime.now()
                         )
                         await self.db.update_target_pool_status(target_fname, is_success=True)
                         await log_info(

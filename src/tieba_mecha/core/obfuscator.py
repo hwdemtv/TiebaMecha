@@ -12,7 +12,7 @@ class Obfuscator:
     """内容风控干扰器：利用不可见字符打破哈希重合度，并规避敏感触发词"""
     
     @staticmethod
-    def inject_zero_width_chars(text: str, density: float = 0.3) -> str:
+    def inject_zero_width_chars(text: str, density: float = 0.1) -> str:  # 保守值：从0.3降至0.1，降低可识别性
         """
         在中文/日文/韩文之间随机注入零宽字符，避开英文和 URL 链接。
         

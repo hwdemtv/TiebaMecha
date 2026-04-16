@@ -36,7 +36,7 @@ class SettingsPage:
         self._settings["ai_base_url"] = await self.db.get_setting("ai_base_url", "https://open.bigmodel.cn/api/paas/v4/")
         self._settings["ai_model"] = await self.db.get_setting("ai_model", "glm-4-flash")
         self._settings["ai_system_prompt"] = await self.db.get_setting("ai_system_prompt", "")
-        self._settings["proxy_fallback"] = await self.db.get_setting("proxy_fallback", "true") == "true"
+        self._settings["proxy_fallback"] = await self.db.get_setting("proxy_fallback", "false") == "true"  # 默认关闭，防止IP关联
         self._settings["heartbeat_interval"] = await self.db.get_setting("heartbeat_interval", "2")
         self._settings["delay_min"] = await self.db.get_setting("delay_min", "5.0")
         self._settings["delay_max"] = await self.db.get_setting("delay_max", "15.0")
@@ -124,7 +124,7 @@ class SettingsPage:
         )
         self.proxy_fallback_switch = ft.Switch(
             label="代理自动容灾 (当绑定代理失效时自动尝试池中节点)",
-            value=True,
+            value=False,  # 默认关闭，防止IP关联导致关联封号
             label_position=ft.LabelPosition.RIGHT
         )
         self.heartbeat_field = ft.TextField(

@@ -12,8 +12,8 @@ class TestRateLimiter:
 
     def test_rate_limiter_initialization(self):
         """Test RateLimiter initializes correctly."""
-        limiter = RateLimiter(rpm=15)
-        assert limiter.rpm == 15
+        limiter = RateLimiter(rpm=8)  # 实际默认 RPM 为 8（保守值）
+        assert limiter.rpm == 8
         assert limiter.timestamps == []
 
     def test_rate_limiter_custom_rpm(self):
@@ -35,7 +35,7 @@ class TestRateLimiter:
     @pytest.mark.asyncio
     async def test_rate_limiter_timestamp_cleanup(self):
         """Test that old timestamps are cleaned up."""
-        limiter = RateLimiter(rpm=15)
+        limiter = RateLimiter(rpm=8)  # 保守值
 
         # Add some "old" timestamps (simulate time passing)
         import time

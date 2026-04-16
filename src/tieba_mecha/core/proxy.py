@@ -19,9 +19,17 @@ async def get_best_proxy_config(db: Database, proxy_id: int | None = None) -> Op
         return None
 
     # 如果指定了代理 ID 但失效，且启用了自动容灾，才尝试 Fallback
+    # ⚠️ 默认关闭（"false"）：防止 IP 关联导致关联封号
     if proxy_id:
-        is_fallback_enabled = await db.get_setting("proxy_fallback", "true") == "true"
+        is_fallback_enabled = await db.get_setting("proxy_fallback", "false") == "true"
         if is_fallback_enabled:
+            # ⚠️ 警告：自动容灾切换代理可能导致 IP 关联，增加关联封号风险
+            # 建议：每个账号绑定固定代理，禁用自动容灾
+            from .logger import log_warn
+            await log_warn(
+                "代理容灾已启用：账号可能切换到其他 IP，与该账号历史 IP 不一致会增加关联封号风险。"
+                "建议在「账号管理」中为每个账号绑定固定代理，并关闭「代理自动容灾」。"
+            )
             # 随机选择一个较稳定的代理（前 3 个）
             top_proxies = sorted(proxies, key=lambda p: p.fail_count)[:3]
             proxy = random.choice(top_proxies)
