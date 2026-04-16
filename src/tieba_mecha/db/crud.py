@@ -403,6 +403,49 @@ class Database:
             await session.commit()
             return accounts
 
+    async def update_account_weight(self, account_id: int, weight: int) -> None:
+        """更新单个账号的发帖权重"""
+        async with self.async_session() as session:
+            account = await session.get(Account, account_id)
+            if account:
+                account.post_weight = max(1, min(10, weight))
+                await session.commit()
+
+    async def batch_update_weights(self, weight_updates: list[tuple[int, int]]) -> dict:
+        """
+        批量更新多个账号的权重。
+        
+        Args:
+            weight_updates: [(account_id, weight), ...] 列表
+            
+        Returns:
+            {"updated": count, "failed": count}
+        """
+        updated = 0
+        failed = 0
+        async with self.async_session() as session:
+            for acc_id, weight in weight_updates:
+                try:
+                    account = await session.get(Account, acc_id)
+                    if account:
+                        account.post_weight = max(1, min(10, weight))
+                        updated += 1
+                    else:
+                        failed += 1
+                except Exception:
+                    failed += 1
+            await session.commit()
+        return {"updated": updated, "failed": failed}
+
+    async def get_accounts_with_forums(self) -> list[tuple[Account, list[Forum]]]:
+        """获取所有账号及其关联的贴吧列表"""
+        accounts = await self.get_accounts()
+        result = []
+        for acc in accounts:
+            forums = await self.get_account_forums(acc.id)
+            result.append((acc, forums))
+        return result
+
     # ========== Forum CRUD ==========
 
     async def add_forum(

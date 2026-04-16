@@ -176,6 +176,7 @@ class AccountsPage:
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
             ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=self._bulk_verify_accounts, visible=False),
+            ft.TextButton("一键智能权重", icon=icons.AUTO_AWESOME, on_click=self._auto_calculate_weights, tooltip="根据账号等级/签到成功率/状态等自动计算推荐权重"),
             ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=self._bulk_delete_accounts, style=ft.ButtonStyle(color="error"), visible=False),
             ft.Container(expand=True),
             self.account_stats_info
@@ -1063,6 +1064,90 @@ class AccountsPage:
             ]
         )
         self.page.open(dialog)
+
+    async def _auto_calculate_weights(self, e):
+        """一键自动计算所有账号的推荐权重"""
+        from ..core.batch_post import AutoWeightCalculator
+        
+        self._show_snackbar("正在分析账号数据，计算智能权重...", "info")
+        
+        # 获取所有账号及其关联的贴吧
+        accounts_with_forums = await self.db.get_accounts_with_forums()
+        
+        if not accounts_with_forums:
+            self._show_snackbar("未找到账号数据", "error")
+            return
+        
+        weight_updates = []
+        results = []
+        
+        for account, forums in accounts_with_forums:
+            recommended_weight, details = AutoWeightCalculator.calculate(account, forums)
+            weight_updates.append((account.id, recommended_weight))
+            
+            old_weight = account.post_weight or 5
+            change = ""
+            if recommended_weight > old_weight:
+                change = "↑"
+            elif recommended_weight < old_weight:
+                change = "↓"
+            
+            results.append({
+                "name": account.name or f"账号-{account.id}",
+                "old": old_weight,
+                "new": recommended_weight,
+                "change": change,
+                "details": details,
+            })
+        
+        # 批量更新权重
+        update_result = await self.db.batch_update_weights(weight_updates)
+        
+        # 构建结果展示
+        result_lines = [f"✅ 权重智能计算完成！共分析 {len(results)} 个账号"]
+        result_lines.append(f"更新成功: {update_result['updated']} | 失败: {update_result['failed']}")
+        result_lines.append("")
+        result_lines.append("📊 计算依据：")
+        result_lines.append("• 平均贴吧等级 (30%)")
+        result_lines.append("• 签到成功率 (25%)")
+        result_lines.append("• 账号状态 (20%)")
+        result_lines.append("• 代理绑定 (15%)")
+        result_lines.append("• 验证时效 (10%)")
+        result_lines.append("")
+        result_lines.append("📋 权重变化详情：")
+        
+        # 按变化排序：降权优先 > 不变 > 升权
+        results.sort(key=lambda x: (x["change"] == "↑", x["change"] == "↓", -x["old"]))
+        
+        for r in results[:10]:  # 只显示前10个
+            emoji = "🟢" if r["change"] == "↑" else ("🔴" if r["change"] == "↓" else "⚪")
+            result_lines.append(f"{emoji} {r['name']}: {r['old']} → {r['new']} {r['change']}")
+        
+        if len(results) > 10:
+            result_lines.append(f"... 还有 {len(results) - 10} 个账号")
+        
+        # 显示结果对话框
+        dialog = ft.AlertDialog(
+            title=ft.Text("🧠 智能权重计算报告"),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Text("\n".join(result_lines), size=11, selectable=True),
+                    ft.Container(height=10),
+                    ft.Text("💡 提示：权重越高，该账号在批量发帖时被选中的概率越大。建议定期执行此功能以保持权重与账号状态同步。", 
+                           size=10, color="onSurfaceVariant"),
+                ], tight=True),
+                width=400,
+                height=400,
+            ),
+            actions=[
+                ft.TextButton("确定", on_click=lambda _: self.page.close(dialog)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dialog)
+        
+        # 刷新账号列表显示新权重
+        await self.load_data()
 
     def _navigate(self, page_name: str):
         if self.on_navigate:
