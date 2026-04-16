@@ -15,6 +15,7 @@ from .models import (
     AutoRule,
     Base,
     BatchPostTask,
+    CaptchaEvent,
     CrawlTask,
     Forum,
     MaterialPool,
@@ -105,6 +106,8 @@ class Database:
         # MaterialPool 新字段迁移
         material_columns = [
             ("material_pool", "survival_status", "VARCHAR(20) DEFAULT 'unknown'"),
+            ("material_pool", "death_reason", "VARCHAR(100) DEFAULT ''"),
+            ("material_pool", "last_checked_at", "DATETIME DEFAULT NULL"),
         ]
         for table, column, col_type in material_columns:
             try:
@@ -1126,6 +1129,63 @@ class Database:
             )
             return {row[0]: row[1] for row in result.all() if row[0]}
 
+    async def get_survival_stats(self) -> dict:
+        """获取存活统计概览"""
+        async with self.async_session() as session:
+            from sqlalchemy import func
+            result = await session.execute(
+                select(
+                    MaterialPool.survival_status,
+                    func.count(MaterialPool.id)
+                )
+                .where(MaterialPool.posted_tid.isnot(None))
+                .where(MaterialPool.posted_tid != 0)
+                .group_by(MaterialPool.survival_status)
+            )
+            stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
+            for status, count in result.all():
+                stats[status] = count
+                stats["total"] += count
+            return stats
+
+    async def get_survival_by_account(self) -> list[dict]:
+        """获取按账号分组的存活统计"""
+        async with self.async_session() as session:
+            from sqlalchemy import func
+            result = await session.execute(
+                select(
+                    MaterialPool.posted_account_id,
+                    Account.name,
+                    MaterialPool.survival_status,
+                    func.count(MaterialPool.id)
+                )
+                .join(Account, MaterialPool.posted_account_id == Account.id, isouter=True)
+                .where(MaterialPool.posted_tid.isnot(None))
+                .where(MaterialPool.posted_tid != 0)
+                .group_by(
+                    MaterialPool.posted_account_id,
+                    Account.name,
+                    MaterialPool.survival_status
+                )
+            )
+            
+            # 按账号聚合数据
+            account_stats = {}
+            for account_id, account_name, status, count in result.all():
+                if account_id not in account_stats:
+                    account_stats[account_id] = {
+                        "account_id": account_id,
+                        "account_name": account_name or f"账号{account_id}",
+                        "total": 0,
+                        "alive": 0,
+                        "dead": 0,
+                        "unknown": 0
+                    }
+                account_stats[account_id][status] = count
+                account_stats[account_id]["total"] += count
+            
+            return list(account_stats.values())
+
     async def get_materials(self, status: str | None = None, limit: int | None = None) -> list[MaterialPool]:
         from sqlalchemy import text
         async with self.async_session() as session:
@@ -1175,12 +1235,14 @@ class Database:
                 if posted_account_id is not None: m.posted_account_id = posted_account_id
                 await session.commit()
 
-    async def update_material_survival_status(self, material_id: int, status: str) -> None:
+    async def update_material_survival_status(self, material_id: int, status: str, death_reason: str = "") -> None:
         """更新并持久化物料的存活探测状态"""
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
             if m:
                 m.survival_status = status
+                m.death_reason = death_reason
+                m.last_checked_at = datetime.now()
                 await session.commit()
 
     async def update_material_bump(self, material_id: int) -> None:
@@ -1360,6 +1422,102 @@ class Database:
                 for tag in row.split(","):
                     groups.add(tag.strip())
             return sorted(list(groups))
+
+    # ==================== 验证码事件管理 ====================
+
+    async def save_captcha_event(
+        self,
+        account_id: int | None = None,
+        task_id: int | None = None,
+        event_type: str = "captcha",
+        reason: str = "",
+    ) -> int:
+        """保存验证码事件"""
+        from .models import CaptchaEvent
+        async with self.async_session() as session:
+            event = CaptchaEvent(
+                account_id=account_id,
+                task_id=task_id,
+                event_type=event_type,
+                reason=reason,
+                status="pending",
+            )
+            session.add(event)
+            await session.commit()
+            await session.refresh(event)
+            return event.id
+
+    async def get_captcha_events(
+        self,
+        account_id: int | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """获取验证码事件列表"""
+        from .models import CaptchaEvent
+        async with self.async_session() as session:
+            query = select(CaptchaEvent).order_by(CaptchaEvent.created_at.desc())
+            if account_id is not None:
+                query = query.where(CaptchaEvent.account_id == account_id)
+            if status is not None:
+                query = query.where(CaptchaEvent.status == status)
+            query = query.limit(limit)
+            result = await session.execute(query)
+            events = result.scalars().all()
+            return [
+                {
+                    "id": e.id,
+                    "account_id": e.account_id,
+                    "task_id": e.task_id,
+                    "event_type": e.event_type,
+                    "reason": e.reason,
+                    "status": e.status,
+                    "created_at": e.created_at,
+                    "resolved_at": e.resolved_at,
+                    "resolved_by": e.resolved_by,
+                    "notes": e.notes,
+                }
+                for e in events
+            ]
+
+    async def resolve_captcha_event(
+        self,
+        event_id: int,
+        resolved_by: str = "manual",
+        notes: str = "",
+    ) -> bool:
+        """解决验证码事件"""
+        from .models import CaptchaEvent
+        async with self.async_session() as session:
+            event = await session.get(CaptchaEvent, event_id)
+            if event:
+                event.status = "resolved"
+                event.resolved_at = datetime.now()
+                event.resolved_by = resolved_by
+                event.notes = notes
+                await session.commit()
+                return True
+            return False
+
+    async def get_pending_captcha_count(self) -> int:
+        """获取待处理的验证码事件数量"""
+        from .models import CaptchaEvent
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(CaptchaEvent).where(CaptchaEvent.status == "pending")
+            )
+            return len(result.scalars().all())
+
+    async def clear_resolved_captcha_events(self) -> int:
+        """清除已解决的验证码事件记录"""
+        from .models import CaptchaEvent
+        from sqlalchemy import delete as sql_delete
+        async with self.async_session() as session:
+            result = await session.execute(
+                sql_delete(CaptchaEvent).where(CaptchaEvent.status == "resolved")
+            )
+            await session.commit()
+            return result.rowcount
 
     async def get_all_target_pools_raw(self) -> list[TargetPool]:
         async with self.async_session() as session:

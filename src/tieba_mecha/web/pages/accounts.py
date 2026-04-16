@@ -29,6 +29,11 @@ class AccountsPage:
         self._matrix_stats = []
         self._matrix_search_text = ""
         self._active_tab_index = 0
+        
+        # 存活分析数据
+        self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
+        self._survival_by_account = []
+        self._survival_search_text = ""
 
     async def load_data(self):
         """加载数据"""
@@ -46,6 +51,10 @@ class AccountsPage:
         # 加载全吧库统计
         self._matrix_stats = await self.db.get_forum_matrix_stats()
         
+        # 加载存活统计数据
+        self._survival_stats = await self.db.get_survival_stats()
+        self._survival_by_account = await self.db.get_survival_by_account()
+        
         self.refresh_ui()
 
     def refresh_ui(self):
@@ -61,11 +70,19 @@ class AccountsPage:
                 else:
                     self.account_stats_info.visible = False
                 self.page.update()
-        else:
+        elif self._active_tab_index == 1:
             if hasattr(self, "matrix_list"):
                 self.matrix_list.controls = self._build_matrix_items()
                 self._update_matrix_header()
                 self.page.update()
+        elif self._active_tab_index == 2:
+            if hasattr(self, "survival_list"):
+                self.survival_list.controls = self._build_survival_items()
+                self._update_survival_header()
+                self.page.update()
+        elif self._active_tab_index == 3:
+            if hasattr(self, "exception_list"):
+                self.page.run_task(self._load_exception_events)
 
     def build(self) -> ft.Control:
         # 主标签页切换逻辑
@@ -82,6 +99,16 @@ class AccountsPage:
                     text="全域战略吧库",
                     icon=icons.HUB_ROUNDED,
                     content=self._build_strategic_tab(),
+                ),
+                ft.Tab(
+                    text="存活分析",
+                    icon=icons.MONITOR_HEART_ROUNDED,
+                    content=self._build_survival_tab(),
+                ),
+                ft.Tab(
+                    text="异常记录",
+                    icon=icons.WARNING_ROUNDED,
+                    content=self._build_exception_tab(),
                 ),
             ],
             expand=True,
@@ -175,8 +202,8 @@ class AccountsPage:
 
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
-            ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=lambda e: self.page.run_task(self._bulk_verify_accounts, e), visible=False),
             ft.TextButton("一键智能权重", icon=icons.AUTO_AWESOME, on_click=lambda e: self.page.run_task(self._auto_calculate_weights, e), tooltip="根据账号等级/签到成功率/状态等自动计算推荐权重"),
+            ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=lambda e: self.page.run_task(self._bulk_verify_accounts, e), visible=False),
             ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=lambda e: self.page.run_task(self._bulk_delete_accounts, e), style=ft.ButtonStyle(color="error"), visible=False),
             ft.Container(expand=True),
             self.account_stats_info
@@ -245,6 +272,320 @@ class AccountsPage:
             ],
             spacing=10,
         )
+
+    def _build_survival_tab(self) -> ft.Control:
+        """存活分析标签页"""
+        # 存活率概览卡片
+        self.survival_rate_display = ft.Text("存活率: --%", size=14, weight=ft.FontWeight.BOLD, color="primary")
+        
+        self.survival_header_info = ft.Text(
+            "总发帖数: 0 | 存活: 0 | 阵亡: 0 | 未知: 0",
+            size=12,
+            color="onSurfaceVariant"
+        )
+        
+        self.survival_check_btn = ft.TextButton(
+            "🔍 批量检测存活",
+            icon=icons.REFRESH_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._bulk_check_survival, e),
+            tooltip="检测所有帖子的存活状态",
+        )
+        
+        self.survival_list = ft.ListView(
+            expand=True,
+            spacing=10,
+            padding=10,
+        )
+        
+        return ft.Column(
+            controls=[
+                ft.Row([
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("存活率", size=11, color="onSurfaceVariant"),
+                            self.survival_rate_display,
+                        ], spacing=2),
+                        padding=10,
+                        bgcolor=with_opacity(0.1, "primary"),
+                        border_radius=8,
+                    ),
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("总统计", size=11, color="onSurfaceVariant"),
+                            self.survival_header_info,
+                        ], spacing=2),
+                        padding=10,
+                        expand=True,
+                    ),
+                    self.survival_check_btn,
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Divider(color=with_opacity(0.1, "primary"), height=1),
+                ft.Container(
+                    content=self.survival_list,
+                    expand=True,
+                ),
+            ],
+            spacing=10,
+        )
+
+    def _update_survival_header(self):
+        """更新存活分析头部信息"""
+        stats = self._survival_stats
+        total = stats.get("total", 0)
+        alive = stats.get("alive", 0)
+        dead = stats.get("dead", 0)
+        unknown = stats.get("unknown", 0)
+        
+        rate = (alive / total * 100) if total > 0 else 0
+        self.survival_rate_display.value = f"存活率: {rate:.1f}%"
+        self.survival_rate_display.color = "#4CAF50" if rate >= 80 else "#FF9800" if rate >= 50 else "#F44336"
+        
+        self.survival_header_info.value = f"总发帖数: {total} | 存活: {alive} | 阵亡: {dead} | 未知: {unknown}"
+
+    def _build_survival_items(self) -> list:
+        """构建存活分析列表项"""
+        items = []
+        
+        # 过滤
+        filtered = self._survival_by_account
+        if self._survival_search_text:
+            search = self._survival_search_text.lower()
+            filtered = [a for a in filtered if search in a.get("account_name", "").lower()]
+        
+        if not filtered:
+            items.append(ft.Container(
+                content=ft.Text("暂无发帖记录或存活数据", size=13, color="onSurfaceVariant"),
+                padding=20,
+                alignment=ft.alignment.center,
+            ))
+            return items
+        
+        for acc_stat in filtered:
+            total = acc_stat.get("total", 0)
+            alive = acc_stat.get("alive", 0)
+            dead = acc_stat.get("dead", 0)
+            unknown = acc_stat.get("unknown", 0)
+            rate = (alive / total * 100) if total > 0 else 0
+            
+            # 状态颜色
+            if rate >= 80:
+                status_color = "#4CAF50"
+                status_icon = icons.CHECK_CIRCLE_ROUNDED
+            elif rate >= 50:
+                status_color = "#FF9800"
+                status_icon = icons.WARNING_AMBER_ROUNDED
+            else:
+                status_color = "#F44336"
+                status_icon = icons.ERROR_OUTLINE
+            
+            card = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(acc_stat.get("account_name", "未知账号"), size=14, weight=ft.FontWeight.BOLD),
+                        ft.Container(expand=True),
+                        ft.Icon(status_icon, color=status_color, size=18),
+                        ft.Text(f"{rate:.0f}%", size=13, weight=ft.FontWeight.BOLD, color=status_color),
+                    ]),
+                    ft.Row([
+                        ft.Text(f"总发帖: {total}", size=12, color="onSurfaceVariant"),
+                        ft.Container(expand=True),
+                        ft.Text(f"✅存活: {alive}", size=12, color="#4CAF50"),
+                        ft.Text(f"❌阵亡: {dead}", size=12, color="#F44336"),
+                        ft.Text(f"❓未知: {unknown}", size=12, color="#9E9E9E"),
+                    ]),
+                    ft.Container(
+                        content=ft.ProgressBar(
+                            value=rate / 100,
+                            color=status_color,
+                            bgcolor=with_opacity(0.2, status_color),
+                            height=6,
+                        ),
+                        margin=ft.margin.only(top=5),
+                    ),
+                ], spacing=5),
+                padding=15,
+                bgcolor=with_opacity(0.05, "onSurface"),
+                border_radius=8,
+                border=ft.border.all(1, with_opacity(0.1, "primary")),
+            )
+            items.append(card)
+        
+        return items
+
+    async def _bulk_check_survival(self, e):
+        """批量检测所有帖子的存活状态"""
+        from ...core.post import check_post_survival
+        
+        self._show_snackbar("🚀 正在启动存活检测任务...", "info")
+        
+        try:
+            # 获取所有有 posted_tid 的物料
+            materials = await self.db.get_materials(status="success")
+            targets = [m for m in materials if m.posted_tid and m.posted_tid != 0]
+            
+            if not targets:
+                self._show_snackbar("没有需要检测的帖子", "warning")
+                return
+            
+            alive_count = 0
+            dead_count = 0
+            total = len(targets)
+            
+            for i, m in enumerate(targets):
+                try:
+                    status, reason = await check_post_survival(m.posted_tid)
+                    await self.db.update_material_survival_status(m.id, status, reason)
+                    
+                    if status == "alive":
+                        alive_count += 1
+                    else:
+                        dead_count += 1
+                except Exception as ex:
+                    await self.db.update_material_survival_status(m.id, "dead", str(ex))
+                    dead_count += 1
+                
+                # 每 10 条刷新一次
+                if (i + 1) % 10 == 0:
+                    self._survival_stats = await self.db.get_survival_stats()
+                    self._survival_by_account = await self.db.get_survival_by_account()
+                    self.refresh_ui()
+                
+                import asyncio
+                await asyncio.sleep(0.3)
+            
+            # 重新加载数据
+            self._survival_stats = await self.db.get_survival_stats()
+            self._survival_by_account = await self.db.get_survival_by_account()
+            self.refresh_ui()
+            
+            self._show_snackbar(f"✅ 检测完成: 存活 {alive_count} 条, 阵亡 {dead_count} 条", "success")
+            
+        except Exception as ex:
+            self._show_snackbar(f"❌ 检测失败: {str(ex)}", "error")
+
+    def _build_exception_tab(self) -> ft.Control:
+        """异常记录标签页"""
+        self.exception_pending_count = ft.Text("待处理: 0", size=12, color="error")
+        self.exception_list = ft.ListView(
+            expand=True,
+            spacing=10,
+            padding=10,
+        )
+        self.exception_clear_btn = ft.TextButton(
+            "清除已解决记录",
+            icon=icons.DELETE_SWEEP,
+            on_click=lambda e: self.page.run_task(self._clear_resolved_events, e),
+        )
+        
+        return ft.Column(
+            controls=[
+                ft.Row([
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("验证码/异常事件", size=11, color="onSurfaceVariant"),
+                            self.exception_pending_count,
+                        ], spacing=2),
+                        padding=10,
+                        bgcolor=with_opacity(0.1, "error"),
+                        border_radius=8,
+                    ),
+                    ft.Container(expand=True),
+                    self.exception_clear_btn,
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Divider(color=with_opacity(0.1, "error"), height=1),
+                ft.Container(
+                    content=self.exception_list,
+                    expand=True,
+                ),
+            ],
+            spacing=10,
+        )
+
+    async def _load_exception_events(self):
+        """加载异常事件列表"""
+        events = await self.db.get_captcha_events(limit=100)
+        items = []
+        
+        pending_count = sum(1 for e in events if e["status"] == "pending")
+        self.exception_pending_count.value = f"待处理: {pending_count}"
+        self.exception_pending_count.color = "#F44336" if pending_count > 0 else "#4CAF50"
+        
+        if not events:
+            items.append(ft.Container(
+                content=ft.Text("暂无异常事件记录", size=13, color="onSurfaceVariant"),
+                padding=20,
+                alignment=ft.alignment.center,
+            ))
+            self.exception_list.controls = items
+            return
+        
+        for event in events:
+            status_color = "#F44336" if event["status"] == "pending" else "#4CAF50"
+            status_icon = icons.WARNING_ROUNDED if event["status"] == "pending" else icons.CHECK_CIRCLE
+            status_text = "待处理" if event["status"] == "pending" else "已解决"
+            
+            created_at = event["created_at"].strftime("%y-%m-%d %H:%M") if event["created_at"] else "-"
+            resolved_at = event["resolved_at"].strftime("%y-%m-%d %H:%M") if event["resolved_at"] else "-"
+            
+            card = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(status_icon, color=status_color, size=20),
+                        ft.Text(f"验证码事件 #{event['id']}", size=14, weight=ft.FontWeight.BOLD),
+                        ft.Container(expand=True),
+                        ft.Container(
+                            content=ft.Text(status_text, size=11, color="white"),
+                            padding=ft.padding.only(left=8, right=8, top=2, bottom=2),
+                            bgcolor=status_color,
+                            border_radius=10,
+                        ),
+                    ]),
+                    ft.Container(height=5),
+                    ft.Row([
+                        ft.Text(f"触发时间: {created_at}", size=12, color="onSurfaceVariant"),
+                        ft.Container(expand=True),
+                        ft.Text(f"原因: {event['reason'] or '未知'}", size=12, color="onSurfaceVariant"),
+                    ]),
+                    ft.Row([
+                        ft.Text(f"账号ID: {event['account_id'] or '-'}", size=12, color="onSurfaceVariant"),
+                        ft.Container(expand=True),
+                        ft.Text(f"任务ID: {event['task_id'] or '-'}", size=12, color="onSurfaceVariant"),
+                    ]),
+                    ft.Container(height=5),
+                    ft.Row([
+                        ft.Text(f"解决时间: {resolved_at}", size=11, color="onSurfaceVariant"),
+                        ft.Container(expand=True),
+                        ft.TextButton(
+                            "手动解决",
+                            icon=icons.CHECK,
+                            on_click=lambda e, event_id=event['id']: self.page.run_task(self._resolve_event, e, event_id),
+                            visible=event["status"] == "pending",
+                        ),
+                    ]),
+                ], spacing=3),
+                padding=15,
+                bgcolor=with_opacity(0.05, "onSurface"),
+                border_radius=8,
+                border=ft.border.all(1, with_opacity(0.2, status_color)),
+            )
+            items.append(card)
+        
+        self.exception_list.controls = items
+
+    async def _resolve_event(self, e, event_id: int):
+        """手动解决异常事件"""
+        success = await self.db.resolve_captcha_event(event_id, resolved_by="manual", notes="用户手动确认")
+        if success:
+            self._show_snackbar(f"✅ 事件 #{event_id} 已标记为已解决", "success")
+            await self._load_exception_events()
+        else:
+            self._show_snackbar(f"❌ 解决失败", "error")
+
+    async def _clear_resolved_events(self, e):
+        """清除已解决的异常事件记录"""
+        count = await self.db.clear_resolved_captcha_events()
+        self._show_snackbar(f"✅ 已清除 {count} 条已解决记录", "success")
+        await self._load_exception_events()
 
     def _on_tab_change(self, e):
         self._active_tab_index = e.control.selected_index
@@ -1025,10 +1366,10 @@ class AccountsPage:
 
     def _update_bulk_bar(self):
         has_sel = len(self._selected_ids) > 0
-        self.bulk_bar.controls[1].visible = has_sel
         self.bulk_bar.controls[2].visible = has_sel
-        self.bulk_bar.controls[1].text = f"批量验证 ({len(self._selected_ids)})"
-        self.bulk_bar.controls[2].text = f"批量删除 ({len(self._selected_ids)})"
+        self.bulk_bar.controls[3].visible = has_sel
+        self.bulk_bar.controls[2].text = f"批量验证 ({len(self._selected_ids)})"
+        self.bulk_bar.controls[3].text = f"批量删除 ({len(self._selected_ids)})"
         self.page.update()
 
     async def _bulk_verify_accounts(self, e):

@@ -72,6 +72,7 @@ class SignPage:
                 raw_sched = await self.db.get_setting("schedule", "{}")
                 sched = json.loads(raw_sched) if raw_sched else {}
                 self.daemon_time.value = sched.get("sign_time", "08:00")
+                self.daemon_switch.value = sched.get("enabled", False)
                 
                 # 同步已保存的执行模式说明
                 saved_mode = sched.get("mode", "single")

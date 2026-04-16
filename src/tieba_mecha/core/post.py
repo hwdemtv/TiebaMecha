@@ -447,3 +447,48 @@ async def add_post(
                 return False, "回复失败"
         except Exception as e:
             return False, f"回复失败: {str(e)}"
+
+
+async def check_post_survival(tid: int) -> tuple[str, str]:
+    """
+    检测帖子是否存活
+
+    Args:
+        tid: 主题帖ID
+
+    Returns:
+        (存活状态: "alive"/"dead", 被删原因)
+    """
+    try:
+        async with aiotieba.Client() as client:
+            res = await client.get_posts(tid)
+            
+            # 检测验证码拦截
+            if res and hasattr(res, 'text') and '验证码' in str(res.text or ''):
+                return "dead", "captcha_required"
+            
+            if res and res.forum and res.forum.fid > 0:
+                # 增强判断：检查帖子基本信息完整性
+                if res.thread:
+                    # 有回复数说明帖子健康（被删帖通常没有回复数据）
+                    if res.thread.reply_num is not None:
+                        return "alive", ""
+                    # 有标题但无回复数，也视为存活
+                    if res.thread.title:
+                        return "alive", ""
+                # 兜底：只要有有效的 forum fid 就视为存活
+                return "alive", ""
+            else:
+                return "dead", "unknown_error"
+    except Exception as ex:
+        error_msg = str(ex).lower()
+        if "captcha" in error_msg or "验证码" in str(ex):
+            return "dead", "captcha_required"
+        elif "deleted" in error_msg or "removed" in error_msg:
+            return "dead", "deleted_by_user"
+        elif "banned" in error_msg or "blocked" in error_msg:
+            return "dead", "banned_by_mod"
+        elif "not found" in error_msg or "404" in error_msg:
+            return "dead", "auto_removed"
+        else:
+            return "dead", "error"
