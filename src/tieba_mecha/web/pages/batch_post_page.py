@@ -1978,17 +1978,17 @@ class BatchPostPage:
         )
 
         # 3. 参数配置
-        self.post_count = ft.TextField(label="发布总数 (帖)", value="10", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True)
-        self.min_delay = ft.TextField(label="最小延迟 (秒)", value="60", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True)
-        self.max_delay = ft.TextField(label="最大延迟 (秒)", value="300", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True)
-        self.use_ai_switch = ft.Switch(label="启用 AI 智能改写", value=True)
+        self.post_count = ft.TextField(label="发布总数 (帖)", value="10", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, tooltip="建议: 总数 ≤ 账号数×3，避免单账号集中发帖")
+        self.min_delay = ft.TextField(label="最小延迟 (秒)", value="120", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True, tooltip="建议: ≥120秒，避开凌晨1-6点高风险时段")
+        self.max_delay = ft.TextField(label="最大延迟 (秒)", value="600", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True, tooltip="建议: ≥300秒，降低被检测风险")
+        self.use_ai_switch = ft.Switch(label="启用 AI 智能改写", value=False)  # 默认关闭，避免AI生成内容过于规律
         self.use_schedule = ft.Switch(label="定时执行计划", value=False, on_change=lambda e: self._toggle_schedule(e))
         self.schedule_time = ft.TextField(
             label="计划时间 (YYYY-MM-DD HH:mm)", 
             value=(datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
             visible=False, text_size=12
         )
-        self.interval_hours = ft.TextField(label="循环周期 (小时)", value="0", visible=False, text_size=12, input_filter=ft.NumbersOnlyInputFilter())
+        self.interval_hours = ft.TextField(label="循环周期 (小时)", value="0", visible=False, text_size=12, input_filter=ft.NumbersOnlyInputFilter(), tooltip="建议: ≥6小时，避免频繁触发导致封号")
         
         # 4. 账号与策略
         self.strategy_dropdown = ft.Dropdown(
@@ -2106,7 +2106,18 @@ class BatchPostPage:
                                 self.use_schedule,
                                 self.schedule_time,
                                 ft.Row([self.min_delay, self.max_delay], spacing=10),
-                                ft.Divider(height=10, color="transparent"),
+                                # 时段风险提示卡片
+                                ft.Container(
+                                    content=ft.Row([
+                                        ft.Icon(name=icons.WARNING_AMBER_ROUNDED, color="orange", size=16),
+                                        ft.Text("风控提示: 凌晨1-6点为高风险时段，建议延迟设置≥180秒", 
+                                               size=10, color="onSurfaceVariant"),
+                                    ], spacing=5),
+                                    padding=8,
+                                    bgcolor=with_opacity(0.08, "orange"),
+                                    border_radius=8,
+                                ),
+                                ft.Divider(height=5, color="transparent"),
                                 self.start_btn,
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
