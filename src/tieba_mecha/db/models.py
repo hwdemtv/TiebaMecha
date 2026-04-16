@@ -226,6 +226,7 @@ class MaterialPool(Base):
     # --- 自动回帖(自顶) 增强字段 ---
     posted_tid: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="发帖成功后的线程ID")
     posted_fname: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="发布所在的贴吧")
+    posted_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="精确发帖时间")
     posted_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="发布该物料的账号ID")
     is_auto_bump: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启自动回帖")
     bump_count: Mapped[int] = mapped_column(Integer, default=0, comment="已回帖(自顶)次数")

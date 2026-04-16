@@ -140,6 +140,7 @@ class Database:
             "ALTER TABLE material_pool ADD COLUMN is_auto_bump BOOLEAN DEFAULT 0",
             "ALTER TABLE material_pool ADD COLUMN bump_count INTEGER DEFAULT 0",
             "ALTER TABLE material_pool ADD COLUMN last_bumped_at DATETIME DEFAULT NULL",
+            "ALTER TABLE material_pool ADD COLUMN posted_time DATETIME DEFAULT NULL",
         ]:
             try:
                 async with self.engine.begin() as conn:
@@ -1152,7 +1153,8 @@ class Database:
         last_error: str | None = None, 
         posted_fname: str | None = None, 
         posted_tid: int | None = None,
-        posted_account_id: int | None = None
+        posted_account_id: int | None = None,
+        posted_time: datetime | None = None
     ) -> None:
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
@@ -1160,6 +1162,8 @@ class Database:
                 m.status = status
                 from datetime import datetime
                 m.last_used_at = datetime.now()
+                if posted_time is not None:
+                    m.posted_time = posted_time
                 
                 # [修复] 状态重置为 pending 或重新发送成功时，清空自顶计数与记录
                 if status in ("pending", "success"):

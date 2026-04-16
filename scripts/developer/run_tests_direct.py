@@ -175,8 +175,8 @@ def run_tests():
     try:
         from tieba_mecha.core.batch_post import RateLimiter
 
-        limiter = RateLimiter(rpm=15)
-        assert limiter.rpm == 15
+        limiter = RateLimiter(rpm=8)  # 保守值
+        assert limiter.rpm == 8
         assert limiter.timestamps == []
 
         async def test_limiter():

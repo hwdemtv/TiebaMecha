@@ -100,8 +100,12 @@ class MaintManager:
 
                     # 步骤 B: 随机互动 (点赞) 与 破冰机制
                     
-                    # 对于新号，大幅降低点赞概率（甚至接近0），优先做破冰关注
-                    agree_prob = 0.05 if is_cold_state else 0.6
+                    # 拟人化点赞概率：避免太规律被检测
+                    # - 新号：从 5% 提升到 20%（太低像僵尸号）
+                    # - 老号：从 60% 降至 40%（更自然，避免每轮必点）
+                    # - 增加随机波动 (±10%) 降低可识别性
+                    base_prob = 0.20 if is_cold_state else 0.40
+                    agree_prob = base_prob + random.uniform(-0.1, 0.1)  # ±10% 随机波动
                     if random.random() < agree_prob:
                         await log_info(f"[BioWarming] {account_name} 觉得不错，随手点了一个赞。")
                         try:
@@ -109,12 +113,16 @@ class MaintManager:
                         except Exception as e:
                             await log_warn(f"[BioWarming] 点赞异常: {str(e)}")
                         await self._human_sleep(2, 5)
+                    else:
+                        await log_info(f"[BioWarming] {account_name} 看了看，没点。")
                     
                     # 破冰式关注 (仅在新号且处于公域探索模式时触发)
+                    # 关注概率保持 25%，但增加随机延迟模拟真实操作
                     if is_cold_state and is_public_exploration:
                         if random.random() < 0.25:  # 25% 的概率关注该公域吧
                             await log_info(f"[BioWarming] {account_name} 【破冰】尝试关注探索吧: {target_forum_name}")
                             try:
+                                await self._human_sleep(3, 10)  # 增加操作前延迟，更像真人
                                 await client.follow_forum(target_forum_name)
                             except Exception as e:
                                 await log_warn(f"[BioWarming] 破冰关注异常: {str(e)}")
