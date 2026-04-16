@@ -1067,7 +1067,7 @@ class AccountsPage:
 
     async def _auto_calculate_weights(self, e):
         """一键自动计算所有账号的推荐权重"""
-        from ..core.batch_post import AutoWeightCalculator
+        from ...core.batch_post import AutoWeightCalculator
         
         self._show_snackbar("正在分析账号数据，计算智能权重...", "info")
         
