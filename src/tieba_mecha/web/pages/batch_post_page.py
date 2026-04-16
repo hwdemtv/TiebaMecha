@@ -670,8 +670,9 @@ class BatchPostPage:
                                 ft.DataCell(ft.Text(str(m.id))),
                                 ft.DataCell(ft.Text(display_t, tooltip=display_t)),
                                 ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
-                                ft.DataCell(ft.Text(str(m.posted_account_id) if m.posted_account_id else "-")),
-                                ft.DataCell(ft.Text(m.last_used_at.strftime("%y-%m-%d %H:%M") if m.last_used_at else "-")),
+                                ft.DataCell(ft.Text(
+                                    next((a.name for a in self._accounts if a.id == m.posted_account_id), str(m.posted_account_id) if m.posted_account_id else "-"),
+                                    weight=ft.FontWeight.BOLD, color="primary")),
                                 ft.DataCell(ft.Text(m.posted_time.strftime("%y-%m-%d %H:%M") if m.posted_time else "-")),
                                 ft.DataCell(ft.Row([
                                     ft.IconButton(
@@ -2033,7 +2034,6 @@ class BatchPostPage:
                 ft.DataColumn(ft.Text("发布标题", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("最终着陆吧", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("发帖账号", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("投递时间", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("发帖时间", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("时光溯洄", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("自顶状态", size=11, weight=ft.FontWeight.BOLD)),
@@ -2049,8 +2049,16 @@ class BatchPostPage:
         self.post_count = ft.TextField(label="发布总数 (帖)", value="10", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, tooltip="建议: 总数 ≤ 账号数×3，避免单账号集中发帖")
         self.min_delay = ft.TextField(label="最小延迟 (秒)", value="120", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True, tooltip="建议: ≥120秒，避开凌晨1-6点高风险时段")
         self.max_delay = ft.TextField(label="最大延迟 (秒)", value="600", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True, tooltip="建议: ≥300秒，降低被检测风险")
-        self.use_ai_switch = ft.Switch(label="启用 AI 智能改写", value=False)  # 默认关闭，避免AI生成内容过于规律
-        self.use_schedule = ft.Switch(label="定时执行计划", value=False, on_change=lambda e: self._toggle_schedule(e))
+        self.use_ai_switch = ft.Switch(
+            label="启用 AI 智能改写",
+            value=False,
+            on_change=lambda e: self.page.run_task(self._auto_save_switch, "use_ai_rewrite", e.control.value)
+        )
+        self.use_schedule = ft.Switch(
+            label="定时执行计划",
+            value=False,
+            on_change=lambda e: (self._toggle_schedule(e), self.page.run_task(self._auto_save_switch, "use_schedule", e.control.value))[1]
+        )
         self.schedule_time = ft.TextField(
             label="计划时间 (YYYY-MM-DD HH:mm)", 
             value=(datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
@@ -2328,6 +2336,10 @@ class BatchPostPage:
             await self.load_data()
         else:
             self._show_snackbar("删除失败", "error")
+
+    async def _auto_save_switch(self, key: str, value: bool):
+        """自动保存开关状态"""
+        await self.db.set_setting(key, "1" if value else "0")
 
     def _toggle_schedule(self, e):
         self.schedule_time.visible = e.control.value
