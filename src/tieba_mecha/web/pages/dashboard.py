@@ -22,7 +22,8 @@ from ..components.icons import (
     TERMINAL_ROUNDED, SIGNAL_CELLULAR_ALT, NETWORK_CHECK_ROUNDED,
     GROUP, FLASH_ON_ROUNDED, POWER_SETTINGS_NEW_ROUNDED,
     VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, MEMORY_ROUNDED,
-    WARNING_AMBER_ROUNDED, SEND_ROUNDED, PLAY_ARROW_ROUNDED
+    WARNING_AMBER_ROUNDED, SEND_ROUNDED, PLAY_ARROW_ROUNDED,
+    FAVORITE_ROUNDED
 )
 
 
@@ -35,6 +36,7 @@ class DashboardPage:
         self.on_navigate = on_navigate
         self._stats = {"total": 0, "success": 0, "failure": 0}
         self._sys_stats = {"accounts": 0, "active_proxies": 0, "pending_batch": 0}
+        self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._recent_forums = []
         self._ai_api_key_set = False  # AI API Key 是否已配置
         
@@ -57,6 +59,9 @@ class DashboardPage:
         
         batch_tasks = await self.db.get_pending_batch_tasks()
         self._sys_stats["pending_batch"] = len(batch_tasks)
+        
+        # 加载存活统计数据
+        self._survival_stats = await self.db.get_survival_stats()
         
         # 加载最近贴吧
         account = await self.db.get_active_account()
@@ -121,6 +126,25 @@ class DashboardPage:
         if hasattr(self, "sys_hud"):
             self.sys_hud.left_value = str(self._sys_stats["accounts"])
             self.sys_hud.right_value = str(self._sys_stats["pending_batch"])
+            
+        # 更新存活率显示
+        if hasattr(self, "survival_hud"):
+            stats = self._survival_stats
+            total = stats.get("total", 0)
+            alive = stats.get("alive", 0)
+            rate = (alive / total * 100) if total > 0 else 0
+            self.survival_hud.left_value = f"{rate:.0f}%"
+            self.survival_hud.right_value = f"{alive}/{total}"
+            
+            # 更新颜色
+            if rate >= 80:
+                color = "#4CAF50"
+            elif rate >= 50:
+                color = "#FF9800"
+            else:
+                color = "#F44336"
+            self.survival_hud.left_value_color = color
+            self.survival_hud.right_value_color = color
             
             ai_configured = bool(self._ai_api_key_set)
             self.ai_status_icon.name = MEMORY_ROUNDED if ai_configured else WARNING_AMBER_ROUNDED
@@ -195,10 +219,29 @@ class DashboardPage:
             right_value=str(self._sys_stats["pending_batch"]),
             right_icon=SCHEDULE_ROUNDED,
         )
+        
+        # 存活率 HUD
+        stats = self._survival_stats
+        total = stats.get("total", 0)
+        alive = stats.get("alive", 0)
+        rate = (alive / total * 100) if total > 0 else 0
+        rate_color = "#4CAF50" if rate >= 80 else "#FF9800" if rate >= 50 else "#F44336"
+        
+        self.survival_hud = DualHUD(
+            left_title="SURVIVAL / 存活率",
+            left_value=f"{rate:.0f}%",
+            left_icon=FAVORITE_ROUNDED,
+            right_title="ALIVE / 已存活",
+            right_value=f"{alive}/{total}",
+            right_icon=VERIFIED_ROUNDED,
+            left_value_color=rate_color,
+            right_value_color=rate_color,
+        )
 
         hud_section = ft.Row([
             ft.Container(content=self.hud, expand=True),
             ft.Container(content=self.sys_hud, expand=True),
+            ft.Container(content=self.survival_hud, expand=True),
         ], spacing=20)
 
         # --- AI 神经元状态横幅 ---

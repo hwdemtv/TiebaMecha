@@ -72,12 +72,25 @@ class BatchPostPage:
                     # 只同步已探测过的有效状态，checking 状态不持久化以防卡死
                     self._survival_cache[m.posted_tid] = m.survival_status
 
-            # [自顶配置同步] 加载 max_bump_count 到内存缓存
+# [自顶配置同步] 加载 max_bump_count 到内存缓存
             max_bump_raw = await self.db.get_setting("max_bump_count")
             self._max_bump_count = int(max_bump_raw) if max_bump_raw else 20
             
+            # [自顶配置同步] 恢复 AI 改写与定时执行开关状态
+            ai_raw = await self.db.get_setting("use_ai_rewrite")
+            if ai_raw is not None:
+                self.use_ai_switch.value = ai_raw == "1"
+            
+            sched_raw = await self.db.get_setting("use_schedule")
+            if sched_raw is not None:
+                self.use_schedule.value = sched_raw == "1"
+            
+            # [自顶配置同步] 恢复矩阵协同模式开关
+            matrix_raw = await self.db.get_setting("bump_matrix_enabled")
+            if matrix_raw is not None:
+                self.bump_matrix_switch.value = matrix_raw == "1"
+            
             # 首次加载初始化默认选择：仅勾选状态正常的账号
-            if not self._initial_load_done:
                 for acc in self._accounts:
                     if acc.status == "active":
                         self._selected_account_ids.add(acc.id)
@@ -142,13 +155,17 @@ class BatchPostPage:
                 cooldown = 45  # 默认值
                 self.bump_cooldown_field.value = str(cooldown)
             
-            # 矩阵模式开关
+# 矩阵模式开关
             matrix_enabled = "1" if self.bump_matrix_switch.value else "0"
+            ai_enabled = "1" if self.use_ai_switch.value else "0"
+            schedule_enabled = "1" if self.use_schedule.value else "0"
             
             # 写入数据库
             await self.db.set_setting("max_bump_count", str(max_count))
             await self.db.set_setting("bump_cooldown_minutes", str(cooldown))
             await self.db.set_setting("bump_matrix_enabled", matrix_enabled)
+            await self.db.set_setting("use_ai_rewrite", ai_enabled)
+            await self.db.set_setting("use_schedule", schedule_enabled)
             
             # 同步更新内存缓存
             self._max_bump_count = max_count
@@ -776,43 +793,90 @@ class BatchPostPage:
         dead_count = 0
         total = len(targets)
         
-        try:
-            import aiotieba
-            async with aiotieba.Client() as client:
-                for i, m in enumerate(targets):
-                    tid = m.posted_tid
-                    self.archive_status_text.value = f"正在探测 ({i+1}/{total}): {m.title[:15]}..."
-                    self.archive_progress_bar.value = (i + 1) / total
-                    self.page.update()
-                    
-                    try:
+        # 并发控制：最多同时探测3个帖子
+        semaphore = asyncio.Semaphore(3)
+        captcha_detected = False
+        
+        async def check_single_material(m: MaterialPool) -> tuple[str, str, str]:
+            """检测单个物料的存活状态"""
+            async with semaphore:
+                tid = m.posted_tid
+                status = "dead"
+                reason = "error"
+                
+                try:
+                    import aiotieba
+                    async with aiotieba.Client() as client:
                         res = await client.get_posts(tid)
-                        final_status = "unknown"
-                        if res and res.forum and res.forum.fid > 0:
-                            final_status = "alive"
-                            alive_count += 1
-                            self._add_log(f"✅ [存活] {m.posted_fname} | TID:{tid}")
-                        else:
-                            final_status = "dead"
-                            dead_count += 1
-                            self._add_log(f"❌ [阵亡] {m.posted_fname} | TID:{tid}", "error")
                         
-                        self._survival_cache[tid] = final_status
-                        # 执行数据库持久化
-                        await self.db.update_material_survival_status(m.id, final_status)
-                            
-                    except Exception as ex:
-                        self._survival_cache[tid] = "dead"
-                        await self.db.update_material_survival_status(m.id, "dead")
-                        dead_count += 1
-                        self._add_log(f"⚠️ [错误] {m.posted_fname} | TID:{tid} | {str(ex)}", "error")
-
-                    # 每探测 5 条刷新一次大表，平衡性能与体验
-                    if (i + 1) % 5 == 0:
-                        await self._refresh_material_table()
-
-                    # 轻度休眠以防止高并发拦截
+                        # 检测验证码拦截
+                        if res and hasattr(res, 'text') and '验证码' in str(res.text or ''):
+                            return tid, "dead", "captcha_required"
+                        
+                        if res and res.forum and res.forum.fid > 0:
+                            # 增强判断：检查帖子基本信息完整性
+                            if res.thread and res.thread.reply_num is not None:
+                                return tid, "alive", ""
+                            if res.thread and res.thread.title:
+                                return tid, "alive", ""
+                            return tid, "alive", ""
+                        else:
+                            return tid, "dead", "unknown_error"
+                except Exception as ex:
+                    error_msg = str(ex).lower()
+                    if "captcha" in error_msg or "验证码" in str(ex):
+                        return tid, "dead", "captcha_required"
+                    elif "deleted" in error_msg or "removed" in error_msg:
+                        return tid, "dead", "deleted_by_user"
+                    elif "banned" in error_msg or "blocked" in error_msg:
+                        return tid, "dead", "banned_by_mod"
+                    elif "not found" in error_msg or "404" in error_msg:
+                        return tid, "dead", "auto_removed"
+                    return tid, "dead", "error"
+                finally:
+                    # 限速：每次请求间隔0.5秒
                     await asyncio.sleep(0.5)
+        
+        try:
+            # 使用 asyncio.gather 并发执行所有检测任务
+            results = await asyncio.gather(
+                *[check_single_material(m) for m in targets],
+                return_exceptions=True
+            )
+            
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # 异常处理
+                    tid = targets[i].posted_tid
+                    self._survival_cache[tid] = "dead"
+                    await self.db.update_material_survival_status(targets[i].id, "dead")
+                    dead_count += 1
+                    self._add_log(f"⚠️ [错误] {targets[i].posted_fname} | TID:{tid} | {str(result)}", "error")
+                else:
+                    tid, status, reason = result
+                    self._survival_cache[tid] = status
+                    await self.db.update_material_survival_status(targets[i].id, status)
+                    
+                    if status == "alive":
+                        alive_count += 1
+                        self._add_log(f"✅ [存活] {targets[i].posted_fname} | TID:{tid}")
+                    else:
+                        dead_count += 1
+                        if reason == "captcha_required":
+                            captcha_detected = True
+                            self._add_log(f"🚫 [验证码] {targets[i].posted_fname} | TID:{tid}", "warning")
+                        else:
+                            self._add_log(f"❌ [阵亡] {targets[i].posted_fname} | TID:{tid}", "error")
+                
+                # 更新进度
+                self.archive_progress_bar.value = (i + 1) / total
+                self.archive_status_text.value = f"正在探测 ({i+1}/{total})..."
+                if (i + 1) % 5 == 0:
+                    self.page.update()
+            
+            # 验证码提示
+            if captcha_detected:
+                self._show_snackbar("⚠️ 检测到百度验证码，建议30分钟后重试", "warning")
         except Exception as ex:
             self._add_log(f"探测任务异常中止: {str(ex)}", "error")
         finally:

@@ -50,6 +50,8 @@ class DualHUD(ft.Container):
         right_title: str,
         right_value: str,
         right_icon: str,
+        left_value_color: str = None,
+        right_value_color: str = None,
         **kwargs,
     ):
         self._left_title = left_title
@@ -58,6 +60,8 @@ class DualHUD(ft.Container):
         self._right_title = right_title
         self._right_value = right_value
         self._right_icon = right_icon
+        self._left_value_color = left_value_color
+        self._right_value_color = right_value_color
         super().__init__(**kwargs)
         self.content = ft.Row(
             controls=self._build_panels(),
@@ -72,12 +76,14 @@ class DualHUD(ft.Container):
                 value=self._left_value,
                 icon=self._left_icon,
                 border_position="left",
+                value_color=self._left_value_color,
             ),
             create_hud_panel(
                 title=self._right_title,
                 value=self._right_value,
                 icon=self._right_icon,
                 border_position="right",
+                value_color=self._right_value_color,
             ),
         ]
 
@@ -88,6 +94,14 @@ class DualHUD(ft.Container):
     def left_value(self, val):
         self._left_value = val
         self.content.controls = self._build_panels()
+    
+    @property
+    def left_value_color(self): return self._left_value_color
+    
+    @left_value_color.setter
+    def left_value_color(self, val):
+        self._left_value_color = val
+        self.content.controls = self._build_panels()
 
     @property
     def right_value(self): return self._right_value
@@ -95,4 +109,12 @@ class DualHUD(ft.Container):
     @right_value.setter
     def right_value(self, val):
         self._right_value = val
+        self.content.controls = self._build_panels()
+    
+    @property
+    def right_value_color(self): return self._right_value_color
+    
+    @right_value_color.setter
+    def right_value_color(self, val):
+        self._right_value_color = val
         self.content.controls = self._build_panels()

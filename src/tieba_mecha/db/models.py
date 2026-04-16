@@ -233,6 +233,8 @@ class MaterialPool(Base):
     last_bumped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次回帖时间")
 
     survival_status: Mapped[str] = mapped_column(String(20), default="unknown", comment="存活状态: unknown/alive/dead")
+    death_reason: Mapped[str] = mapped_column(String(100), default="", comment="被删原因: deleted_by_user/auto_removed/banned_by_mod/error")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后存活检测时间")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="注入时间")
     
     __table_args__ = (
@@ -310,4 +312,27 @@ class ThreadRecord(Base):
     __table_args__ = (
         Index("ix_thread_records_fname", "fname"),
         Index("ix_thread_records_updated_at", "updated_at"),
+    )
+
+
+class CaptchaEvent(Base):
+    """验证码事件记录"""
+
+    __tablename__ = "captcha_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="关联账号ID")
+    task_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="关联任务ID")
+    event_type: Mapped[str] = mapped_column(String(50), default="captcha", comment="事件类型: captcha/rate_limit/block")
+    reason: Mapped[str] = mapped_column(String(100), default="", comment="触发原因")
+    status: Mapped[str] = mapped_column(String(20), default="pending", comment="状态: pending/resolved")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="触发时间")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="解决时间")
+    resolved_by: Mapped[str] = mapped_column(String(50), default="", comment="解决方式: manual/auto/timeout")
+    notes: Mapped[str] = mapped_column(Text, default="", comment="备注信息")
+
+    __table_args__ = (
+        Index("ix_captcha_events_account_id", "account_id"),
+        Index("ix_captcha_events_status", "status"),
+        Index("ix_captcha_events_created_at", "created_at"),
     )

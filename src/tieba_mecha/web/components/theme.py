@@ -99,9 +99,12 @@ def create_hud_panel(
     value: str,
     icon: str,
     border_position: str = "left",
+    value_color: str = None,
 ) -> ft.Container:
     """创建 HUD 翼板 (Symmetric Capsule)"""
     border_radius = 12
+    value_text_color = value_color or "onSurface"
+    icon_color = value_color or "primary"
 
     if border_position == "left":
         border = ft.border.Border(
@@ -121,12 +124,12 @@ def create_hud_panel(
     return ft.Container(
         content=ft.Column(
             controls=[
-                ft.Icon(icon, color="primary", size=24),
+                ft.Icon(icon, color=icon_color, size=24),
                 ft.Text(
                     value,
                     font_family="Consolas",
                     size=28,
-                    color="onSurface",
+                    color=value_text_color,
                     weight=ft.FontWeight.BOLD,
                 ),
                 ft.Text(title, color="onSurfaceVariant", size=12),
