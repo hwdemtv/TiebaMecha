@@ -653,6 +653,7 @@ class BatchPostPage:
                                 ft.DataCell(ft.Text(str(m.id))),
                                 ft.DataCell(ft.Text(display_t, tooltip=display_t)),
                                 ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
+                                ft.DataCell(ft.Text(str(m.posted_account_id) if m.posted_account_id else "-")),
                                 ft.DataCell(ft.Text(m.last_used_at.strftime("%y-%m-%d %H:%M") if m.last_used_at else "-")),
                                 ft.DataCell(ft.Text(m.posted_time.strftime("%y-%m-%d %H:%M") if m.posted_time else "-")),
                                 ft.DataCell(ft.Row([
@@ -1967,6 +1968,7 @@ class BatchPostPage:
                 ft.DataColumn(ft.Text("ID", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("发布标题", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("最终着陆吧", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("发帖账号", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("投递时间", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("发帖时间", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("时光溯洄", size=11, weight=ft.FontWeight.BOLD)),

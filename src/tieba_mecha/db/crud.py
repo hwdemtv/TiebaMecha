@@ -444,7 +444,7 @@ class Database:
         accounts = await self.get_accounts()
         result = []
         for acc in accounts:
-            forums = await self.get_account_forums(acc.id)
+            forums = await self.get_forums(acc.id)
             result.append((acc, forums))
         return result
 

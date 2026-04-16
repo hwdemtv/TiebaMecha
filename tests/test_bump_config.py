@@ -7,12 +7,9 @@ Tests the following features:
 """
 
 import pytest
-import pytest_asyncio
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from tieba_mecha.db.crud import Database
-from tieba_mecha.core.batch_post import AutoBumpManager, RateLimiter
+from tieba_mecha.core.batch_post import AutoBumpManager
 
 
 class TestBumpSettingsCrud:
@@ -114,7 +111,7 @@ class TestAutoBumpManagerConfig:
         await db.set_setting("bump_cooldown_minutes", "120")
         await db.set_setting("bump_matrix_enabled", "1")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # The manager will use these custom values when processing
 
@@ -127,9 +124,6 @@ class TestAutoBumpManagerConfig:
         await db.set_setting("bump_matrix_enabled", "0")
         
         manager = AutoBumpManager(db=db)
-        
-        # Mock the internal methods to avoid actual processing
-        manager._process_single_candidate = AsyncMock(return_value=None)
         
         # Call process_all_candidates - it should read config from DB
         await manager.process_all_candidates()
@@ -145,7 +139,7 @@ class TestBumpCooldownLogic:
         """Test default 45-minute cooldown window."""
         await db.set_setting("bump_cooldown_minutes", "45")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # The cooldown window should be 45 minutes
         # This is verified by the internal query that uses timedelta(minutes=45)
@@ -155,7 +149,7 @@ class TestBumpCooldownLogic:
         """Test custom 120-minute cooldown window."""
         await db.set_setting("bump_cooldown_minutes", "120")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # The cooldown window should be 120 minutes
 
@@ -164,7 +158,7 @@ class TestBumpCooldownLogic:
         """Test minimum 10-minute cooldown window."""
         await db.set_setting("bump_cooldown_minutes", "10")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # The cooldown window should be 10 minutes
 
@@ -177,7 +171,7 @@ class TestMatrixScheduling:
         """Test that when matrix mode is disabled, original poster accounts are used."""
         await db.set_setting("bump_matrix_enabled", "0")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # With matrix disabled, potential_accounts logic should fall back to original
 
@@ -186,7 +180,7 @@ class TestMatrixScheduling:
         """Test that matrix mode rotates through available accounts."""
         await db.set_setting("bump_matrix_enabled", "1")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # With matrix enabled, accounts should be rotated
 
@@ -199,7 +193,7 @@ class TestBumpCountLimit:
         """Test default max bump count is 20."""
         # Don't set max_bump_count, should default to 20
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # Query should filter by bump_count < 20
 
@@ -208,7 +202,7 @@ class TestBumpCountLimit:
         """Test custom max bump count of 50."""
         await db.set_setting("max_bump_count", "50")
         
-        manager = AutoBumpManager(db=db)
+        _manager = AutoBumpManager(db=db)  # noqa: F841
         
         # Query should filter by bump_count < 50
 
@@ -218,7 +212,7 @@ class TestBumpCountLimit:
         for count in [5, 50, 100]:
             await db.set_setting("max_bump_count", str(count))
             
-            manager = AutoBumpManager(db=db)
+            _manager = AutoBumpManager(db=db)  # noqa: F841
             
             # Should handle any value in range
 
@@ -308,7 +302,7 @@ class TestMatrixRotationAlgorithm:
     def test_rotation_uses_modulo(self):
         """Test that rotation uses bump_count modulo number of accounts."""
         available_accounts = [1, 2, 3]  # 3 accounts
-        posted_account_id = 4  # Original poster
+        _posted_account_id = 4  # Original poster (for future use)
         
         # When bump_count=0, should use account 1 (index 0)
         # When bump_count=1, should use account 2 (index 1)
@@ -383,8 +377,6 @@ class TestBumpContentEngine:
 
     def test_templates_are_natural(self):
         """Test that all templates are short and natural-looking."""
-        import random
-
         BUMP_TEMPLATES = [
             "不错不错，挺有意思的", "看了，还可以", "收藏了，mark一下",
             "嗯，挺好的", "可以可以", "这个确实不错",
@@ -434,7 +426,7 @@ class TestBumpContentEngine:
         RANDOM_EMOJIS = ["[赞]", "✨", "👍"]
 
         # Both normal and rewritten materials should produce same-style content
-        for ai_status in ["none", "rewritten"]:
+        for _ai_status in ["none", "rewritten"]:  # noqa: F841
             random.seed(42)  # Same seed for both
             base_text = random.choice(BUMP_TEMPLATES)
             if random.random() < 0.2:

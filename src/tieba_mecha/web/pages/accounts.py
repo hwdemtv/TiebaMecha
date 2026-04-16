@@ -175,9 +175,9 @@ class AccountsPage:
 
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
-            ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=self._bulk_verify_accounts, visible=False),
-            ft.TextButton("一键智能权重", icon=icons.AUTO_AWESOME, on_click=self._auto_calculate_weights, tooltip="根据账号等级/签到成功率/状态等自动计算推荐权重"),
-            ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=self._bulk_delete_accounts, style=ft.ButtonStyle(color="error"), visible=False),
+            ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=lambda e: self.page.run_task(self._bulk_verify_accounts, e), visible=False),
+            ft.TextButton("一键智能权重", icon=icons.AUTO_AWESOME, on_click=lambda e: self.page.run_task(self._auto_calculate_weights, e), tooltip="根据账号等级/签到成功率/状态等自动计算推荐权重"),
+            ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=lambda e: self.page.run_task(self._bulk_delete_accounts, e), style=ft.ButtonStyle(color="error"), visible=False),
             ft.Container(expand=True),
             self.account_stats_info
         ], spacing=10, visible=True)
