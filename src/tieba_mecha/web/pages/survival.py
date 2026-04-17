@@ -19,6 +19,7 @@ class SurvivalPage:
         self._stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._account_options = []
         self._current_page = 1
+        self._filter_bar_container = None  # 用于存储筛选栏容器引用
         self._page_size = 20
         self._total = 0
         self._materials = []
@@ -149,10 +150,18 @@ class SurvivalPage:
             options=[ft.dropdown.Option("all", "全部账号")] + self._account_options,
             on_change=self._on_account_change,
         )
-        return ft.Row(
+        # 保存容器引用以便后续更新账号下拉框
+        self._filter_bar_container = ft.Row(
             [self._status_filter, self._account_filter],
             spacing=15,
         )
+        return self._filter_bar_container
+
+    def on_data_loaded(self):
+        """数据加载完成后的回调 - 更新账号下拉框选项"""
+        if hasattr(self, "_account_filter") and self._account_options:
+            self._account_filter.options = [ft.dropdown.Option("all", "全部账号")] + self._account_options
+            self.page.update()
 
     def _build_table(self) -> ft.Control:
         """构建数据表格"""
