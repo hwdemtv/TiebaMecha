@@ -503,6 +503,21 @@ class PostsPage:
 
         success, msg, tid = await add_thread(self.db, fname, title, content)
         if success:
+            # 自动保存到物料池
+            await self.db.add_materials_bulk([(title, content)])
+            # 更新刚添加的物料状态为已发布
+            materials = await self.db.get_materials(status=None, limit=10)
+            for m in materials:
+                if m.title == title and m.content == content and m.status == "pending":
+                    from datetime import datetime
+                    await self.db.update_material_status(
+                        m.id, "success",
+                        posted_fname=fname,
+                        posted_tid=tid,
+                        posted_account_id=(await self.db.get_active_account()).id if await self.db.get_active_account() else None,
+                        posted_time=datetime.now()
+                    )
+                    break
             self._show_snackbar(f"发帖成功! TID: {tid}", "success")
             self.post_title.value = ""
             self.post_content.value = ""

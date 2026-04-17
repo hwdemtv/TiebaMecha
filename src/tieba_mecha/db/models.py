@@ -1,8 +1,8 @@
 """Database models for TiebaMecha"""
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -231,6 +231,18 @@ class MaterialPool(Base):
     is_auto_bump: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启自动回帖")
     bump_count: Mapped[int] = mapped_column(Integer, default=0, comment="已回帖(自顶)次数")
     last_bumped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次回帖时间")
+    
+    # --- 自顶模式配置 (扩展字段) ---
+    # bump_mode: once=次数上限(默认), scheduled=定时周期, matrix_loop=矩阵轮换循环
+    bump_mode: Mapped[str] = mapped_column(String(20), default="once", comment="自顶模式: once/scheduled/matrix_loop")
+    # 定时周期模式
+    bump_hour: Mapped[int] = mapped_column(Integer, default=10, comment="每日自顶时间(小时 0-23)")
+    bump_duration_days: Mapped[int] = mapped_column(Integer, default=0, comment="自顶持续天数(0=永久)")
+    bump_start_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="自顶开始日期")
+    # 矩阵轮换模式
+    bump_account_ids: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="轮换账号ID列表(JSON数组)")
+    bump_account_index: Mapped[int] = mapped_column(Integer, default=0, comment="当前轮换到第几个账号")
+    bump_last_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="上次执行日期(用于每日一次判断)")
 
     survival_status: Mapped[str] = mapped_column(String(20), default="unknown", comment="存活状态: unknown/alive/dead")
     death_reason: Mapped[str] = mapped_column(String(100), default="", comment="被删原因: deleted_by_user/auto_removed/banned_by_mod/error")

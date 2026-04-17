@@ -1,6 +1,7 @@
 """批量发帖核心逻辑：反风控 + AI 变体 + 三种账号调度策略 + 多贴吧支持"""
 
 import asyncio
+import json
 import random
 import time
 import urllib.parse
@@ -1319,9 +1320,103 @@ class AutoBumpManager:
         self.db = db
         self.post_manager = BatchPostManager(db)
 
+    def _should_bump_this_cycle(self, material) -> tuple[bool, str]:
+        """
+        判断物料是否应该在本次周期执行自顶
+        返回: (should_bump, reason)
+        """
+        from datetime import date, datetime, timedelta
+        
+        bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
+        today = date.today()
+        
+        if bump_mode == "once":
+            # 模式1: 次数上限模式 (原有逻辑)
+            return True, "once"
+            
+        elif bump_mode == "scheduled":
+            # 模式2: 定时周期模式 - 每天指定时间执行一次
+            bump_hour = getattr(material, 'bump_hour', 10) or 10
+            bump_duration = getattr(material, 'bump_duration_days', 0) or 0
+            bump_start = getattr(material, 'bump_start_date', None)
+            
+            # 检查是否在有效期内
+            if bump_start and bump_duration > 0:
+                end_date = bump_start + timedelta(days=bump_duration)
+                if today > end_date:
+                    return False, f"已超过持续期({bump_duration}天)"
+            
+            # 检查今日是否已执行
+            last_date = getattr(material, 'bump_last_date', None)
+            if last_date == today:
+                return False, "今日已执行"
+            
+            # 检查当前时间是否到达设定时间
+            current_hour = datetime.now().hour
+            if current_hour < bump_hour:
+                return False, f"未到执行时间({bump_hour}点)"
+            
+            return True, "scheduled"
+            
+        elif bump_mode == "matrix_loop":
+            # 模式3: 矩阵轮换循环模式 - 每日一次，账号轮换，不设上限
+            bump_duration = getattr(material, 'bump_duration_days', 0) or 0
+            bump_start = getattr(material, 'bump_start_date', None)
+            
+            # 检查是否在有效期内 (0=永久)
+            if bump_start and bump_duration > 0:
+                end_date = bump_start + timedelta(days=bump_duration)
+                if today > end_date:
+                    return False, f"已超过持续期({bump_duration}天)"
+            
+            # 检查今日是否已执行
+            last_date = getattr(material, 'bump_last_date', None)
+            if last_date == today:
+                return False, "今日已执行"
+            
+            # 检查当前时间是否到达设定时间
+            bump_hour = getattr(material, 'bump_hour', 10) or 10
+            current_hour = datetime.now().hour
+            if current_hour < bump_hour:
+                return False, f"未到执行时间({bump_hour}点)"
+            
+            return True, "matrix_loop"
+        
+        return False, "未知模式"
+
+    def _select_account_for_bump(self, material, matrix_pool: list) -> int | None:
+        """为自顶选取合适的账号"""
+        bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
+        
+        # 过滤掉发帖原号
+        potential_accounts = [acc for acc in matrix_pool if acc.id != material.posted_account_id]
+        if not potential_accounts:
+            return None
+        
+        if bump_mode == "matrix_loop":
+            # 矩阵轮换模式：使用 bump_account_index 进行轮换
+            account_ids_json = getattr(material, 'bump_account_ids', None) or "[]"
+            try:
+                account_ids = json.loads(account_ids_json)
+                if account_ids:
+                    # 使用物料自带的账号列表进行轮换
+                    current_idx = getattr(material, 'bump_account_index', 0) or 0
+                    target_acc_id = account_ids[current_idx % len(account_ids)]
+                    # 检查该账号是否在当前活跃矩阵池中
+                    if any(acc.id == target_acc_id for acc in matrix_pool):
+                        return target_acc_id
+            except (json.JSONDecodeError, TypeError):
+                pass
+            
+            # 回退：使用 bump_count 进行轮换
+            return potential_accounts[material.bump_count % len(potential_accounts)].id
+        else:
+            # 其他模式：使用 bump_count 进行轮换
+            return potential_accounts[material.bump_count % len(potential_accounts)].id
+
     async def process_all_candidates(self):
         """扫描并处理所有待自顶的物料"""
-        from datetime import datetime, timedelta
+        from datetime import date, datetime, timedelta
         
         # 1. 读取全局配置
         try:
@@ -1338,23 +1433,32 @@ class AutoBumpManager:
             
             threshold_time = datetime.now() - timedelta(minutes=bump_cooldown_minutes)
             
+            # 查询所有成功的物料 (不再在这里限制次数，改为在 _should_bump_this_cycle 中判断)
             stmt = select(MaterialPool).where(
                 and_(
                     MaterialPool.status == "success",
                     MaterialPool.is_auto_bump == True,
                     MaterialPool.posted_tid != None,
                     MaterialPool.posted_tid != 0,
-                    MaterialPool.bump_count < max_bump_count, # 动态安全阈值
                     (MaterialPool.last_bumped_at == None) | (MaterialPool.last_bumped_at < threshold_time)
                 )
             )
             result = await session.execute(stmt)
-            candidates = result.scalars().all()
+            all_candidates = result.scalars().all()
+            
+            # 过滤真正需要执行的物料
+            candidates = []
+            for material in all_candidates:
+                should_bump, reason = self._should_bump_this_cycle(material)
+                if should_bump:
+                    candidates.append(material)
+                else:
+                    await log_info(f"物料 [{material.id}] 跳过本次自顶: {reason}")
             
             if not candidates:
                 return
 
-            await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件 (上限: {max_bump_count})，开始执行...")
+            await log_info(f"发现 {len(candidates)} 个物料满足自动回帖条件，开始执行...")
             
             # 运行时 Skip-List：防止在同一次扫描中反复背刺已被封的账号
             banned_pairs = set() # (account_id, fname)
@@ -1362,27 +1466,27 @@ class AutoBumpManager:
             # 获取当前全局活跃号作为后备
             default_acc = await self.db.get_active_account()
             
-            # 如果开启了矩阵式协同，预加载所有可用账号池
+            # 预加载所有可用账号池
             matrix_pool = []
             if bump_matrix_enabled:
                 matrix_pool = await self.db.get_matrix_accounts()
+            if not matrix_pool:
+                matrix_pool = [default_acc] if default_acc else []
 
             for material in candidates:
-                # --- 账号选取策略：矩阵轮询（推荐）或跳过 ---
-                if bump_matrix_enabled and matrix_pool:
-                    # 矩阵轮询算法：利用 (物料ID + 已顶次数) 作为种子选取账号，确保同一个物料能轮换使用不同账号
-                    # 过滤掉发帖原号，避免看起来不够"协同"
-                    potential_accounts = [acc for acc in matrix_pool if acc.id != material.posted_account_id]
-                    if not potential_accounts:
-                        # 如果没有其他可用号，跳过本次自顶而非回落到原号（防止同号自顶被封）
-                        await log_warn(
-                            f"物料 [{material.id}] 跳过自顶：矩阵池为空，建议添加更多协同账号再试"
-                        )
-                        continue
-                    else:
-                        target_account_id = potential_accounts[material.bump_count % len(potential_accounts)].id
+                bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
+                
+                # --- 账号选取策略 ---
+                target_account_id = None
+                
+                if bump_mode == "matrix_loop":
+                    # 矩阵轮换模式
+                    target_account_id = self._select_account_for_bump(material, matrix_pool)
+                elif bump_matrix_enabled and matrix_pool:
+                    # 矩阵模式
+                    target_account_id = self._select_account_for_bump(material, matrix_pool)
                 else:
-                    # 未开启矩阵模式时，同号自顶风险极高，直接跳过并警告
+                    # 未开启矩阵模式时，同号自顶风险极高
                     await log_warn(
                         f"物料 [{material.id}] 跳过自顶：未开启矩阵协同模式。"
                         f"同号自顶极易触发风控导致封号，请在「自顶配置」中开启「矩阵协同模式」。"
@@ -1390,39 +1494,29 @@ class AutoBumpManager:
                     continue
                 
                 if not target_account_id:
+                    await log_warn(f"物料 [{material.id}] 跳过自顶：无可用账号")
                     continue
                 
                 # 检查动态黑名单
                 if (target_account_id, material.posted_fname) in banned_pairs:
                     continue
 
-                # --- 拟人化随机文案引擎 (自然化版本，避免触发反垃圾) ---
-                # 新设计原则：多样化长度(5-25字)、多风格、降低模板重合度
+                # --- 拟人化随机文案引擎 ---
                 BUMP_TEMPLATES = [
-                    # 短句互动类（5-10字）- 模拟路人随手一评
                     "路过", "看了", "点赞", "顶", "收藏",
                     "不错的", "可以", "好贴", "来了", "路过~",
-                    # 中等长度类（10-15字）- 轻量评价感
                     "看了下，还行", "写的挺好的", "收藏了", "支持楼主",
                     "内容不错，赞", "有意思", "帮顶一下", "可以可以",
                     "这个确实可以", "路过支持", "mark一下", "看看再说",
                     "内容挺充实的", "感谢分享", "不错的帖子",
-                    # 较长评论类（15-25字）- 模拟认真阅读后的评价
                     "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
-                    "感谢楼主的整理，辛苦了", "这个系列真的挺好的，收藏了",
-                    "认真看完了，支持一下", "内容挺用心的，点赞",
-                    "不错的帖子，帮顶支持", "楼主辛苦了，感谢分享",
-                    "看完了，感觉还挺有收获的", "收藏了，期待更多好内容",
-                    # 随机行为模拟类 - 降低模板可识别性
+                    "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
                     "👍", "✨👍", "好帖", "顶", "已阅", "mark",
-                    "👍👍", "好内容", "支持", "写的不错",
                 ]
-                # emoji 只在低概率下使用，降低可识别性
                 RANDOM_EMOJIS = ["[赞]", "✨", "👍", "👍👍", ""]
 
-                # 基于物料标题和随机词库构造（自然化）
                 base_text = random.choice(BUMP_TEMPLATES)
-                if random.random() < 0.2:  # 20% 概率轻量提及标题关键词（原40%过高易被识别为推广）
+                if random.random() < 0.2:
                     keyword = (material.title or "")[:8]
                     base_text = f"{keyword} 还行，{base_text}"
 
@@ -1435,10 +1529,31 @@ class AutoBumpManager:
                     bump_content
                 )
                 
+                today = date.today()
                 if success:
-                    await self.db.update_material_bump(material.id)
-                    await log_info(f"物料 [{material.id}] 自顶成功 (账号:{target_account_id} | TID:{material.posted_tid})")
-                    await asyncio.sleep(random.uniform(15, 45))  # 保守值：增加间隔降低检测风险
+                    # 更新 bump_count 和轮换信息
+                    async with self.db.async_session() as upd_session:
+                        from ..db.models import MaterialPool
+                        mat = await upd_session.get(MaterialPool, material.id)
+                        if mat:
+                            mat.bump_count = (mat.bump_count or 0) + 1
+                            mat.last_bumped_at = datetime.now()
+                            mat.last_date = today
+                            
+                            # 矩阵轮换模式：更新账号索引
+                            if bump_mode == "matrix_loop":
+                                account_ids_json = getattr(mat, 'bump_account_ids', None) or "[]"
+                                try:
+                                    account_ids = json.loads(account_ids_json)
+                                    if account_ids:
+                                        mat.bump_account_index = ((mat.bump_account_index or 0) + 1) % len(account_ids)
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                            
+                            await upd_session.commit()
+                    
+                    await log_info(f"物料 [{material.id}] 自顶成功 (账号:{target_account_id} | TID:{material.posted_tid} | 累计:{material.bump_count + 1}次)")
+                    await asyncio.sleep(random.uniform(15, 45))
                 else:
                     banned_pairs.add((target_account_id, material.posted_fname))
                     await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{target_account_id})")
