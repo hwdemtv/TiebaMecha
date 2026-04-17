@@ -5,7 +5,8 @@ from ..flet_compat import COLORS
 from ..utils import with_opacity
 from ..components.icons import (
     ARROW_BACK_IOS_NEW, ANALYTICS_OUTLINED, CHECK_CIRCLE,
-    ERROR, REMOVE_CIRCLE_OUTLINED, OPEN_IN_NEW, INFO_OUTLINED
+    ERROR, REMOVE_CIRCLE_OUTLINED, OPEN_IN_NEW, INFO_OUTLINED,
+    DELETE_OUTLINE
 )
 
 
@@ -412,9 +413,36 @@ class SurvivalPage:
                 width=500,
                 height=500,
             ),
-            actions=[ft.TextButton("关闭", on_click=lambda e: self.page.close(dialog))],
+            actions=[
+                ft.TextButton("删除", icon=DELETE_OUTLINE, on_click=lambda e: self._confirm_delete(m, dialog)),
+                ft.TextButton("关闭", on_click=lambda e: self.page.close(dialog)),
+            ],
         )
         self.page.open(dialog)
+
+    def _confirm_delete(self, m, parent_dialog):
+        """显示删除确认弹窗"""
+        self.page.close(parent_dialog)
+        confirm = ft.AlertDialog(
+            title=ft.Text("确认删除"),
+            content=ft.Text(f"确定要删除物料 #{m.id} 吗？此操作不可撤销。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.close(confirm)),
+                ft.TextButton("删除", style=ft.ButtonStyle(color="error"), on_click=lambda e: self._do_delete(m.id, confirm)),
+            ],
+        )
+        self.page.open(confirm)
+
+    async def _do_delete(self, material_id: int, confirm_dialog):
+        """执行删除"""
+        self.page.close(confirm_dialog)
+        if self.db:
+            await self.db.delete_material(material_id)
+            # 重新加载统计数据和当前页
+            self._stats = await self.db.get_survival_stats()
+            if self._stat_cards_container:
+                self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
+            await self._load_page(self._current_page)
 
     # ========== 分页控件 ==========
 
