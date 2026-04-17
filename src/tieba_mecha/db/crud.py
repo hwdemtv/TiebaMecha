@@ -459,6 +459,32 @@ class Database:
             result.append((acc, forums))
         return result
 
+    async def get_accounts_not_following_forum(self, fname: str) -> list[Account]:
+        """
+        获取未关注指定贴吧的账号列表（排除已封禁的）
+        用于补齐关注功能
+        """
+        async with self.async_session() as session:
+            from sqlalchemy import select, not_
+            # 获取已关注的账号ID
+            followed_stmt = select(Forum.account_id).where(
+                Forum.fname == fname,
+                Forum.is_banned == False
+            )
+            followed_result = await session.execute(followed_stmt)
+            followed_ids = {row[0] for row in followed_result}
+            
+            # 获取所有活跃账号（排除已关注的）
+            all_accounts_stmt = select(Account).where(
+                Account.status.notin_(["suspended", "suspended_proxy", "banned", "expired"])
+            )
+            all_result = await session.execute(all_accounts_stmt)
+            all_accounts = list(all_result.scalars().all())
+            
+            # 过滤出未关注的
+            missing_accounts = [acc for acc in all_accounts if acc.id not in followed_ids]
+            return missing_accounts
+
     # ========== Forum CRUD ==========
 
     async def add_forum(

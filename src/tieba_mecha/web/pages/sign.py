@@ -12,7 +12,8 @@ from ..components.icons import (
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
     CHECK, VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, HISTORY_ROUNDED,
     GROUP_WORK_ROUNDED, PUBLIC, VPN_LOCK, CHECK_CIRCLE,
-    PENDING_OUTLINED, ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED
+    PENDING_OUTLINED, ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED,
+    HEART_BROKEN, MORE_VERT_ROUNDED
 )
 from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
@@ -398,8 +399,15 @@ class SignPage:
                         ], spacing=10, alignment=ft.MainAxisAlignment.START),
                     ], expand=True, spacing=4),
                     ft.IconButton(
-                        icon=HISTORY_ROUNDED, 
-                        icon_size=18, 
+                        icon=HEART_BROKEN,
+                        icon_size=18,
+                        icon_color="error",
+                        tooltip="取消关注",
+                        on_click=lambda e, fid=f.id, fname=f.fname: self.page.run_task(self._on_unfollow_forum, fid, fname)
+                    ),
+                    ft.IconButton(
+                        icon=HISTORY_ROUNDED,
+                        icon_size=18,
                         icon_color="onSurfaceVariant",
                         tooltip="查看签到日志",
                         on_click=lambda e, fid=f.id, fname=f.fname: self.page.run_task(self._show_forum_history, fid, fname)
@@ -683,6 +691,29 @@ class SignPage:
         if type == "error": color = "error"
         elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+
+    async def _on_unfollow_forum(self, forum_id: int, fname: str):
+        """取消关注单个贴吧"""
+        async def do_unfollow(e):
+            try:
+                self.page.close(dialog)
+                from ...core.batch_post import BatchPostManager
+                pm = BatchPostManager(self.db)
+                await pm.unfollow_forums_bulk([fname])
+                self._show_snackbar(f"✅ 已取消关注 '{fname}'", "success")
+                await self.load_data()
+            except Exception as ex:
+                self._show_snackbar(f"❌ 取消关注失败: {str(ex)}", "error")
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(HEART_BROKEN, color="error"), ft.Text("确认取消关注？")]),
+            content=ft.Text(f"确定要取消关注 '{fname}' 吗？此操作将同时从所有账号取关该贴吧。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("确认取消", icon=HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
+            ]
+        )
+        self.page.open(dialog)
 
     async def _show_forum_history(self, forum_id: int, fname: str):
         """展示单独贴吧的签到日志记录弹窗"""
