@@ -84,8 +84,8 @@ class TestBatchPostTask:
         assert task.contents == []
         assert task.accounts == []
         assert task.strategy == "round_robin"
-        assert task.delay_min == 60.0
-        assert task.delay_max == 300.0
+        assert task.delay_min == 120.0  # Updated default to 120s
+        assert task.delay_max == 600.0  # Updated default to 600s
         assert task.use_ai is False
         assert task.status == "pending"
         assert task.progress == 0
