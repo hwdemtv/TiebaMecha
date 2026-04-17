@@ -1190,6 +1190,7 @@ class Database:
         self,
         survival_status: str | None = None,
         account_id: int | None = None,
+        fname: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[MaterialPool], int]:
@@ -1201,6 +1202,8 @@ class Database:
                 base_where.append(MaterialPool.survival_status == survival_status)
             if account_id:
                 base_where.append(MaterialPool.posted_account_id == account_id)
+            if fname:
+                base_where.append(MaterialPool.posted_fname == fname)
 
             # 总数
             count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
@@ -1217,6 +1220,18 @@ class Database:
             )
             result = await session.execute(data_stmt)
             return list(result.scalars().all()), total
+
+    async def get_distinct_fnames(self) -> list[str]:
+        """获取物料池中所有不同的贴吧名"""
+        async with self.async_session() as session:
+            from sqlalchemy import func, select as sa_select, distinct
+            result = await session.execute(
+                sa_select(distinct(MaterialPool.posted_fname))
+                .where(MaterialPool.posted_fname.isnot(None))
+                .where(MaterialPool.posted_fname != "")
+                .order_by(MaterialPool.posted_fname)
+            )
+            return [row[0] for row in result.all()]
 
     async def get_materials(self, status: str | None = None, limit: int | None = None) -> list[MaterialPool]:
         from sqlalchemy import text

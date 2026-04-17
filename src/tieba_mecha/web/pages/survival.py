@@ -18,6 +18,7 @@ class SurvivalPage:
         self.on_navigate = on_navigate
         self._stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._account_options = []
+        self._fname_options = []  # 贴吧名选项
         self._account_name_map = {}  # account_id -> name 映射
         self._current_page = 1
         self._stat_cards_container = None
@@ -38,6 +39,9 @@ class SurvivalPage:
             ]
             # 构建账号 ID -> 名称映射
             self._account_name_map = {a.id: a.name or f"账号{a.id}" for a in accounts}
+            # 获取贴吧名列表
+            fnames = await self.db.get_distinct_fnames()
+            self._fname_options = [ft.dropdown.Option(f, f) for f in fnames]
             await self._load_page(1)
         except Exception as e:
             import traceback
@@ -48,11 +52,14 @@ class SurvivalPage:
         self._current_page = page
         status_filter = self._status_filter.value if hasattr(self, "_status_filter") else None
         account_filter = self._account_filter.value if hasattr(self, "_account_filter") else None
+        fname_filter = self._fname_filter.value if hasattr(self, "_fname_filter") else None
         account_id = int(account_filter) if account_filter and account_filter != "all" else None
+        fname = fname_filter if fname_filter and fname_filter != "all" else None
         status = status_filter if status_filter and status_filter != "all" else None
         materials, total = await self.db.get_materials_paginated(
             survival_status=status,
             account_id=account_id,
+            fname=fname,
             page=page,
             page_size=self._page_size,
         )
@@ -65,6 +72,9 @@ class SurvivalPage:
         await self._load_page(1)
 
     async def _on_account_change(self, e):
+        await self._load_page(1)
+
+    async def _on_fname_change(self, e):
         await self._load_page(1)
 
     async def _on_prev_page(self, e):
@@ -159,19 +169,30 @@ class SurvivalPage:
             options=[ft.dropdown.Option("all", "全部账号")] + self._account_options,
             on_change=self._on_account_change,
         )
+        self._fname_filter = ft.Dropdown(
+            label="贴吧",
+            value="all",
+            width=160,
+            text_size=13,
+            options=[ft.dropdown.Option("all", "全部贴吧")] + self._fname_options,
+            on_change=self._on_fname_change,
+        )
         return ft.Row(
-            [self._status_filter, self._account_filter],
+            [self._status_filter, self._account_filter, self._fname_filter],
             spacing=15,
+            wrap=True,
         )
 
     # ========== 数据回调 ==========
 
     def on_data_loaded(self):
-        """数据加载完成后的回调 - 更新统计卡片和账号下拉框选项"""
+        """数据加载完成后的回调 - 更新统计卡片和筛选下拉框选项"""
         if self._stat_cards_container:
             self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
         if hasattr(self, "_account_filter") and self._account_options:
             self._account_filter.options = [ft.dropdown.Option("all", "全部账号")] + self._account_options
+        if hasattr(self, "_fname_filter") and self._fname_options:
+            self._fname_filter.options = [ft.dropdown.Option("all", "全部贴吧")] + self._fname_options
         self.page.update()
 
     # ========== 卡片列表 ==========
