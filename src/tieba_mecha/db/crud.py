@@ -1191,6 +1191,9 @@ class Database:
         survival_status: str | None = None,
         account_id: int | None = None,
         fname: str | None = None,
+        death_reason: str | None = None,
+        date_from=None,
+        date_to=None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[MaterialPool], int]:
@@ -1204,6 +1207,12 @@ class Database:
                 base_where.append(MaterialPool.posted_account_id == account_id)
             if fname:
                 base_where.append(MaterialPool.posted_fname == fname)
+            if death_reason:
+                base_where.append(MaterialPool.death_reason == death_reason)
+            if date_from:
+                base_where.append(MaterialPool.posted_time >= date_from)
+            if date_to:
+                base_where.append(MaterialPool.posted_time <= date_to)
 
             # 总数
             count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
@@ -1230,6 +1239,18 @@ class Database:
                 .where(MaterialPool.posted_fname.isnot(None))
                 .where(MaterialPool.posted_fname != "")
                 .order_by(MaterialPool.posted_fname)
+            )
+            return [row[0] for row in result.all()]
+
+    async def get_distinct_death_reasons(self) -> list[str]:
+        """获取物料池中所有不同的阵亡原因"""
+        async with self.async_session() as session:
+            from sqlalchemy import func, select as sa_select, distinct
+            result = await session.execute(
+                sa_select(distinct(MaterialPool.death_reason))
+                .where(MaterialPool.death_reason.isnot(None))
+                .where(MaterialPool.death_reason != "")
+                .order_by(MaterialPool.death_reason)
             )
             return [row[0] for row in result.all()]
 
