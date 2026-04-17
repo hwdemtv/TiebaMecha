@@ -247,6 +247,11 @@ class SurvivalPage:
 
     def build(self) -> ft.Control:
         """构建页面"""
+        # 创建统计卡片容器（保存引用以便后续更新）
+        self._stat_cards_container = ft.Container(
+            content=ft.Row(self._build_stat_cards(), spacing=10),
+            padding=ft.padding.only(top=15, left=20, right=20),
+        )
         header = ft.Row(
             controls=[
                 ft.Container(
@@ -269,10 +274,7 @@ class SurvivalPage:
             content=ft.Column([
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
-                self._stat_cards_container = ft.Container(
-                    content=ft.Row(self._build_stat_cards(), spacing=10),
-                    padding=ft.padding.only(top=15, left=20, right=20),
-                ),
+                self._stat_cards_container,
                 ft.Divider(height=10, color="transparent"),
                 ft.Container(
                     content=self._build_filter_bar(),
