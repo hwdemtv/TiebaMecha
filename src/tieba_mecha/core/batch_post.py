@@ -685,7 +685,7 @@ class BatchPostManager:
     async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple]) -> int:
         """
         靶场智能撮合核心：优先寻找本号已关注且 is_post_target=True 的原生号
-        这极大提高了防抽几率（本土作战）。
+        这极大提高了防抽几率（本土作战）。同时跳过已被该吧封禁的账号。
         """
         from sqlalchemy import select
         from ..db.models import Forum
@@ -694,6 +694,7 @@ class BatchPostManager:
             stmt = select(Forum.account_id).where(
                 Forum.fname == target_fname,
                 Forum.is_post_target == True,
+                Forum.is_banned == False,  # 跳过已被该吧封禁的账号
                 Forum.account_id.in_(task.accounts)
             )
             result = await session.execute(stmt)
@@ -702,6 +703,17 @@ class BatchPostManager:
             if native_accounts:
                 # 在这些拥有本土优势的账号中随机挑选一个
                 return random.choice(native_accounts)
+            
+            # 回退：在大盘账号中排除已封禁的
+            stmt_fallback = select(Forum.account_id).where(
+                Forum.fname == target_fname,
+                Forum.is_banned == False,
+                Forum.account_id.in_(task.accounts)
+            )
+            result_fallback = await session.execute(stmt_fallback)
+            available_accounts = result_fallback.scalars().all()
+            if available_accounts:
+                return random.choice(available_accounts)
                 
         # 如果没有原生号储备，回落大盘调度策略（空降打法）
         return await self._pick_account(task, step, weights)
@@ -1167,6 +1179,138 @@ class BatchPostManager:
         
         await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")
         return True
+
+    async def follow_forums_bulk(self, fnames: list[str], account_ids: list[int] = None, progress_callback=None) -> dict:
+        """
+        批量关注贴吧并记录失败结果。
+
+        Args:
+            fnames: 要关注的贴吧名称列表
+            account_ids: 指定账号列表，None 则使用所有活跃账号
+            progress_callback: 进度回调 (current, total)
+
+        Returns:
+            dict: {
+                "success": [{"account_id", "fname"}],
+                "failed": [{"account_id", "fname", "reason"}],
+                "skipped": [{"account_id", "fname", "reason"}]
+            }
+        """
+        from .account import get_account_credentials
+
+        result = {"success": [], "failed": [], "skipped": []}
+
+        # 1. 确定要操作的账号
+        if account_ids is None:
+            all_accounts = await self.db.get_accounts()
+            account_ids = [acc.id for acc in all_accounts if acc.status in ("active", "pending")]
+
+        if not account_ids:
+            result["failed"].append({"account_id": None, "fname": None, "reason": "无可用账号"})
+            return result
+
+        # 2. 过滤掉已经关注且未封禁的吧（避免重复操作）
+        async with self.db.async_session() as session:
+            from sqlalchemy import select
+            from ..db.models import Forum
+            stmt = select(Forum.fname, Forum.account_id).where(
+                Forum.fname.in_(fnames),
+                Forum.account_id.in_(account_ids),
+                Forum.is_banned == False  # 已关注且未被封禁
+            )
+            res = await session.execute(stmt)
+            already_following = {(row.account_id, row.fname) for row in res}
+
+        total_actions = len(account_ids) * len(fnames)
+        current_action = 0
+
+        for acc_id in account_ids:
+            creds = await get_account_credentials(self.db, acc_id)
+            if not creds:
+                result["skipped"].append({"account_id": acc_id, "fname": None, "reason": "无法获取账号凭证"})
+                continue
+
+            _, bduss, stoken, proxy_id, cuid, ua = creds
+            try:
+                async with await create_client(
+                    self.db,
+                    bduss=bduss,
+                    stoken=stoken,
+                    proxy_id=proxy_id,
+                    cuid=cuid,
+                    ua=ua
+                ) as client:
+                    for fname in fnames:
+                        # 跳过已关注的吧
+                        if (acc_id, fname) in already_following:
+                            result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "已关注"})
+                            current_action += 1
+                            continue
+
+                        try:
+                            await client.follow_forum(fname)
+                            result["success"].append({"account_id": acc_id, "fname": fname})
+                            await log_info(f"账号 {acc_id} 成功关注 [{fname}]")
+
+                            # 同时更新数据库记录
+                            from ..db.models import Forum
+                            async with self.db.async_session() as session:
+                                from sqlalchemy import select
+                                # 使用 fname + account_id 查询（独立于 fid 唯一约束）
+                                existing = await session.execute(
+                                    select(Forum).where(Forum.fname == fname, Forum.account_id == acc_id)
+                                )
+                                forum = existing.scalar_one_or_none()
+                                if not forum:
+                                    # 生成唯一的 fid（使用时间戳+随机数确保唯一）
+                                    import time
+                                    unique_fid = int(time.time() * 1000) % (2**31)
+                                    session.add(Forum(fid=unique_fid, fname=fname, account_id=acc_id))
+                                    await session.commit()
+                        except Exception as e:
+                            err_msg = str(e)
+                            if "3250004" in err_msg or "已关注" in err_msg:
+                                result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "已关注或无法关注"})
+                            elif "被拉黑" in err_msg or "400013" in err_msg:
+                                result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "账号被该吧拉黑"})
+                                # 标记为封禁（如果 Forum 记录不存在则先创建）
+                                import time
+                                unique_fid = int(time.time() * 1000) % (2**31)
+                                async with self.db.async_session() as session:
+                                    from sqlalchemy import select
+                                    from ..db.models import Forum
+                                    existing = await session.execute(
+                                        select(Forum).where(Forum.fname == fname, Forum.account_id == acc_id)
+                                    )
+                                    forum = existing.scalar_one_or_none()
+                                    if forum:
+                                        forum.is_banned = True
+                                        forum.ban_reason = "批量关注时检测到拉黑"
+                                        forum.is_post_target = False
+                                    else:
+                                        session.add(Forum(
+                                            fid=unique_fid, fname=fname, account_id=acc_id,
+                                            is_banned=True, ban_reason="批量关注时检测到拉黑"
+                                        ))
+                                    await session.commit()
+                            else:
+                                result["failed"].append({"account_id": acc_id, "fname": fname, "reason": err_msg[:50]})
+                            await log_error(f"账号 {acc_id} 关注 [{fname}] 失败: {err_msg}")
+
+                        current_action += 1
+                        if progress_callback:
+                            await progress_callback(current_action, total_actions)
+
+                        # 防止高频拦截
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+            except Exception as e:
+                result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"创建客户端失败: {str(e)[:30]}"})
+                await log_error(f"创建客户端执行关注任务失败(ID:{acc_id}): {e}")
+
+        await log_info(
+            f"批量关注完成：成功 {len(result['success'])}, 失败 {len(result['failed'])}, 跳过 {len(result['skipped'])}"
+        )
+        return result
 
 
 class AutoBumpManager:
