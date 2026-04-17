@@ -1196,10 +1196,7 @@ class Database:
         """分页查询物料，返回 (列表, 总数)"""
         async with self.async_session() as session:
             from sqlalchemy import func, select as sa_select
-            base_where = [
-                MaterialPool.posted_tid.isnot(None),
-                MaterialPool.posted_tid != 0,
-            ]
+            base_where = []
             if survival_status:
                 base_where.append(MaterialPool.survival_status == survival_status)
             if account_id:
