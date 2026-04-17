@@ -257,7 +257,7 @@ class SurvivalPage:
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Container(
-                    content=ft.Column(self._build_stat_cards(), spacing=10, expand=True),
+                    content=ft.Row(self._build_stat_cards(), spacing=10),
                     padding=ft.padding.only(top=15, left=20, right=20),
                 ),
                 ft.Divider(height=10, color="transparent"),

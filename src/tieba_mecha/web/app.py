@@ -548,12 +548,12 @@ class TiebaMechaApp:
 
             # 每次导航都重新 build 并挂载（确保 UI 控件引用一致）
             self.content_area.content = page_obj.build()
-            # 先刷新框架，再异步加载数据
             self.page.update()
             if hasattr(page_obj, "load_data"):
                 await page_obj.load_data()
-                # 数据加载完成后重新构建页面（确保统计卡片显示正确）
-                self.content_area.content = page_obj.build()
+                # 数据加载完成后，允许页面自定义处理（如下拉框更新）
+                if hasattr(page_obj, "on_data_loaded"):
+                    page_obj.on_data_loaded()
                 self.page.update()
         except Exception as e:
             import traceback

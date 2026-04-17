@@ -64,6 +64,11 @@ class PostsPage:
 
         self.page.update()
 
+    def on_data_loaded(self):
+        """数据加载完成后的回调（由 app.py 调用）"""
+        # posts 页面只需要更新界面，不需要重新构建
+        self.page.update()
+
     async def _load_cached_threads(self):
         """从数据库加载已缓存的帖子记录"""
         from ...db.models import ThreadRecord
