@@ -5,7 +5,7 @@ from ..flet_compat import COLORS
 from ..utils import with_opacity
 from ..components.icons import (
     ARROW_BACK_IOS_NEW, ANALYTICS_OUTLINED, CHECK_CIRCLE,
-    ERROR, REMOVE_CIRCLE_OUTLINED
+    ERROR, REMOVE_CIRCLE_OUTLINED, OPEN_IN_NEW, INFO_OUTLINED
 )
 
 
@@ -18,9 +18,10 @@ class SurvivalPage:
         self.on_navigate = on_navigate
         self._stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._account_options = []
+        self._account_name_map = {}  # account_id -> name 映射
         self._current_page = 1
-        self._stat_cards_container = None  # 统计卡片容器引用
-        self._page_size = 20
+        self._stat_cards_container = None
+        self._page_size = 15
         self._total = 0
         self._materials = []
 
@@ -35,6 +36,8 @@ class SurvivalPage:
                 ft.dropdown.Option(str(a.id), a.name or f"账号{a.id}")
                 for a in accounts
             ]
+            # 构建账号 ID -> 名称映射
+            self._account_name_map = {a.id: a.name or f"账号{a.id}" for a in accounts}
             await self._load_page(1)
         except Exception as e:
             import traceback
@@ -55,7 +58,7 @@ class SurvivalPage:
         )
         self._materials = materials
         self._total = total
-        self._update_table()
+        self._update_card_list()
         self._update_pagination()
 
     async def _on_status_change(self, e):
@@ -72,6 +75,8 @@ class SurvivalPage:
         total_pages = (self._total + self._page_size - 1) // self._page_size
         if self._current_page < total_pages:
             await self._load_page(self._current_page + 1)
+
+    # ========== 统计卡片 ==========
 
     def _build_stat_cards(self) -> list[ft.Control]:
         """构建统计卡片"""
@@ -129,12 +134,15 @@ class SurvivalPage:
         cards.append(progress_card)
         return cards
 
+    # ========== 筛选栏 ==========
+
     def _build_filter_bar(self) -> ft.Control:
         """构建筛选栏"""
         self._status_filter = ft.Dropdown(
             label="存活状态",
             value="all",
             width=130,
+            text_size=13,
             options=[
                 ft.dropdown.Option("all", "全部"),
                 ft.dropdown.Option("alive", "存活"),
@@ -147,48 +155,181 @@ class SurvivalPage:
             label="账号",
             value="all",
             width=160,
+            text_size=13,
             options=[ft.dropdown.Option("all", "全部账号")] + self._account_options,
             on_change=self._on_account_change,
         )
-        # 保存容器引用以便后续更新账号下拉框
-        self._filter_bar_container = ft.Row(
+        return ft.Row(
             [self._status_filter, self._account_filter],
             spacing=15,
         )
-        return self._filter_bar_container
+
+    # ========== 数据回调 ==========
 
     def on_data_loaded(self):
         """数据加载完成后的回调 - 更新统计卡片和账号下拉框选项"""
-        # 重建统计卡片
         if self._stat_cards_container:
             self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
-        # 更新账号下拉框
         if hasattr(self, "_account_filter") and self._account_options:
             self._account_filter.options = [ft.dropdown.Option("all", "全部账号")] + self._account_options
         self.page.update()
 
-    def _build_table(self) -> ft.Control:
-        """构建数据表格"""
-        self._table = ft.DataTable(
-            column_spacing=20,
-            heading_row_height=36,
-            data_row_min_height=40,
-            columns=[
-                ft.DataColumn(ft.Text("账号", size=12, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("贴吧", size=12, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("标题", size=12, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("状态", size=12, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("发布时间", size=12, weight=ft.FontWeight.BOLD)),
-            ],
-            rows=[],
-        )
+    # ========== 卡片列表 ==========
+
+    def _build_card_list(self) -> ft.Control:
+        """构建卡片列表区域"""
+        self._card_list = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True)
         return ft.Container(
-            content=ft.Column([self._table], scroll=ft.ScrollMode.AUTO),
+            content=self._card_list,
             expand=True,
             border=ft.border.all(1, with_opacity(0.1, "onSurface")),
             border_radius=8,
-            padding=5,
+            padding=10,
         )
+
+    def _build_material_card(self, m) -> ft.Control:
+        """构建单个物料卡片"""
+        status_map = {
+            "alive": (CHECK_CIRCLE, "存活", COLORS.GREEN),
+            "dead": (ERROR, "阵亡", "error"),
+            "unknown": (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"),
+        }
+        icon, label, color = status_map.get(m.survival_status, (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"))
+
+        # 账号名
+        account_name = self._account_name_map.get(m.posted_account_id, str(m.posted_account_id or "-"))
+
+        # 标题（优先 title，其次 content 截取）
+        title = m.title or ""
+        if not title and m.content:
+            title = m.content[:40] + ("..." if len(m.content) > 40 else "")
+        if not title:
+            title = "无标题"
+
+        # 时间
+        posted_time = m.posted_time.strftime("%m-%d %H:%M") if m.posted_time else "-"
+
+        # 状态标签
+        status_badge = ft.Container(
+            content=ft.Row([ft.Icon(icon, size=14, color=color), ft.Text(label, size=12, color=color, weight=ft.FontWeight.W_500)], spacing=4),
+            bgcolor=with_opacity(0.08, color),
+            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+            border_radius=6,
+        )
+
+        # 顶行：标题 + 状态标签
+        top_row = ft.Row([
+            ft.Text(title, size=14, weight=ft.FontWeight.W_500, expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            status_badge,
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+
+        # 底行：元信息
+        meta_items = []
+        if m.posted_fname:
+            meta_items.append(ft.Row([ft.Icon(INFO_OUTLINED, size=12, color="onSurfaceVariant"), ft.Text(m.posted_fname, size=11, color="onSurfaceVariant")], spacing=3))
+        meta_items.append(ft.Row([ft.Icon(INFO_OUTLINED, size=12, color="onSurfaceVariant"), ft.Text(account_name, size=11, color="onSurfaceVariant")], spacing=3))
+        meta_items.append(ft.Text(posted_time, size=11, color="onSurfaceVariant"))
+
+        # 阵亡原因
+        if m.survival_status == "dead" and m.death_reason:
+            meta_items.append(ft.Text(f"原因: {m.death_reason}", size=11, color="error", italic=True))
+
+        bottom_row = ft.Row(meta_items, spacing=12, wrap=True)
+
+        card = ft.Container(
+            content=ft.Column([top_row, bottom_row], spacing=6),
+            bgcolor=with_opacity(0.02, color) if m.survival_status != "unknown" else with_opacity(0.02, "onSurface"),
+            border=ft.border.all(1, with_opacity(0.15, color) if m.survival_status != "unknown" else with_opacity(0.1, "onSurface")),
+            border_radius=8,
+            padding=ft.padding.symmetric(horizontal=14, vertical=10),
+            on_click=lambda e, mat=m: self._show_detail(mat),
+            ink=True,
+        )
+        return card
+
+    def _update_card_list(self):
+        """更新卡片列表"""
+        if not hasattr(self, "_card_list"):
+            return
+        cards = [self._build_material_card(m) for m in self._materials]
+        if not cards:
+            cards = [ft.Container(
+                content=ft.Text("暂无数据", size=13, color="onSurfaceVariant", text_align=ft.TextAlign.CENTER),
+                alignment=ft.alignment.center,
+                padding=30,
+            )]
+        self._card_list.controls = cards
+        self.page.update()
+
+    def _show_detail(self, m):
+        """点击卡片弹出详情"""
+        status_map = {
+            "alive": (CHECK_CIRCLE, "存活", COLORS.GREEN),
+            "dead": (ERROR, "阵亡", "error"),
+            "unknown": (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"),
+        }
+        icon, label, color = status_map.get(m.survival_status, (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"))
+        account_name = self._account_name_map.get(m.posted_account_id, str(m.posted_account_id or "-"))
+
+        # 帖子链接
+        tid_row = ft.Row([])
+        if m.posted_tid and m.posted_fname:
+            tid_row = ft.Row([
+                ft.Text(f"TID: {m.posted_tid}", size=12, color="onSurfaceVariant"),
+                ft.IconButton(
+                    icon=OPEN_IN_NEW,
+                    icon_size=14,
+                    icon_color=COLORS.PRIMARY,
+                    tooltip="在浏览器中打开",
+                    on_click=lambda e: self.page.launch_url(f"https://tieba.baidu.com/p/{m.posted_tid}"),
+                ),
+            ])
+
+        content_text = m.content or "无内容"
+        # 限制详情弹窗中的内容长度
+        if len(content_text) > 500:
+            content_text = content_text[:500] + f"\n\n... (共 {len(m.content)} 字)"
+
+        detail_items = [
+            ft.Row([ft.Icon(icon, color=color, size=18), ft.Text(f"状态: {label}", size=14, color=color, weight=ft.FontWeight.W_500)]),
+            ft.Divider(height=1),
+            ft.Row([ft.Text("标题:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"), ft.Text(m.title or "无", size=12, expand=True, selectable=True)]),
+            ft.Row([ft.Text("贴吧:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"), ft.Text(m.posted_fname or "-", size=12)]),
+            ft.Row([ft.Text("账号:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"), ft.Text(account_name, size=12)]),
+            tid_row,
+            ft.Row([ft.Text("发布时间:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"), ft.Text(m.posted_time.strftime("%Y-%m-%d %H:%M") if m.posted_time else "-", size=12)]),
+        ]
+
+        # 阵亡原因
+        if m.survival_status == "dead" and m.death_reason:
+            detail_items.append(ft.Row([ft.Text("阵亡原因:", size=12, weight=ft.FontWeight.BOLD, color="error"), ft.Text(m.death_reason, size=12, color="error", expand=True, selectable=True)]))
+
+        # 最后检测时间
+        if m.last_checked_at:
+            detail_items.append(ft.Row([ft.Text("最后检测:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"), ft.Text(m.last_checked_at.strftime("%Y-%m-%d %H:%M"), size=12)]))
+
+        detail_items.append(ft.Divider(height=1))
+        detail_items.append(ft.Text("内容:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"))
+        detail_items.append(ft.Container(
+            content=ft.Text(content_text, size=12, selectable=True),
+            bgcolor=with_opacity(0.03, "onSurface"),
+            border_radius=6,
+            padding=10,
+            max_height=200,
+        ))
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icon, color=color), ft.Text(f"物料详情 #{m.id}")]),
+            content=ft.Container(
+                content=ft.Column(detail_items, spacing=8, scroll=ft.ScrollMode.AUTO),
+                width=500,
+                max_height=500,
+            ),
+            actions=[ft.TextButton("关闭", on_click=lambda e: self.page.close(dialog))],
+        )
+        self.page.open(dialog)
+
+    # ========== 分页控件 ==========
 
     def _build_pagination(self) -> ft.Control:
         """构建分页控件"""
@@ -212,29 +353,6 @@ class SurvivalPage:
             spacing=10,
         )
 
-    def _update_table(self):
-        """更新表格数据"""
-        if not hasattr(self, "_table"):
-            return
-        rows = []
-        for m in self._materials:
-            status_map = {
-                "alive": (CHECK_CIRCLE, "存活", COLORS.GREEN),
-                "dead": (ERROR, "阵亡", "error"),
-                "unknown": (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"),
-            }
-            icon, label, color = status_map.get(m.survival_status, ("", "未知", "onSurfaceVariant"))
-            posted_time = m.posted_time.strftime("%m-%d %H:%M") if m.posted_time else "-"
-            rows.append(ft.DataRow(cells=[
-                ft.DataCell(ft.Text(str(m.posted_account_id or "-"), size=11)),
-                ft.DataCell(ft.Text(m.posted_fname or "-", size=11)),
-                ft.DataCell(ft.Text((m.content[:20] + "...") if m.content and len(m.content) > 20 else (m.content or "-"), size=11)),
-                ft.DataCell(ft.Row([ft.Icon(icon, size=14, color=color), ft.Text(label, size=11, color=color)], spacing=4)),
-                ft.DataCell(ft.Text(posted_time, size=11)),
-            ]))
-        self._table.rows = rows
-        self.page.update()
-
     def _update_pagination(self):
         """更新分页信息"""
         if not hasattr(self, "_page_info"):
@@ -244,6 +362,8 @@ class SurvivalPage:
         self._prev_btn.disabled = self._current_page <= 1
         self._next_btn.disabled = self._current_page >= total_pages
         self.page.update()
+
+    # ========== 页面构建 ==========
 
     def build(self) -> ft.Control:
         """构建页面"""
@@ -281,7 +401,7 @@ class SurvivalPage:
                     padding=ft.padding.only(left=20, right=20),
                 ),
                 ft.Container(
-                    content=self._build_table(),
+                    content=self._build_card_list(),
                     padding=ft.padding.only(left=20, right=20, top=10),
                     expand=True,
                 ),
