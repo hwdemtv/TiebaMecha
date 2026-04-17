@@ -19,7 +19,7 @@ class SurvivalPage:
         self._stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._account_options = []
         self._current_page = 1
-        self._filter_bar_container = None  # 用于存储筛选栏容器引用
+        self._stat_cards_container = None  # 统计卡片容器引用
         self._page_size = 20
         self._total = 0
         self._materials = []
@@ -158,10 +158,14 @@ class SurvivalPage:
         return self._filter_bar_container
 
     def on_data_loaded(self):
-        """数据加载完成后的回调 - 更新账号下拉框选项"""
+        """数据加载完成后的回调 - 更新统计卡片和账号下拉框选项"""
+        # 重建统计卡片
+        if self._stat_cards_container:
+            self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
+        # 更新账号下拉框
         if hasattr(self, "_account_filter") and self._account_options:
             self._account_filter.options = [ft.dropdown.Option("all", "全部账号")] + self._account_options
-            self.page.update()
+        self.page.update()
 
     def _build_table(self) -> ft.Control:
         """构建数据表格"""
@@ -265,7 +269,7 @@ class SurvivalPage:
             content=ft.Column([
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
-                ft.Container(
+                self._stat_cards_container = ft.Container(
                     content=ft.Row(self._build_stat_cards(), spacing=10),
                     padding=ft.padding.only(top=15, left=20, right=20),
                 ),
