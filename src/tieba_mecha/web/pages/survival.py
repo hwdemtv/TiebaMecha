@@ -19,6 +19,7 @@ class SurvivalPage:
         self._stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._account_options = []
         self._fname_options = []  # 贴吧名选项
+        self._death_reason_options = []  # 阵亡原因选项
         self._account_name_map = {}  # account_id -> name 映射
         self._current_page = 1
         self._stat_cards_container = None
@@ -42,6 +43,9 @@ class SurvivalPage:
             # 获取贴吧名列表
             fnames = await self.db.get_distinct_fnames()
             self._fname_options = [ft.dropdown.Option(f, f) for f in fnames]
+            # 获取阵亡原因列表
+            reasons = await self.db.get_distinct_death_reasons()
+            self._death_reason_options = [ft.dropdown.Option(r, r) for r in reasons]
             await self._load_page(1)
         except Exception as e:
             import traceback
@@ -53,13 +57,35 @@ class SurvivalPage:
         status_filter = self._status_filter.value if hasattr(self, "_status_filter") else None
         account_filter = self._account_filter.value if hasattr(self, "_account_filter") else None
         fname_filter = self._fname_filter.value if hasattr(self, "_fname_filter") else None
+        death_reason_filter = self._death_reason_filter.value if hasattr(self, "_death_reason_filter") else None
+        date_from_filter = self._date_from.value if hasattr(self, "_date_from") else None
+        date_to_filter = self._date_to.value if hasattr(self, "_date_to") else None
         account_id = int(account_filter) if account_filter and account_filter != "all" else None
         fname = fname_filter if fname_filter and fname_filter != "all" else None
+        death_reason = death_reason_filter if death_reason_filter and death_reason_filter != "all" else None
         status = status_filter if status_filter and status_filter != "all" else None
+        # 解析日期
+        date_from = None
+        date_to = None
+        if date_from_filter:
+            try:
+                from datetime import datetime
+                date_from = datetime.strptime(date_from_filter, "%Y-%m-%d")
+            except ValueError:
+                pass
+        if date_to_filter:
+            try:
+                from datetime import datetime
+                date_to = datetime.strptime(date_to_filter + " 23:59:59", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
         materials, total = await self.db.get_materials_paginated(
             survival_status=status,
             account_id=account_id,
             fname=fname,
+            death_reason=death_reason,
+            date_from=date_from,
+            date_to=date_to,
             page=page,
             page_size=self._page_size,
         )
@@ -75,6 +101,12 @@ class SurvivalPage:
         await self._load_page(1)
 
     async def _on_fname_change(self, e):
+        await self._load_page(1)
+
+    async def _on_death_reason_change(self, e):
+        await self._load_page(1)
+
+    async def _on_date_change(self, e):
         await self._load_page(1)
 
     async def _on_prev_page(self, e):
@@ -177,11 +209,44 @@ class SurvivalPage:
             options=[ft.dropdown.Option("all", "全部贴吧")] + self._fname_options,
             on_change=self._on_fname_change,
         )
-        return ft.Row(
-            [self._status_filter, self._account_filter, self._fname_filter],
-            spacing=15,
-            wrap=True,
+        self._death_reason_filter = ft.Dropdown(
+            label="阵亡原因",
+            value="all",
+            width=180,
+            text_size=13,
+            options=[ft.dropdown.Option("all", "全部原因")] + self._death_reason_options,
+            on_change=self._on_death_reason_change,
         )
+        self._date_from = ft.TextField(
+            label="起始日期",
+            width=130,
+            text_size=13,
+            hint_text="YYYY-MM-DD",
+            on_submit=self._on_date_change,
+        )
+        self._date_to = ft.TextField(
+            label="结束日期",
+            width=130,
+            text_size=13,
+            hint_text="YYYY-MM-DD",
+            on_submit=self._on_date_change,
+        )
+        return ft.Column([
+            ft.Row(
+                [self._status_filter, self._account_filter, self._fname_filter, self._death_reason_filter],
+                spacing=15,
+                wrap=True,
+            ),
+            ft.Row(
+                [self._date_from, self._date_to, ft.IconButton(
+                    icon="search",
+                    icon_size=18,
+                    tooltip="搜索",
+                    on_click=self._on_date_change,
+                )],
+                spacing=15,
+            ),
+        ], spacing=8)
 
     # ========== 数据回调 ==========
 
@@ -193,6 +258,8 @@ class SurvivalPage:
             self._account_filter.options = [ft.dropdown.Option("all", "全部账号")] + self._account_options
         if hasattr(self, "_fname_filter") and self._fname_options:
             self._fname_filter.options = [ft.dropdown.Option("all", "全部贴吧")] + self._fname_options
+        if hasattr(self, "_death_reason_filter") and self._death_reason_options:
+            self._death_reason_filter.options = [ft.dropdown.Option("all", "全部原因")] + self._death_reason_options
         self.page.update()
 
     # ========== 卡片列表 ==========
