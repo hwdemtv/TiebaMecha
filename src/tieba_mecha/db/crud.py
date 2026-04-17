@@ -145,6 +145,14 @@ class Database:
             "ALTER TABLE material_pool ADD COLUMN bump_count INTEGER DEFAULT 0",
             "ALTER TABLE material_pool ADD COLUMN last_bumped_at DATETIME DEFAULT NULL",
             "ALTER TABLE material_pool ADD COLUMN posted_time DATETIME DEFAULT NULL",
+            # 自顶模式扩展字段
+            "ALTER TABLE material_pool ADD COLUMN bump_mode VARCHAR(20) DEFAULT 'once'",
+            "ALTER TABLE material_pool ADD COLUMN bump_hour INTEGER DEFAULT 10",
+            "ALTER TABLE material_pool ADD COLUMN bump_duration_days INTEGER DEFAULT 0",
+            "ALTER TABLE material_pool ADD COLUMN bump_start_date DATE DEFAULT NULL",
+            "ALTER TABLE material_pool ADD COLUMN bump_account_ids TEXT DEFAULT NULL",
+            "ALTER TABLE material_pool ADD COLUMN bump_account_index INTEGER DEFAULT 0",
+            "ALTER TABLE material_pool ADD COLUMN bump_last_date DATE DEFAULT NULL",
         ]:
             try:
                 async with self.engine.begin() as conn:

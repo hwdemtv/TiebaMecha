@@ -84,13 +84,28 @@ class BatchPostPage:
             sched_raw = await self.db.get_setting("use_schedule")
             if sched_raw is not None:
                 self.use_schedule.value = sched_raw == "1"
+                # 恢复定时输入框的可见性
+                if hasattr(self, "schedule_time") and hasattr(self, "interval_hours"):
+                    self.schedule_time.visible = sched_raw == "1"
+                    self.interval_hours.visible = sched_raw == "1"
             
             # [自顶配置同步] 恢复矩阵协同模式开关
             matrix_raw = await self.db.get_setting("bump_matrix_enabled")
             if matrix_raw is not None:
                 self.bump_matrix_switch.value = matrix_raw == "1"
             
+            # [自顶配置同步] 恢复自顶模式
+            bump_mode_raw = await self.db.get_setting("bump_mode")
+            if bump_mode_raw is not None and hasattr(self, "bump_mode_group"):
+                self.bump_mode_group.value = bump_mode_raw
+                self.bump_loop_container.visible = (bump_mode_raw == "matrix_loop")
+            
+            bump_hour_raw = await self.db.get_setting("bump_hour")
+            if bump_hour_raw is not None and hasattr(self, "bump_hour_field"):
+                self.bump_hour_field.value = bump_hour_raw
+            
             # 首次加载初始化默认选择：仅勾选状态正常的账号
+            if not self._initial_load_done:
                 for acc in self._accounts:
                     if acc.status == "active":
                         self._selected_account_ids.add(acc.id)
@@ -167,6 +182,24 @@ class BatchPostPage:
             await self.db.set_setting("use_ai_rewrite", ai_enabled)
             await self.db.set_setting("use_schedule", schedule_enabled)
             
+            # 保存自顶模式配置
+            bump_mode = self.bump_mode_group.value if hasattr(self, "bump_mode_group") else "once"
+            await self.db.set_setting("bump_mode", bump_mode)
+            
+            if hasattr(self, "bump_hour_field"):
+                try:
+                    bump_hour = max(0, min(23, int(self.bump_hour_field.value)))
+                except (ValueError, AttributeError):
+                    bump_hour = 10
+                await self.db.set_setting("bump_hour", str(bump_hour))
+            
+            if hasattr(self, "bump_duration_field"):
+                try:
+                    bump_duration = int(self.bump_duration_field.value) if self.bump_duration_field.value != "∞" else 0
+                except (ValueError, AttributeError):
+                    bump_duration = 7
+                await self.db.set_setting("bump_duration_days", str(bump_duration))
+            
             # 同步更新内存缓存
             self._max_bump_count = max_count
             
@@ -177,6 +210,35 @@ class BatchPostPage:
         except Exception as ex:
             await log_error(f"[UI ERROR] _save_bump_config failed: {ex}")
             self._show_snackbar(f"保存配置失败: {str(ex)}", "error")
+
+    def _on_bump_mode_change(self, e):
+        """自顶模式切换事件"""
+        mode = e.control.value
+        # 显示/隐藏矩阵轮换配置区域
+        if hasattr(self, "bump_loop_container"):
+            self.bump_loop_container.visible = (mode == "matrix_loop")
+        # 永久模式切换
+        if hasattr(self, "bump_duration_field") and hasattr(self, "bump_permanent_switch"):
+            if mode == "matrix_loop" and self.bump_permanent_switch.value:
+                self.bump_duration_field.disabled = True
+                self.bump_duration_field.value = "∞"
+            else:
+                self.bump_duration_field.disabled = False
+                self.bump_duration_field.value = "7"
+        self.page.update()
+
+    def _on_bump_permanent_change(self, e):
+        """永久循环开关切换"""
+        if hasattr(self, "bump_duration_field"):
+            if e.control.value:
+                self.bump_duration_field.disabled = True
+                self.bump_duration_field.value = "∞"
+                self.bump_duration_field.tooltip = "永久循环模式，不设天数上限"
+            else:
+                self.bump_duration_field.disabled = False
+                self.bump_duration_field.value = "7"
+                self.bump_duration_field.tooltip = None
+            self.bump_duration_field.update()
 
     def _refresh_account_pool(self):
         """刷新账号池选择器 UI - 支持过滤与独立展示"""
@@ -626,10 +688,25 @@ class BatchPostPage:
                         )
                     )
                 else:
-                    # 自顶状态逻辑增强：区分 开启/停止/上限
-                    # 使用动态配置的 max_bump_count（默认 20）
+                    # 自顶状态逻辑增强：根据模式区分显示
+                    bump_mode = getattr(m, 'bump_mode', 'once') or 'once'
                     max_bump = getattr(self, "_max_bump_count", 20)
-                    is_limit_reached = (m.bump_count >= max_bump)
+                    
+                    # 判断是否达到上限（仅 once 模式有封顶概念）
+                    is_limit_reached = (bump_mode == "once" and m.bump_count >= max_bump)
+                    
+                    # 判断是否超过持续期
+                    is_expired = False
+                    if bump_mode in ("scheduled", "matrix_loop"):
+                        from datetime import date as date_type
+                        bump_start = getattr(m, 'bump_start_date', None)
+                        bump_duration = getattr(m, 'bump_duration_days', 0) or 0
+                        if bump_start and bump_duration > 0:
+                            from datetime import timedelta as td
+                            end_date = bump_start + td(days=bump_duration)
+                            if date_type.today() > end_date:
+                                is_expired = True
+                    
                     bump_status_text = f"已顶{m.bump_count}"
                     bump_color = "onSurfaceVariant"
                     bump_tooltip = f"当前已累计自顶 {m.bump_count} 次"
@@ -637,7 +714,11 @@ class BatchPostPage:
                     if is_limit_reached:
                         bump_status_text = f"封顶({m.bump_count})"
                         bump_color = "orange"
-                        bump_tooltip = f"由于该贴已达到 {max_bump} 次安全回帖上限，系统已自动停止进一步操作"
+                        bump_tooltip = f"已达到 {max_bump} 次安全上限，系统已自动停止\n点击🔄可重置计数继续自顶"
+                    elif is_expired:
+                        bump_status_text = f"到期({m.bump_count})"
+                        bump_color = "orange"
+                        bump_tooltip = f"已超过设定的持续天数，自顶已自动停止\n点击🔄可延长周期继续自顶"
                     elif not m.is_auto_bump and m.bump_count > 0:
                         bump_status_text = f"暂停({m.bump_count})"
                         bump_color = "onSurfaceVariant"
@@ -662,6 +743,29 @@ class BatchPostPage:
                         surv_color = "error"
                         surv_tooltip = "已被抽除或无法访问"
 
+                    # 获取自顶模式信息
+                    bump_mode = getattr(m, 'bump_mode', 'once') or 'once'
+                    mode_icons = {"once": "🔢", "scheduled": "⏰", "matrix_loop": "🔄"}
+                    mode_icon = mode_icons.get(bump_mode, "🔢")
+                    mode_labels = {"once": "次数", "scheduled": "周期", "matrix_loop": "轮换"}
+                    
+                    # 获取当前轮换账号信息
+                    loop_info = ""
+                    if bump_mode == "matrix_loop":
+                        try:
+                            account_ids = json.loads(getattr(m, 'bump_account_ids', '[]') or '[]')
+                            if account_ids:
+                                current_idx = getattr(m, 'bump_account_index', 0) or 0
+                                current_acc_id = account_ids[current_idx % len(account_ids)]
+                                current_acc = next((a for a in self._accounts if a.id == current_acc_id), None)
+                                acc_name = current_acc.name if current_acc else f"账号{current_acc_id}"
+                                loop_info = f"\n🔄{acc_name}轮换中({current_idx + 1}/{len(account_ids)})"
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    
+                    bump_status_text = f"{mode_icon}{bump_status_text}"
+                    bump_tooltip = f"模式: {mode_labels.get(bump_mode, '次数')}{loop_info}\n{bump_tooltip}"
+
                     archive_rows.append(
                         ft.DataRow(
                             selected=m.id in self._selected_archive_ids,
@@ -685,6 +789,7 @@ class BatchPostPage:
                                         on_click=self._on_check_link_survival
                                     ),
                                     ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="被屏蔽了？重置为待发状态"),
+                                    ft.IconButton(icons.REFRESH, icon_color="teal", data=m.id, on_click=self._reset_bump_count, tooltip="归零自顶计数，重新开始"),
                                 ], spacing=0)),
                                 ft.DataCell(ft.Row([
                                     ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
@@ -914,6 +1019,26 @@ class BatchPostPage:
         self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar("状态已回滚到排期池", "info")
+
+    async def _reset_bump_count(self, e):
+        """重置自顶计数，让封顶/到期的帖子可以继续自顶"""
+        mid = e.control.data
+        async with self.db.async_session() as session:
+            from ...db.models import MaterialPool
+            m = await session.get(MaterialPool, mid)
+            if m:
+                m.bump_count = 0
+                m.bump_account_index = 0
+                # 如果是定时/轮换模式，刷新开始日期
+                bump_mode = getattr(m, 'bump_mode', 'once') or 'once'
+                if bump_mode in ("scheduled", "matrix_loop"):
+                    from datetime import date
+                    m.bump_start_date = date.today()
+                    m.bump_last_date = None
+                await session.commit()
+        self._materials = await self.db.get_materials()
+        await self._refresh_material_table()
+        self._show_snackbar(f"物料 [{mid}] 自顶计数已归零，可继续执行", "success")
 
     async def _on_edit_material_click(self, e):
         m = e.control.data
@@ -2099,6 +2224,63 @@ class BatchPostPage:
             label="矩阵协同模式",
             value=False,
         )
+        
+        # 自顶模式选择
+        self.bump_mode_group = ft.RadioGroup(
+            content=ft.Row([
+                ft.Radio(value="once", label="次数上限"),
+                ft.Radio(value="scheduled", label="定时周期"),
+                ft.Radio(value="matrix_loop", label="矩阵轮换循环"),
+            ], spacing=15),
+            value="once",
+            on_change=self._on_bump_mode_change,
+        )
+        
+        # 矩阵轮换配置区域 (默认隐藏)
+        self.bump_hour_field = ft.TextField(
+            label="每日自顶时间",
+            value="10",
+            expand=True,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            text_size=12,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            dense=True,
+            hint_text="0-23点",
+        )
+        self.bump_duration_field = ft.TextField(
+            label="持续天数",
+            value="7",
+            expand=True,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            text_size=12,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            dense=True,
+            hint_text="0=永久",
+        )
+        self.bump_permanent_switch = ft.Switch(
+            label="永久循环 (不设上限)",
+            value=False,
+            on_change=self._on_bump_permanent_change,
+        )
+        self.bump_loop_container = ft.Container(
+            content=ft.Column([
+                ft.Text("矩阵轮换配置", size=11, weight=ft.FontWeight.W_500, color="primary"),
+                ft.Row([
+                    self.bump_hour_field,
+                    self.bump_duration_field,
+                ], spacing=10),
+                self.bump_permanent_switch,
+                ft.Container(
+                    content=ft.Text("将在归档库中为每个帖子单独配置轮换账号", size=10, color="onSurfaceVariant"),
+                    padding=5,
+                ),
+            ], spacing=8),
+            padding=10,
+            bgcolor=with_opacity(0.08, "surfaceContainerHighest"),
+            border_radius=8,
+            visible=False,  # 默认隐藏
+        )
+        
         self.bump_config_save_btn = ft.FilledButton(
             "保存配置",
             icon=icons.SAVE,
@@ -2170,6 +2352,10 @@ class BatchPostPage:
                                 ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
                                 ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
                                 self.bump_matrix_switch,
+                                ft.Divider(height=5, color="transparent"),
+                                ft.Text("自顶模式选择", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
+                                self.bump_mode_group,
+                                self.bump_loop_container,  # 矩阵轮换配置区
                                 self.bump_config_save_btn,
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
