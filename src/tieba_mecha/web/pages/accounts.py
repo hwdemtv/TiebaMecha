@@ -59,30 +59,41 @@ class AccountsPage:
 
     def refresh_ui(self):
         """刷新 UI"""
-        if self._active_tab_index == 0:
-            if hasattr(self, "account_list"):
-                self.account_list.controls = self._build_account_items()
-                # 统计封禁损耗
-                banned_count = sum(1 for a in getattr(self, "_accounts", []) if getattr(a, "status", "") == "banned")
+        # 始终刷新当前 tab 的内容（确保数据更新时 UI 也更新）
+        current_tab = self._active_tab_index
+        
+        # 账号档案中心
+        if hasattr(self, "account_list"):
+            self.account_list.controls = self._build_account_items()
+            # 统计封禁损耗
+            banned_count = sum(1 for a in getattr(self, "_accounts", []) if getattr(a, "status", "") == "banned")
+            if hasattr(self, "account_stats_info"):
                 if banned_count > 0:
                     self.account_stats_info.text = f"🚨 战损报警：检测到 {banned_count} 个已封禁账号"
                     self.account_stats_info.visible = True
                 else:
                     self.account_stats_info.visible = False
+            # 只有在当前 tab 是账号中心时才更新 page
+            if current_tab == 0:
                 self.page.update()
-        elif self._active_tab_index == 1:
-            if hasattr(self, "matrix_list"):
-                self.matrix_list.controls = self._build_matrix_items()
-                self._update_matrix_header()
+        
+        # 全域战略吧库
+        if hasattr(self, "matrix_list"):
+            self.matrix_list.controls = self._build_matrix_items()
+            self._update_matrix_header()
+            if current_tab == 1:
                 self.page.update()
-        elif self._active_tab_index == 2:
-            if hasattr(self, "survival_list"):
-                self.survival_list.controls = self._build_survival_items()
-                self._update_survival_header()
+        
+        # 存活分析
+        if hasattr(self, "survival_list"):
+            self.survival_list.controls = self._build_survival_items()
+            self._update_survival_header()
+            if current_tab == 2:
                 self.page.update()
-        elif self._active_tab_index == 3:
-            if hasattr(self, "exception_list"):
-                self.page.run_task(self._load_exception_events)
+        
+        # 异常记录
+        if hasattr(self, "exception_list") and current_tab == 3:
+            self.page.run_task(self._load_exception_events)
 
     def build(self) -> ft.Control:
         # 主标签页切换逻辑
@@ -251,6 +262,13 @@ class AccountsPage:
             on_click=self._on_sync_matrix,
         )
 
+        follow_btn = ft.IconButton(
+            icon=icons.ADD,
+            tooltip="关注贴吧",
+            icon_color="primary",
+            on_click=lambda e: self._show_follow_forum_dialog(e),
+        )
+
         self.matrix_header_info = ft.Text("战略贴吧总数: 0 | 矩阵覆盖率: 0%", size=12, color="onSurfaceVariant")
 
         # 列表容器
@@ -262,7 +280,7 @@ class AccountsPage:
 
         return ft.Column(
             controls=[
-                ft.Row([search_field, sync_btn], spacing=10),
+                ft.Row([search_field, sync_btn, follow_btn], spacing=10),
                 self.matrix_header_info,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
                 ft.Container(
@@ -613,6 +631,102 @@ class AccountsPage:
         except Exception as ex:
             self._show_snackbar(f"❌ 同步失败: {str(ex)}", "error")
 
+    def _show_follow_forum_dialog(self, e):
+        """显示关注贴吧弹窗"""
+        forum_input = ft.TextField(
+            hint_text="输入要关注的贴吧名称",
+            border_radius=10,
+            text_size=13,
+            autofocus=True,
+            on_submit=lambda ev: self.page.run_task(self._on_follow_forum, ev),
+        )
+
+        hint_text = ft.Text(
+            "💡 支持批量关注，多个贴吧用逗号或换行分隔",
+            size=11,
+            color="onSurfaceVariant"
+        )
+
+        async def on_follow(ev):
+            forum_input.disabled = True
+            submit_btn.disabled = True
+            submit_btn.text = "关注中..."
+            self.page.update()
+
+            try:
+                # 解析输入：支持逗号分隔、换行分隔、空格分隔
+                raw = forum_input.value.strip()
+                if not raw:
+                    self._show_snackbar("请输入贴吧名称", "warning")
+                    forum_input.disabled = False
+                    submit_btn.disabled = False
+                    submit_btn.text = "确认关注"
+                    self.page.update()
+                    return
+
+                # 分割并清理输入
+                import re
+                fnames = re.split(r'[,\n，\s]+', raw)
+                fnames = [f.strip() for f in fnames if f.strip()]
+
+                if not fnames:
+                    self._show_snackbar("未识别到有效贴吧名称", "warning")
+                    forum_input.disabled = False
+                    submit_btn.disabled = False
+                    submit_btn.text = "确认关注"
+                    self.page.update()
+                    return
+
+                # 调用关注 API
+                from ...core.batch_post import BatchPostManager
+                pm = BatchPostManager(self.db)
+                result = await pm.follow_forums_bulk(fnames)
+
+                # 关闭弹窗
+                self.page.close(dialog)
+
+                # 显示结果
+                success_count = len(result["success"])
+                failed_count = len(result["failed"])
+                skipped_count = len(result["skipped"])
+
+                if success_count > 0:
+                    self._show_snackbar(f"✅ 成功关注 {success_count} 个贴吧", "success")
+                if failed_count > 0:
+                    self._show_snackbar(f"⚠️ {failed_count} 个关注失败（可能被拉黑或已关注）", "warning")
+                if skipped_count > 0:
+                    self._show_snackbar(f"ℹ️ {skipped_count} 个已跳过（无需重复关注）", "info")
+
+                # 刷新列表
+                self._matrix_stats = await self.db.get_forum_matrix_stats()
+                self.refresh_ui()
+
+            except Exception as ex:
+                self._show_snackbar(f"❌ 关注失败: {str(ex)}", "error")
+                forum_input.disabled = False
+                submit_btn.disabled = False
+                submit_btn.text = "确认关注"
+                self.page.update()
+
+        submit_btn = ft.FilledButton("确认关注", icon=icons.CHECK, on_click=lambda ev: self.page.run_task(on_follow, ev))
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.FAVORITE_ROUNDED, color="primary"), ft.Text("关注贴吧")]),
+            content=ft.Container(
+                content=ft.Column(
+                    controls=[forum_input, hint_text],
+                    spacing=10,
+                ),
+                padding=10,
+                width=400,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                submit_btn,
+            ]
+        )
+        self.page.open(dialog)
+
     async def _on_toggle_target(self, fname: str, is_target: bool):
         """一键标记/取消战略目标"""
         try:
@@ -628,6 +742,40 @@ class AccountsPage:
             self.refresh_ui()
         except Exception as e:
             self._show_snackbar(f"操作失败: {str(e)}", "error")
+
+    async def _on_complement_follow(self, fname: str):
+        """补齐关注：让未关注的账号也关注该贴吧"""
+        try:
+            # 获取未关注的账号
+            missing_accounts = await self.db.get_accounts_not_following_forum(fname)
+            
+            if not missing_accounts:
+                self._show_snackbar(f"✅ '{fname}' 已被所有账号关注，无需补齐", "success")
+                return
+            
+            missing_names = [acc.name for acc in missing_accounts]
+            self._show_snackbar(f"🔄 正在让 {len(missing_accounts)} 个账号关注 '{fname}'...", "info")
+            
+            # 只让未关注的账号关注
+            missing_ids = [acc.id for acc in missing_accounts]
+            from ...core.batch_post import BatchPostManager
+            pm = BatchPostManager(self.db)
+            result = await pm.follow_forums_bulk([fname], account_ids=missing_ids)
+            
+            success_count = len(result["success"])
+            failed_count = len(result["failed"])
+            
+            if success_count > 0:
+                self._show_snackbar(f"✅ {success_count}/{len(missing_accounts)} 个账号成功关注 '{fname}'", "success")
+            if failed_count > 0:
+                self._show_snackbar(f"⚠️ {failed_count} 个账号关注失败", "warning")
+            
+            # 刷新列表
+            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            self.refresh_ui()
+            
+        except Exception as e:
+            self._show_snackbar(f"❌ 补齐失败: {str(e)}", "error")
 
     def _show_tag_edit_dialog(self, stat: dict):
         """显示修改吧组标签对话框"""
@@ -759,9 +907,9 @@ class AccountsPage:
                                     on_click=lambda e, s=stat: self._show_tag_edit_dialog(s)
                                 ),
                                 ft.PopupMenuItem(
-                                    text="全环境同步关注",
+                                    text="补齐关注（让未关注账号也关注）",
                                     icon=icons.PERSON_ADD_ALT_1_ROUNDED,
-                                    # on_click=...
+                                    on_click=lambda e, f=fname: self.page.run_task(self._on_complement_follow, f)
                                 ),
                             ],
                             icon=icons.MORE_VERT_ROUNDED,
