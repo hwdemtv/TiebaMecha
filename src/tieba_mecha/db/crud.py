@@ -1138,13 +1138,13 @@ class Database:
                     MaterialPool.survival_status,
                     func.count(MaterialPool.id)
                 )
-                .where(MaterialPool.posted_tid.isnot(None))
-                .where(MaterialPool.posted_tid != 0)
+                .where(MaterialPool.survival_status.isnot(None))
                 .group_by(MaterialPool.survival_status)
             )
             stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
             for status, count in result.all():
-                stats[status] = count
+                if status in stats:
+                    stats[status] = count
                 stats["total"] += count
             return stats
 
