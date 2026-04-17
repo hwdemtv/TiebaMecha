@@ -311,11 +311,10 @@ class SurvivalPage:
         detail_items.append(ft.Divider(height=1))
         detail_items.append(ft.Text("内容:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"))
         detail_items.append(ft.Container(
-            content=ft.Text(content_text, size=12, selectable=True),
+            content=ft.Column([ft.Text(content_text, size=12, selectable=True)], scroll=ft.ScrollMode.AUTO, height=180),
             bgcolor=with_opacity(0.03, "onSurface"),
             border_radius=6,
             padding=10,
-            max_height=200,
         ))
 
         dialog = ft.AlertDialog(
@@ -323,7 +322,7 @@ class SurvivalPage:
             content=ft.Container(
                 content=ft.Column(detail_items, spacing=8, scroll=ft.ScrollMode.AUTO),
                 width=500,
-                max_height=500,
+                height=500,
             ),
             actions=[ft.TextButton("关闭", on_click=lambda e: self.page.close(dialog))],
         )
