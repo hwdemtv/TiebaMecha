@@ -1873,53 +1873,7 @@ class Database:
                     await session.delete(record)
                     count += 1
             await session.commit()
-        return count
-
-    async def get_survival_stats(self) -> dict:
-        """获取物料存活统计数据"""
-        from sqlalchemy import func
-        async with self.async_session() as session:
-            result = await session.execute(
-                select(MaterialPool.survival_status, func.count(MaterialPool.id))
-                .group_by(MaterialPool.survival_status)
-            )
-            rows = result.all()
-            stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
-            for status, count in rows:
-                if status in stats:
-                    stats[status] = count
-                stats["total"] += count
-            return stats
-
-    async def get_materials_paginated(
-        self,
-        survival_status: str | None = None,
-        account_id: int | None = None,
-        page: int = 1,
-        page_size: int = 20
-    ) -> tuple[list[MaterialPool], int]:
-        """分页获取物料池数据"""
-        from sqlalchemy import func
-        async with self.async_session() as session:
-            stmt = select(MaterialPool)
-            count_stmt = select(func.count(MaterialPool.id))
-
-            if survival_status and survival_status != "all":
-                stmt = stmt.where(MaterialPool.survival_status == survival_status)
-                count_stmt = count_stmt.where(MaterialPool.survival_status == survival_status)
-            
-            if account_id is not None:
-                stmt = stmt.where(MaterialPool.posted_account_id == account_id)
-                count_stmt = count_stmt.where(MaterialPool.posted_account_id == account_id)
-
-            total = await session.scalar(count_stmt) or 0
-            
-            stmt = stmt.order_by(MaterialPool.created_at.desc())
-            stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-            
-            result = await session.execute(stmt)
-            materials = list(result.scalars().all())
-            return materials, total
+            return count
 
 # 全局数据库实例
 _db: Database | None = None
