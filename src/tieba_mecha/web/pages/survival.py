@@ -220,34 +220,28 @@ class SurvivalPage:
         )
         self._date_from = ft.TextField(
             label="起始日期",
-            width=130,
-            text_size=13,
+            width=120,
+            text_size=12,
             hint_text="YYYY-MM-DD",
             on_submit=self._on_date_change,
         )
         self._date_to = ft.TextField(
             label="结束日期",
-            width=130,
-            text_size=13,
+            width=120,
+            text_size=12,
             hint_text="YYYY-MM-DD",
             on_submit=self._on_date_change,
         )
-        return ft.Column([
-            ft.Row(
-                [self._status_filter, self._account_filter, self._fname_filter, self._death_reason_filter],
-                spacing=15,
-                wrap=True,
-            ),
-            ft.Row(
-                [self._date_from, self._date_to, ft.IconButton(
-                    icon="search",
-                    icon_size=18,
-                    tooltip="搜索",
-                    on_click=self._on_date_change,
-                )],
-                spacing=15,
-            ),
-        ], spacing=8)
+        return ft.Row(
+            [self._status_filter, self._account_filter, self._fname_filter, self._death_reason_filter, self._date_from, self._date_to, ft.IconButton(
+                icon="search",
+                icon_size=18,
+                tooltip="搜索",
+                on_click=self._on_date_change,
+            )],
+            spacing=10,
+            wrap=True,
+        )
 
     # ========== 数据回调 ==========
 
