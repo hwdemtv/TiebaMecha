@@ -552,6 +552,9 @@ class TiebaMechaApp:
             self.page.update()
             if hasattr(page_obj, "load_data"):
                 await page_obj.load_data()
+                # 数据加载完成后重新构建页面（确保统计卡片显示正确）
+                self.content_area.content = page_obj.build()
+                self.page.update()
         except Exception as e:
             import traceback
             traceback.print_exc()
