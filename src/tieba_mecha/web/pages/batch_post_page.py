@@ -2133,16 +2133,16 @@ class BatchPostPage:
 
         self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._archive_bulk_actions = ft.Row([
-            ft.FilledButton("批量自顶", icon=icons.BOLT, text_size=12,
+            ft.FilledButton("批量自顶", icon=icons.BOLT,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
-            ft.FilledButton("归零计数", icon=icons.REFRESH, text_size=12,
+            ft.FilledButton("归零计数", icon=icons.REFRESH,
                             style=ft.ButtonStyle(bgcolor="amber", color="black"), 
                             on_click=self._bulk_reset_bump_count),
-            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE, text_size=12,
+            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
-            ft.FilledButton("存活探测", icon=icons.RADAR, text_size=12,
+            ft.FilledButton("存活探测", icon=icons.RADAR,
                             style=ft.ButtonStyle(bgcolor="teal", color="white"), 
                             on_click=self._bulk_check_survival_status),
             self._archive_selected_count_text,
