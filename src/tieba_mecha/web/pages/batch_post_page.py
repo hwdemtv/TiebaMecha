@@ -2133,16 +2133,16 @@ class BatchPostPage:
 
         self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._archive_bulk_actions = ft.Row([
-            ft.FilledButton("批量自顶", icon=icons.BOLT,
+            ft.FilledButton("批量自顶", icon=icons.BOLT, text_size=12,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
-            ft.FilledButton("批量归零", icon=icons.REFRESH,
+            ft.FilledButton("归零计数", icon=icons.REFRESH, text_size=12,
                             style=ft.ButtonStyle(bgcolor="amber", color="black"), 
                             on_click=self._bulk_reset_bump_count),
-            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
+            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE, text_size=12,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
-            ft.FilledButton("批量存活探测", icon=icons.RADAR,
+            ft.FilledButton("存活探测", icon=icons.RADAR, text_size=12,
                             style=ft.ButtonStyle(bgcolor="teal", color="white"), 
                             on_click=self._bulk_check_survival_status),
             self._archive_selected_count_text,
@@ -2514,7 +2514,7 @@ class BatchPostPage:
                 if isinstance(fnames, list):
                     count = len(fnames)
                     if count > 1:
-                        fnames_disp = f"{fnames[0]} 等 {count} 个贴吧"
+                        fnames_disp = f"{fnames[0]} 等 {count} 吧"
                     else:
                         fnames_disp = fnames[0] if fnames else "未指定"
                 else:
@@ -2523,10 +2523,17 @@ class BatchPostPage:
                 fnames_disp = t.fname or "未指定"
         except Exception:
             fnames_disp = t.fname or "解析错误"
+        
+        # 截断过长显示，tooltip显示原始JSON
+        if len(fnames_disp) > 15:
+            fnames_disp_short = fnames_disp[:15] + "..."
+        else:
+            fnames_disp_short = fnames_disp
+        tooltip_text = t.fnames_json if hasattr(t, "fnames_json") and t.fnames_json else fnames_disp
 
         return ft.DataRow(cells=[
             ft.DataCell(ft.Text(str(index + 1))),
-            ft.DataCell(ft.Text(fnames_disp, tooltip=t.fnames_json)), # 悬停显示原始数据以备查
+            ft.DataCell(ft.Text(fnames_disp_short, size=11, tooltip=tooltip_text)),
             ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(t.schedule_time.strftime("%m-%d %H:%M") if t.schedule_time else "即时")),
