@@ -2204,12 +2204,12 @@ class BatchPostPage:
         self.min_delay = ft.TextField(label="最小延迟 (秒)", value="120", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True, tooltip="建议: ≥120秒，避开凌晨1-6点高风险时段")
         self.max_delay = ft.TextField(label="最大延迟 (秒)", value="600", text_size=12, input_filter=ft.NumbersOnlyInputFilter(), dense=True, expand=True, tooltip="建议: ≥300秒，降低被检测风险")
         self.use_ai_switch = ft.Switch(
-            label="启用 AI 智能改写",
+            label="AI改写",
             value=False,
             on_change=lambda e: self.page.run_task(self._auto_save_switch, "use_ai_rewrite", e.control.value)
         )
         self.use_schedule = ft.Switch(
-            label="定时执行计划",
+            label="定时计划",
             value=False,
             on_change=lambda e: (self._toggle_schedule(e), self.page.run_task(self._auto_save_switch, "use_schedule", e.control.value))[1]
         )
@@ -2393,8 +2393,7 @@ class BatchPostPage:
                         ft.Container(
                             content=ft.Column([
                                 self.post_count,
-                                self.use_ai_switch,
-                                self.use_schedule,
+                                ft.Row([self.use_ai_switch, self.use_schedule], spacing=10),
                                 self.schedule_time,
                                 ft.Row([self.min_delay, self.max_delay], spacing=10),
                                 # 时段风险提示卡片
