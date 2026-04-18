@@ -2133,20 +2133,20 @@ class BatchPostPage:
 
         self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._archive_bulk_actions = ft.Row([
-            ft.FilledButton("批量自顶", icon=icons.BOLT,
+            ft.FilledButton("自顶", icon=icons.BOLT,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
-            ft.FilledButton("归零计数", icon=icons.REFRESH,
+            ft.FilledButton("归零", icon=icons.REFRESH,
                             style=ft.ButtonStyle(bgcolor="amber", color="black"), 
                             on_click=self._bulk_reset_bump_count),
-            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
+            ft.FilledButton("回炉", icon=icons.RESTORE_PAGE,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
-            ft.FilledButton("存活探测", icon=icons.RADAR,
+            ft.FilledButton("探测", icon=icons.RADAR,
                             style=ft.ButtonStyle(bgcolor="teal", color="white"), 
                             on_click=self._bulk_check_survival_status),
             self._archive_selected_count_text,
-        ], visible=False, spacing=10, alignment=ft.MainAxisAlignment.START, wrap=True)
+        ], visible=False, spacing=5, alignment=ft.MainAxisAlignment.START, wrap=True)
         
         # 归档探测进度控件
         self.archive_progress_bar = ft.ProgressBar(value=0, visible=False, color="teal", expand=True)
