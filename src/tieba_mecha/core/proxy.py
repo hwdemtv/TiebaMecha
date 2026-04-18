@@ -80,59 +80,35 @@ async def mark_proxy_failure(db: Database, proxy_url: str):
 async def test_proxy(proxy_url: str, auth_user: str | None = None, auth_pass: str | None = None) -> tuple[bool, str]:
     """
     测试代理连通性（带智能解密处理）
-    
+
     Returns:
         (是否成功, 消息/延迟)
     """
     import aiohttp
     import time
     from .account import decrypt_value
-    
-    # 构造 aiohttp 认证对象
-    proxy_auth = None
-    if auth_user and auth_pass:
-        # 解密处理
-        try:
-            username = decrypt_value(auth_user)
-        except Exception:
-            username = auth_user
-        
-        try:
-            password = decrypt_value(auth_pass)
-        except Exception:
-            password = auth_pass
-            
-        proxy_auth = aiohttp.BasicAuth(username, password)
-        
+
     start_time = time.time()
     try:
-        connector = None
-        get_kwargs = {"timeout": aiohttp.ClientTimeout(total=8)}
-        
-        if proxy_url.startswith("socks"):
-            from aiohttp_socks import ProxyConnector
-            # SOCKS5 认证必须使用已解密的值拼入 URL
-            if auth_user and auth_pass:
-                try:
-                    dec_user = decrypt_value(auth_user)
-                except Exception:
-                    dec_user = auth_user
-                try:
-                    dec_pass = decrypt_value(auth_pass)
-                except Exception:
-                    dec_pass = auth_pass
-                import urllib.parse
-                u = urllib.parse.quote(dec_user, safe="")
-                p = urllib.parse.quote(dec_pass, safe="")
-                proxy_url = proxy_url.replace("://", f"://{u}:{p}@", 1)
-            connector = ProxyConnector.from_url(proxy_url)
-        else:
-            get_kwargs["proxy"] = proxy_url
-            if proxy_auth:
-                get_kwargs["proxy_auth"] = proxy_auth
+        from aiohttp_socks import ProxyConnector
+        # SOCKS5 认证必须使用已解密的值拼入 URL
+        if auth_user and auth_pass:
+            try:
+                dec_user = decrypt_value(auth_user)
+            except Exception:
+                dec_user = auth_user
+            try:
+                dec_pass = decrypt_value(auth_pass)
+            except Exception:
+                dec_pass = auth_pass
+            import urllib.parse
+            u = urllib.parse.quote(dec_user, safe="")
+            p = urllib.parse.quote(dec_pass, safe="")
+            proxy_url = proxy_url.replace("://", f"://{u}:{p}@", 1)
+        connector = ProxyConnector.from_url(proxy_url)
 
         async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get("http://www.baidu.com", **get_kwargs) as response:
+            async with session.get("http://www.baidu.com", timeout=aiohttp.ClientTimeout(total=8)) as response:
                 if response.status in (200, 302, 403):
                     latency = int((time.time() - start_time) * 1000)
                     return True, f"{latency}ms"
