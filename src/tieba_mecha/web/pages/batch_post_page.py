@@ -2258,10 +2258,10 @@ class BatchPostPage:
         # 自顶模式选择
         self.bump_mode_group = ft.RadioGroup(
             content=ft.Row([
-                ft.Radio(value="once", label="次数上限"),
-                ft.Radio(value="scheduled", label="定时周期"),
-                ft.Radio(value="matrix_loop", label="矩阵轮换循环"),
-            ], spacing=15),
+                ft.Radio(value="once", label="次数模式"),
+                ft.Radio(value="scheduled", label="定时模式"),
+                ft.Radio(value="matrix_loop", label="轮换模式"),
+            ], spacing=8),
             value="once",
             on_change=self._on_bump_mode_change,
         )
