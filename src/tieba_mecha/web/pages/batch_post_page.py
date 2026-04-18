@@ -903,8 +903,9 @@ class BatchPostPage:
         semaphore = asyncio.Semaphore(3)
         captcha_detected = False
         
-        async def check_single_material(m: MaterialPool) -> tuple[str, str, str]:
+        async def check_single_material(m) -> tuple[str, str, str]:
             """检测单个物料的存活状态"""
+            from ...db.models import MaterialPool
             async with semaphore:
                 tid = m.posted_tid
                 status = "dead"
@@ -1234,6 +1235,31 @@ class BatchPostPage:
         self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar(f"已批量{'开启' if target_val else '关闭'} {count} 项自动回帖", "success")
+
+    async def _bulk_reset_bump_count(self, e):
+        """批量归零自顶计数，让封顶/到期的帖子可以继续自顶"""
+        target_ids = list(self._selected_material_ids) if self._selected_material_ids else list(self._selected_archive_ids)
+        
+        if not target_ids:
+            self._show_snackbar("请先勾选要归零的物料", "warning")
+            return
+        
+        count = 0
+        async with self.db.async_session() as session:
+            from ...db.models import MaterialPool
+            for mid in target_ids:
+                m = await session.get(MaterialPool, mid)
+                if m:
+                    m.bump_count = 0
+                    m.bump_account_index = 0
+                    count += 1
+            await session.commit()
+        
+        self._selected_material_ids.clear()
+        self._selected_archive_ids.clear()
+        self._materials = await self.db.get_materials()
+        await self._refresh_material_table()
+        self._show_snackbar(f"已归零 {count} 项自顶计数，可重新开始", "success")
 
     async def _on_material_row_select(self, mid, selected):
         # Flet e.data 为字符串 "true"/"false"
@@ -2110,6 +2136,9 @@ class BatchPostPage:
             ft.FilledButton("批量自顶", icon=icons.BOLT,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
+            ft.FilledButton("批量归零", icon=icons.REFRESH,
+                            style=ft.ButtonStyle(bgcolor="amber", color="black"), 
+                            on_click=self._bulk_reset_bump_count),
             ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
