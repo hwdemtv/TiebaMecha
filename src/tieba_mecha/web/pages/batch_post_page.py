@@ -2753,10 +2753,10 @@ class BatchPostPage:
                 st = datetime.strptime(self.schedule_time.value, "%Y-%m-%d %H:%M")
                 await self.db.add_batch_task(
                     fname=fnames[0], # 保留以作向下兼容
-                    fnames_json=json.dumps(fnames),
+                    fnames_json=json.dumps(fnames, ensure_ascii=False),
                     titles_json="[]",
                     contents_json="[]",
-                    accounts_json=json.dumps(selected_accounts),
+                    accounts_json=json.dumps(selected_accounts, ensure_ascii=False),
                     strategy=f"{strategy}:{pairing_mode}",
                     total=int(self.post_count.value),
                     delay_min=float(self.min_delay.value),
