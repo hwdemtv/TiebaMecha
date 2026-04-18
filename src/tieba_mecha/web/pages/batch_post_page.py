@@ -2133,20 +2133,20 @@ class BatchPostPage:
 
         self._archive_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
         self._archive_bulk_actions = ft.Row([
-            ft.FilledButton("批量自顶", icon=icons.BOLT,
+            ft.FilledButton("批量自顶", icon=icons.BOLT, expand=1,
                             style=ft.ButtonStyle(bgcolor="primary", color="white"), 
                             on_click=self._bulk_toggle_auto_bump),
-            ft.FilledButton("批量归零", icon=icons.REFRESH,
+            ft.FilledButton("批量归零", icon=icons.REFRESH, expand=1,
                             style=ft.ButtonStyle(bgcolor="amber", color="black"), 
                             on_click=self._bulk_reset_bump_count),
-            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE,
+            ft.FilledButton("批量回炉", icon=icons.RESTORE_PAGE, expand=1,
                             style=ft.ButtonStyle(bgcolor="orange", color="white"), 
                             on_click=self._bulk_reset_archives),
-            ft.FilledButton("批量存活探测", icon=icons.RADAR,
+            ft.FilledButton("批量存活探测", icon=icons.RADAR, expand=1,
                             style=ft.ButtonStyle(bgcolor="teal", color="white"), 
                             on_click=self._bulk_check_survival_status),
             self._archive_selected_count_text,
-        ], visible=False, spacing=10)
+        ], visible=False, spacing=10, alignment=ft.MainAxisAlignment.START)
         
         # 归档探测进度控件
         self.archive_progress_bar = ft.ProgressBar(value=0, visible=False, color="teal", expand=True)
@@ -2222,13 +2222,14 @@ class BatchPostPage:
         
         # 4. 账号与策略
         self.strategy_dropdown = ft.Dropdown(
-            label="账号调度策略", value="round_robin", width=200,
+            label="账号调度策略", value="round_robin", expand=1,
             options=[ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"), ft.dropdown.Option("random", "随机 (Random)")]
         )
         self.pairing_mode_dropdown = ft.Dropdown(
-            label="文案提取模式", value="random", width=200,
+            label="文案提取模式", value="random", expand=1,
             options=[ft.dropdown.Option("random", "随机混用 (防抽混淆)"), ft.dropdown.Option("strict", "严格配对 (发多资源)")]
         )
+        self._strategy_row = ft.Row([self.strategy_dropdown, self.pairing_mode_dropdown], spacing=10)
         
         # 4.1 自顶配置控件
         self.bump_max_count_field = ft.TextField(
@@ -2374,11 +2375,10 @@ class BatchPostPage:
                     ft.Column([
                         ft.Text("矩阵策略中心", size=14, weight=ft.FontWeight.W_500),
                         ft.Container(
-                            content=ft.Column([
-                                self.strategy_dropdown,
-                                self.pairing_mode_dropdown,
-                                ft.Divider(height=5, color="transparent"),
-                                ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
+                            content=                        ft.Column([
+                            self._strategy_row,
+                            ft.Divider(height=5, color="transparent"),
+                            ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
                                 ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
                                 self.bump_matrix_switch,
                                 ft.Divider(height=5, color="transparent"),
