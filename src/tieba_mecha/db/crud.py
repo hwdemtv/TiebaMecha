@@ -1534,12 +1534,11 @@ class Database:
 
             updated = 0
 
-            # 3. 同步 success_count（以日志统计值为准）
+            # 3. 仅更新已有记录的 success_count（不自动创建，避免删除后自动恢复）
             for fname, cnt in success_map.items():
                 if fname not in pool_map:
-                    # 自动创建 TargetPool 记录（仅填充 fname 和 success_count，不设置 post_group）
-                    session.add(TargetPool(fname=fname, success_count=cnt))
-                    updated += 1
+                    # 不自动创建，用户手动删除后不应自动恢复
+                    continue
                 elif cnt != pool_map.get(fname, 0):
                     # 日志统计值与当前值不一致时同步
                     r = await session.execute(
@@ -1680,7 +1679,8 @@ class Database:
             ]
 
     async def upsert_target_pools(self, fnames: list[str], post_group: str = "") -> int:
-        """将若干吧名标记为火力目标（不存在则创建，已存在则追加分组）。"""
+        """将若干吧名标记为火力目标（不存在则创建并填充历史击穿数，已存在则追加分组）。"""
+        from sqlalchemy import func
         added = 0
         async with self.async_session() as session:
             for fname in fnames:
@@ -1689,8 +1689,13 @@ class Database:
                 )
                 pool = existing.scalar_one_or_none()
                 if pool is None:
-                    # 不存在则创建
-                    session.add(TargetPool(fname=fname, post_group=post_group))
+                    # 查询历史击穿数
+                    cnt_result = await session.execute(
+                        select(func.count(BatchPostLog.id))
+                        .where(BatchPostLog.fname == fname, BatchPostLog.status == "success")
+                    )
+                    success_count = cnt_result.scalar() or 0
+                    session.add(TargetPool(fname=fname, post_group=post_group, success_count=success_count))
                     added += 1
                 else:
                     # 已存在则追加分组
@@ -1884,7 +1889,8 @@ class Database:
             await session.commit()
 
     async def upsert_target_pools(self, fnames: list[str], group: str) -> int:
-        """批量入库/覆盖靶场池"""
+        """批量入库/覆盖靶场池（创建时自动填充历史击穿数）"""
+        from sqlalchemy import func
         added_count = 0
         async with self.async_session() as session:
             for fname in set(fnames):
@@ -1896,7 +1902,13 @@ class Database:
                     if group and group not in pool.post_group.split(","):
                         pool.post_group = f"{pool.post_group},{group}".strip(",")
                 else:
-                    session.add(TargetPool(fname=fname.strip(), post_group=group))
+                    # 查询历史击穿数
+                    cnt_result = await session.execute(
+                        select(func.count(BatchPostLog.id))
+                        .where(BatchPostLog.fname == fname.strip(), BatchPostLog.status == "success")
+                    )
+                    success_count = cnt_result.scalar() or 0
+                    session.add(TargetPool(fname=fname.strip(), post_group=group, success_count=success_count))
                     added_count += 1
             await session.commit()
         return added_count
