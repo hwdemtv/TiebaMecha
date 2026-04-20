@@ -100,15 +100,34 @@ class BatchPostPage:
                 self.bump_mode_group.value = bump_mode_raw
                 self.bump_loop_container.visible = (bump_mode_raw == "matrix_loop")
             
-            bump_hour_raw = await self.db.get_setting("bump_hour")
-            if bump_hour_raw is not None and hasattr(self, "bump_hour_field"):
-                self.bump_hour_field.value = bump_hour_raw
-            
-            # 首次加载初始化默认选择：仅勾选状态正常的账号
+            # [持久化同步] 恢复上次选中的贴吧 
+            last_forums_raw = await self.db.get_setting("last_selected_target_forums")
+            if last_forums_raw:
+                try:
+                    self._temp_target_fnames = json.loads(last_forums_raw)
+                    count = len(self._temp_target_fnames)
+                    if count > 0:
+                        self.forum_select_btn.text = f"🎯 火力已锁定: {count} 个目标点"
+                        self.forum_select_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
+                except: pass
+
+            # [持久化同步] 恢复上次选中的账号
+            last_acc_raw = await self.db.get_setting("last_selected_account_ids")
+            has_last_acc = False
+            if last_acc_raw:
+                try:
+                    acc_ids = json.loads(last_acc_raw)
+                    if acc_ids:
+                        self._selected_account_ids = set(acc_ids)
+                        has_last_acc = True
+                except: pass
+
+            # 首次加载初始化选择：如果有持久化则用持久化，否则仅勾选状态正常的账号
             if not self._initial_load_done:
-                for acc in self._accounts:
-                    if acc.status == "active":
-                        self._selected_account_ids.add(acc.id)
+                if not has_last_acc:
+                    for acc in self._accounts:
+                        if acc.status == "active":
+                            self._selected_account_ids.add(acc.id)
                 self._initial_load_done = True
             
             self._refresh_task_list()
@@ -359,6 +378,8 @@ class BatchPostPage:
                     if value: self._selected_group_names.add(cb.data)
                     else: self._selected_group_names.discard(cb.data)
         container.update()
+        if container == self.account_pool_column:
+            self._save_account_selection()
 
     def _on_account_select_change(self, e):
         acc_id = e.control.data
@@ -369,6 +390,13 @@ class BatchPostPage:
             count = len(self._selected_account_ids)
             self.account_pool_title.value = f"参与账号池 ({count}/{len(self._accounts)})"
             self.account_pool_title.update()
+        self._save_account_selection()
+
+    def _save_account_selection(self):
+        """将当前选中的账号持久化到数据库"""
+        if self.db:
+            ids_json = json.dumps(list(self._selected_account_ids))
+            self.page.run_task(self.db.set_setting, "last_selected_account_ids", ids_json)
 
     def _on_forum_select_change(self, e):
         fname = e.control.data
@@ -1860,6 +1888,10 @@ class BatchPostPage:
             count = len(final_selected)
             self._temp_target_fnames = list(final_selected)
             
+            # [持久化] 保存到数据库
+            if self.db:
+                self.page.run_task(self.db.set_setting, "last_selected_target_forums", json.dumps(self._temp_target_fnames))
+            
             # 同步更新主界面按钮状态
             if count > 0:
                 self.forum_select_btn.text = f"🎯 火力已锁定: {count} 个目标点"
@@ -2278,7 +2310,11 @@ class BatchPostPage:
         # 4. 账号与策略
         self.strategy_dropdown = ft.Dropdown(
             label="账号调度策略", value="round_robin", expand=1, text_size=12,
-            options=[ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"), ft.dropdown.Option("random", "随机 (Random)")]
+            options=[
+                ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"), 
+                ft.dropdown.Option("strict_round_robin", "严格轮询 (Strict RR)"),
+                ft.dropdown.Option("random", "随机 (Random)")
+            ]
         )
         self.pairing_mode_dropdown = ft.Dropdown(
             label="文案提取模式", value="random", expand=1, text_size=12,
@@ -2866,17 +2902,16 @@ class BatchPostPage:
                     break
                 
                 if update["status"] == "success":
-                    acc_id = update.get("account_id", "?")
-                    fname = update.get("fname", "?")
-                    self._add_log(f"[Acc:{acc_id}] 发布: {fname} | TID: {update['tid']} ({update['progress']}/{update['total']})")
+                    self._add_log(update) # 直接传入字典以进行结构化渲染
                     self.progress_bar.value = update["progress"] / update["total"]
                 elif update["status"] == "error":
-                    fname = update.get("fname", "?")
-                    self._add_log(f"⚠ 执行失败 [{fname}]: {update.get('msg')}", "error")
+                    self._add_log(update, "error")
                 elif update["status"] == "skipped":
-                    self._add_log(f"⏭ {update.get('msg')}", "error")
+                    self._add_log(update.get('msg'), "error")
                 
                 self.page.update()
+        except asyncio.CancelledError:
+            self._add_log("！任务已被系统强制回收")
         except Exception as ex:
             self._add_log(f"CRITICAL ERROR: {str(ex)}", "error")
         finally:
@@ -2887,10 +2922,91 @@ class BatchPostPage:
             self.progress_bar.visible = False
             self.page.update()
 
-    def _add_log(self, msg, type="info"):
+    def _add_log(self, data, type="info"):
+        """
+        结构化日志输出系统 (Cyber-Mecha 风格)
+        data: 可以是纯字符串，也可以是包含业务元数据的字典
+        """
         now = datetime.now().strftime("%H:%M:%S")
-        color = "primary" if type == "info" else "error"
-        self.log_list.controls.insert(0, ft.Text(f"[{now}] {msg}", size=11, color=color))
+        
+        if isinstance(data, dict):
+            status = data.get("status", "info")
+            if status == "success":
+                # 构建结构化成功卡片
+                acc_name = data.get("account_name", "?")
+                fname = data.get("fname", "?")
+                title = (data.get("title") or "无标题")[:20]
+                tid = data.get("tid", 0)
+                prog = f"{data.get('progress')}/{data.get('total')}"
+                
+                log_item = ft.Container(
+                    content=ft.Row([
+                        ft.Text(f"[{now}]", size=10, color="onSurfaceVariant", weight=ft.FontWeight.W_300),
+                        ft.Icon(icons.CHECK_CIRCLE, color="green", size=14),
+                        ft.VerticalDivider(width=1),
+                        ft.Row([
+                            ft.Icon(icons.PERSON, size=12, color="orange"),
+                            ft.Text(acc_name, size=11, weight=ft.FontWeight.BOLD, color="orange"),
+                        ], spacing=2),
+                        ft.Row([
+                            ft.Icon(icons.FORUM, size=12, color="primary"),
+                            ft.Text(fname, size=11, weight=ft.FontWeight.BOLD, color="primary"),
+                        ], spacing=2),
+                        ft.Text(f"「{title}」", size=11, color="onSurface", italic=True),
+                        ft.Container(expand=True),
+                        ft.Text(prog, size=10, color="onSurfaceVariant", weight=ft.FontWeight.BOLD),
+                        ft.IconButton(
+                            icons.OPEN_IN_NEW, 
+                            icon_size=14, 
+                            tooltip="在浏览器中开启", 
+                            icon_color="primary",
+                            on_click=lambda _: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}")
+                        )
+                    ], spacing=10),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                    bgcolor=with_opacity(0.05, "green"),
+                    border=ft.border.only(left=ft.border.BorderSide(3, "green")),
+                    border_radius=ft.border_radius.only(top_right=8, bottom_right=8),
+                    margin=ft.padding.only(bottom=5)
+                )
+            else:
+                # 构建结构化错误卡片
+                fname = data.get("fname", "未知")
+                msg = data.get("msg", "执行异常")
+                log_item = ft.Container(
+                    content=ft.Row([
+                        ft.Text(f"[{now}]", size=10, color="onSurfaceVariant"),
+                        ft.Icon(icons.ERROR_OUTLINE, color="error", size=14),
+                        ft.Text(f"拦截于 [{fname}]: {msg}", size=11, color="error", weight=ft.FontWeight.W_500),
+                        ft.Container(expand=True),
+                        ft.TextButton(
+                            "查看情报", 
+                            style=ft.ButtonStyle(color="error", size=10),
+                            on_click=lambda e: self._show_rejection_detail(data)
+                        )
+                    ], spacing=10),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                    bgcolor=with_opacity(0.05, "error"),
+                    border=ft.border.only(left=ft.border.BorderSide(3, "error")),
+                    border_radius=ft.border_radius.only(top_right=8, bottom_right=8),
+                    margin=ft.padding.only(bottom=5)
+                )
+        else:
+            # 兼容模式：纯文本输出
+            color = "onSurfaceVariant" if type == "info" else "error"
+            icon = icons.INFO_OUTLINE if type == "info" else icons.WARNING_AMBER
+            
+            log_item = ft.Container(
+                content=ft.Row([
+                    ft.Text(f"[{now}]", size=10, color="onSurfaceVariant"),
+                    ft.Icon(icon, color=color, size=12),
+                    ft.Text(str(data), size=11, color=color),
+                ], spacing=10),
+                padding=ft.padding.symmetric(horizontal=12, vertical=4),
+                margin=ft.padding.only(bottom=2)
+            )
+
+        self.log_list.controls.insert(0, log_item)
         if len(self.log_list.controls) > 100:
             self.log_list.controls.pop()
 

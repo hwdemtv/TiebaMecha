@@ -642,7 +642,7 @@ class BatchPostManager:
         Returns:
             account_id
         """
-        if task.strategy == "round_robin":
+        if task.strategy in ("round_robin", "strict_round_robin"):
             return task.accounts[step % len(task.accounts)]
         elif task.strategy == "random":
             return random.choice(task.accounts)
@@ -690,6 +690,10 @@ class BatchPostManager:
         靶场智能撮合核心：优先寻找本号已关注且 is_post_target=True 的原生号
         这极大提高了防抽几率（本土作战）。同时跳过已被该吧封禁的账号。
         """
+        # [核平级增强] 如果是严格轮询模式，直接强跳原生探测，实现绝对平均分配
+        if task.strategy == "strict_round_robin":
+            return await self._pick_account(task, step, weights)
+
         from sqlalchemy import select
         
         async with self.db.async_session() as session:
@@ -705,6 +709,11 @@ class BatchPostManager:
             
             if native_accounts:
                 if task.strategy == "round_robin":
+                    # [优化] 优先寻找全局索引命中的账号，实现真正的全局均匀分布
+                    desired_acc_id = task.accounts[step % len(task.accounts)]
+                    if desired_acc_id in native_accounts:
+                        return desired_acc_id
+                    # fallback: 在原生号中轮询，但使用全局索引以保持某种程度的散列
                     return native_accounts[step % len(native_accounts)]
                 return random.choice(native_accounts)
             
@@ -719,6 +728,9 @@ class BatchPostManager:
             
             if available_accounts:
                 if task.strategy == "round_robin":
+                    desired_acc_id = task.accounts[step % len(task.accounts)]
+                    if desired_acc_id in available_accounts:
+                        return desired_acc_id
                     return available_accounts[step % len(available_accounts)]
                 return random.choice(available_accounts)
                 
@@ -972,7 +984,11 @@ class BatchPostManager:
                                     await BionicDelay.sleep(delay_min, delay_max)
                                 yield {
                                     "status": "success", "tid": tid, "fname": current_target_fname,
-                                    "account_id": account_id, "progress": task.progress, "total": task.total,
+                                    "account_id": account_id,
+                                    "account_name": acc.name if acc else f"ID:{account_id}",
+                                    "title": title,
+                                    "material_id": current_material.id,
+                                    "progress": task.progress, "total": task.total,
                                 }
                                 break # 退出账号重试循环
                             else:
