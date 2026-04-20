@@ -302,7 +302,7 @@ class AccountsPage:
         # 批量操作栏
         self.matrix_select_all_cb = ft.Checkbox(label="全选", on_change=self._on_matrix_select_all)
         self.matrix_bulk_toggle_target_btn = ft.TextButton(
-            "批量切换火力", icon=icons.SWAP_HORIZ_ROUNDED,
+            "批量切换火力", icon=icons.SWAP_HORIZ,
             on_click=lambda e: self.page.run_task(self._bulk_matrix_toggle_target),
             visible=False,
         )
