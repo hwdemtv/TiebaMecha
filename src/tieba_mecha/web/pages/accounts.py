@@ -838,21 +838,30 @@ class AccountsPage:
         )
         self.page.open(dialog)
 
-    async def _on_toggle_target(self, fname: str, is_target: bool):
-        """一键标记/取消战略目标"""
+    async def _on_toggle_target(self, fname: str, is_currently_target: bool):
+        """一键标记/取消战略目标
+        
+        Args:
+            fname: 贴吧名称
+            is_currently_target: 当前是否已是火力打击目标（True=已在靶场，False=不在靶场）
+        """
         try:
-            if is_target:
-                await self.db.upsert_target_pools([fname], "未分类")
-                self._show_snackbar(f"🎯 已将 '{fname}' 锁定为火力打击目标", "success")
-            else:
+            if is_currently_target:
+                # 已在靶场中，点击要移除
                 await self.db.delete_target_pool_by_fnames([fname])
                 self._show_snackbar(f"🏳️ 已从打击名单中移除 '{fname}'", "info")
+            else:
+                # 不在靶场中，点击要添加
+                await self.db.upsert_target_pools([fname], "未分类")
+                self._show_snackbar(f"🎯 已将 '{fname}' 锁定为火力打击目标", "success")
             
             # 重新加载数据
             await self._refresh_matrix_stats()
             self.refresh_ui()
             self.page.update()
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self._show_snackbar(f"操作失败: {str(e)}", "error")
 
     async def _on_complement_follow(self, fname: str):
