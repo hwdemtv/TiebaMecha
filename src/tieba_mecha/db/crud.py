@@ -1537,10 +1537,9 @@ class Database:
             # 3. 更新已有记录的 success_count（以日志统计值为准）
             for fname, cnt in success_map.items():
                 if fname not in pool_map:
-                    # 自动补全缺失的 TargetPool 记录
-                    logger.info(f"[击穿同步] fname='{fname}' 不在 target_pool 中，自动创建")
-                    session.add(TargetPool(fname=fname, success_count=cnt))
-                    updated += 1
+                    # 不再自动创建 TargetPool 记录，用户手动删除后不应自动恢复
+                    logger.debug(f"[击穿同步] fname='{fname}' 不在 target_pool 中，跳过")
+                    continue
                 elif cnt != pool_map.get(fname, 0):
                     # 日志统计值与当前值不一致时同步
                     r = await session.execute(
