@@ -1667,7 +1667,7 @@ class BatchPostPage:
                 width=450,
             ),
             actions=[
-                ft.TextButton("取消", on_click=lambda _: self.page.close(safety_dialog)),
+                ft.TextButton("取消", on_click=on_lock_safety),
                 ft.FilledButton(
                     "防抽网络编织完毕锁定", 
                     icon=icons.LOCK_ROUNDED, 
@@ -1684,8 +1684,10 @@ class BatchPostPage:
         """[火力配置主页面] 配置火力抛射靶场"""
         
         final_selected = pre_selected_fnames.copy()
-        # 本地自留区应该只展示拥有安全原初权限 (is_post_target=True) 的贴吧
-        local_fnames = await self.db.get_native_post_targets()
+        # [优化] 获取所有不重复的贴吧及其权限状态
+        local_forums = await self.db.get_all_unique_forums()
+        # [新增] 获取靶位组列表
+        target_groups = await self.db.get_target_pool_groups()
         
         # 1. 搜索过滤与全选 (用于本地自留区)
         search_field = ft.TextField(
@@ -1698,22 +1700,35 @@ class BatchPostPage:
         
         select_all_cb = ft.Checkbox(label="全选", value=False, scale=0.8)
         
-        # 2. 贴吧容器 (用于本地自留区)
-        forums_container = ft.Column(spacing=5, scroll=ft.ScrollMode.ADAPTIVE, height=300)
+        # 2. 容器预处理
+        forums_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
+        groups_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=150)
         
         def on_item_check(e):
             fn = e.control.data
             if e.control.value: final_selected.add(fn)
             else: final_selected.discard(fn)
 
+        async def on_group_check(e):
+            group_name = e.control.data
+            is_checked = e.control.value
+            # 直接拉取数据库中的分组吧名
+            fnames = await self.db.get_target_pools_by_group(group_name)
+            for fn in fnames:
+                if is_checked: final_selected.add(fn)
+                else: final_selected.discard(fn)
+            # 刷新本地列表的选中状态（如果本地也有重合的吧）
+            render_local_list(search_field.value)
+            self._show_snackbar(f"{'已添加' if is_checked else '已从待选区移除'} 分组 [{group_name}] 中的 {len(fnames)} 个吧点", "info")
+
         def render_local_list(keyword=""):
             forums_container.controls.clear()
             
-            if not local_fnames:
+            if not local_forums:
                 forums_container.controls.append(
                     ft.Container(
                         content=ft.Text(
-                            "尚无任何贴吧被赋予专属原生保护权限\n\n请点击右上角的【绿色齿轮图标】前往【安全原初打法配置】开启专治防线", 
+                            "系统内尚无贴吧数据\n请先前往 Dashboard 运行签到或同步关注贴吧", 
                             color="onSurfaceVariant", 
                             text_align="center", 
                             size=12
@@ -1724,20 +1739,46 @@ class BatchPostPage:
                     )
                 )
             else:
-                for fn in local_fnames:
+                for f in local_forums:
+                    fn = f['fname']
+                    is_safe = f['is_post_target']
                     if keyword and keyword.lower() not in fn.lower(): continue
+                    
+                    # 安全目标增加标识与颜色区分
+                    label_text = f"🛡️ {fn} [安全]" if is_safe else fn
+                    item_color = "green" if is_safe else "onSurface"
+                    
                     forums_container.controls.append(
                         ft.Checkbox(
-                            label=fn, 
+                            label=label_text, 
                             value=(fn in final_selected), 
                             data=fn, 
                             on_change=on_item_check,
-                            fill_color="green"
+                            fill_color="green" if is_safe else None,
+                            label_style=ft.TextStyle(color=item_color, size=11, weight=ft.FontWeight.W_500 if is_safe else None)
                         )
                     )
             self.page.update()
 
+        def render_groups():
+            groups_container.controls.clear()
+            if not target_groups:
+                groups_container.controls.append(ft.Text("尚无预设靶场分组", size=11, color="onSurfaceVariant", italic=True))
+            else:
+                for g in target_groups:
+                    groups_container.controls.append(
+                        ft.Checkbox(
+                            label=f"📁 分组: {g}",
+                            data=g,
+                            on_change=lambda ev: self.page.run_task(on_group_check, ev),
+                            label_style=ft.TextStyle(size=11),
+                            fill_color="primary"
+                        )
+                    )
+            groups_container.update()
+
         render_local_list()
+        render_groups()
 
         search_field.on_change = lambda e: render_local_list(e.control.value)
         
@@ -1773,9 +1814,9 @@ class BatchPostPage:
                 
                 # 刷新状态
                 final_selected.clear()
-                # 重新获取本地列表并刷新 UI
-                nonlocal local_fnames
-                local_fnames = await self.db.get_all_unique_fnames()
+                # 重载全量数据并刷新 UI
+                nonlocal local_forums
+                local_forums = await self.db.get_all_unique_forums()
                 render_local_list()
                 self._show_snackbar(f"✅ 阵地清理完成，已从数据库抹除并尝试让所有账号取关", "success")
 
@@ -1819,17 +1860,10 @@ class BatchPostPage:
             self._show_snackbar(f"🎯 已锁定 {len(final_selected)} 个发射坐标点，准备完毕", "success")
             self.page.update()
 
-        # 标题栏：包含安全配置入口
+        # 标题栏
         dialog_title = ft.Row([
             ft.Icon(icons.SETTINGS_SUGGEST, color="blue"), 
             ft.Text("配置火力抛射靶场"),
-            ft.VerticalDivider(width=20),
-            ft.TextButton(
-                "安全原初打法", 
-                icon=icons.SHIELD_ROUNDED, 
-                icon_color="green",
-                on_click=lambda _: self.page.run_task(self._open_safety_config_dialog, final_selected)
-            )
         ], alignment=ft.MainAxisAlignment.START)
 
         # 4. 构造页签
@@ -1869,6 +1903,14 @@ class BatchPostPage:
                         content=ft.Column([
                             ft.Text("在这里输入从未关注但在轰炸计划内的外部目标吧:", size=11, color="onSurfaceVariant"),
                             manual_input,
+                            ft.Divider(height=10, color="transparent"),
+                            ft.Text("或者从已录入的靶位组中选取 (Target Pool Groups):", size=11, color="onSurfaceVariant"),
+                            ft.Container(
+                                content=groups_container,
+                                border=ft.border.all(1, with_opacity(0.1, "onSurface")),
+                                border_radius=8,
+                                padding=5
+                            )
                         ], tight=True),
                         padding=10
                     )
