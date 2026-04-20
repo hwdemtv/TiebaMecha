@@ -82,6 +82,13 @@ class BatchPostPage:
             if ai_raw is not None:
                 self.use_ai_switch.value = ai_raw == "1"
             
+            # 恢复 AI 人格设定
+            persona_raw = await self.db.get_setting("ai_persona")
+            if persona_raw is not None:
+                self.ai_persona_dropdown.value = persona_raw
+            else:
+                self.ai_persona_dropdown.value = "normal"
+            
             sched_raw = await self.db.get_setting("use_schedule")
             if sched_raw is not None:
                 self.use_schedule.value = sched_raw == "1"
@@ -1391,7 +1398,8 @@ class BatchPostPage:
                 
                 # 调用 AI
                 try:
-                    success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content)
+                    persona = self.ai_persona_dropdown.value or "normal"
+                    success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content, persona=persona)
                     if success:
                         await self.db.update_material_ai(m.id, opt_title, opt_content)
                         success_count += 1
@@ -1420,7 +1428,8 @@ class BatchPostPage:
         self.page.update()
         
         optimizer = AIOptimizer(self.db)
-        success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content)
+        persona = self.ai_persona_dropdown.value or "normal"
+        success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content, persona=persona)
         
         if success:
             await self.db.update_material_ai(mid, opt_title, opt_content)
@@ -2323,6 +2332,20 @@ class BatchPostPage:
             value=False,
             on_change=lambda e: self.page.run_task(self._auto_save_switch, "use_ai_rewrite", e.control.value)
         )
+        self.ai_persona_dropdown = ft.Dropdown(
+            label="AI人格化设定",
+            value="normal",
+            text_size=11,
+            dense=True,
+            expand=True,
+            options=[
+                ft.dropdown.Option("normal", "标准 SEO (通用平衡)"),
+                ft.dropdown.Option("resource_god", "资源大神 (专业/极简)"),
+                ft.dropdown.Option("casual", "随缘路人 (口语/自然)"),
+                ft.dropdown.Option("newbie", "好奇萌新 (求助/互动)"),
+            ],
+            on_change=self._save_bump_config
+        )
         self.use_schedule = ft.Switch(
             label="定时计划",
             value=False,
@@ -2512,7 +2535,8 @@ class BatchPostPage:
                         ft.Container(
                             content=ft.Column([
                                 self.post_count,
-                                ft.Row([self.use_ai_switch, self.use_schedule], spacing=10),
+                                ft.Row([self.use_ai_switch, self.ai_persona_dropdown], spacing=10),
+                                ft.Row([self.use_schedule], spacing=10),
                                 self.schedule_time,
                                 ft.Row([self.min_delay, self.max_delay], spacing=10),
                                 # 时段风险提示卡片
@@ -2872,6 +2896,7 @@ class BatchPostPage:
                     delay_min=float(self.min_delay.value),
                     delay_max=float(self.max_delay.value),
                     use_ai=self.use_ai_switch.value,
+                    ai_persona=self.ai_persona_dropdown.value or "normal",
                     interval_hours=int(self.interval_hours.value) if self.interval_hours.value else 0,
                     schedule_time=st,
                     status="pending"
