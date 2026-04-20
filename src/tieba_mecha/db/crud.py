@@ -1534,12 +1534,12 @@ class Database:
 
             updated = 0
 
-            # 3. 更新已有记录的 success_count（以日志统计值为准）
+            # 3. 同步 success_count（以日志统计值为准）
             for fname, cnt in success_map.items():
                 if fname not in pool_map:
-                    # 不再自动创建 TargetPool 记录，用户手动删除后不应自动恢复
-                    logger.debug(f"[击穿同步] fname='{fname}' 不在 target_pool 中，跳过")
-                    continue
+                    # 自动创建 TargetPool 记录（仅填充 fname 和 success_count，不设置 post_group）
+                    session.add(TargetPool(fname=fname, success_count=cnt))
+                    updated += 1
                 elif cnt != pool_map.get(fname, 0):
                     # 日志统计值与当前值不一致时同步
                     r = await session.execute(
@@ -1680,20 +1680,22 @@ class Database:
             ]
 
     async def upsert_target_pools(self, fnames: list[str], post_group: str = "") -> int:
-        """将若干吧名批量加入 TargetPool (已存在则保留原分组)。返回新增的数量。"""
-        added = 0
+        """将若干吧名标记为火力目标（仅更新已有记录的分组，不创建新记录）。"""
+        updated = 0
         async with self.async_session() as session:
             for fname in fnames:
                 existing = await session.execute(
                     select(TargetPool).where(TargetPool.fname == fname)
                 )
                 pool = existing.scalar_one_or_none()
-                if pool is None:
-                    session.add(TargetPool(fname=fname, post_group=post_group))
-                    added += 1
-                # 已存在则不做任何修改，保留原有分组
+                if pool is not None:
+                    # 已存在则追加分组
+                    if post_group and post_group not in (pool.post_group or "").split(","):
+                        pool.post_group = f"{pool.post_group or ''},{post_group}".strip(",")
+                    updated += 1
+                # 不存在则不创建，交给 backfill_success_count 或手动锁定时创建
             await session.commit()
-        return added
+        return updated
 
     async def delete_target_pool_by_fnames(self, fnames: list[str]) -> int:
         """从 TargetPool 中删除指定的贴吧列表。返回删除的数量。"""
