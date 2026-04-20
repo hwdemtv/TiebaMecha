@@ -51,6 +51,7 @@ TARGET = "target"
 GPS_FIXED = "gps_fixed"
 
 # 功能图标
+CLEAR = "clear"
 ADD = "add"
 ADD_BOX = "add_box"
 ADD_LINK_ROUNDED = "add_link_rounded"
