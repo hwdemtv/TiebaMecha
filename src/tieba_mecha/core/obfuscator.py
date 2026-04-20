@@ -8,6 +8,12 @@ import random
 # \ufeff: 零宽不换行空格 (Zero-width no-break space)
 ZERO_WIDTH_CHARS = ["\u200b", "\u200c", "\u200d", "\ufeff"]
 
+# 表情与符号库
+RANDOM_SYMBOLS = [
+    "(๑•̀ㅂ•́)و✧", " (´▽`) ", " (*´∀`)~♥", " O(∩_∩)O ", " (•̀ᴗ•́)و ", 
+    " ✨ ", " 🚀 ", " ✅ ", " ☘️ ", " ❄️ ", " ☕ ", " ⚓ "
+]
+
 class Obfuscator:
     """内容风控干扰器：利用不可见字符打破哈希重合度，并规避敏感触发词"""
     
@@ -81,3 +87,19 @@ class Obfuscator:
             new_paragraphs.append(p)
             
         return "\n".join(new_paragraphs)
+
+    @staticmethod
+    def inject_random_symbols(text: str) -> str:
+        """在文本开头、结尾或段落间随机插入表情或符号"""
+        if not text or random.random() > 0.5: # 50% 概率不注入，保持自然
+            return text
+        
+        symbol = random.choice(RANDOM_SYMBOLS)
+        pos = random.choice(["start", "end", "both"])
+        
+        if pos == "start":
+            return f"{symbol} {text}"
+        elif pos == "end":
+            return f"{text} {symbol}"
+        else:
+            return f"{symbol} {text} {symbol}"
