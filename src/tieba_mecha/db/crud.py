@@ -1614,6 +1614,15 @@ class Database:
             dead_result = await session.execute(dead_stmt)
             deleted_count_map = {row.posted_fname: row.deleted_count for row in dead_result.all()}
             
+            # 2.6 从 BatchPostLog 直接统计击穿数（与 TargetPool 锁定状态无关）
+            success_stmt = (
+                select(BatchPostLog.fname, func.count(BatchPostLog.id).label("cnt"))
+                .where(BatchPostLog.status == "success")
+                .group_by(BatchPostLog.fname)
+            )
+            success_result = await session.execute(success_stmt)
+            success_count_map = {row.fname: row.cnt for row in success_result.all()}
+            
             # 3. 合并数据
             stats_list = []
             for row in forum_rows:
@@ -1629,7 +1638,7 @@ class Database:
                     "is_post_target": bool(row.is_post_target),
                     "is_banned": bool(row.is_banned),
                     "deleted_count": deleted_count_map.get(fname, 0),
-                    "success_count": target_info.success_count if target_info else 0,
+                    "success_count": success_count_map.get(fname, 0),
                     "is_active": target_info.is_active if target_info else True
                 })
             
@@ -1646,7 +1655,7 @@ class Database:
                         "is_post_target": False,
                         "is_banned": False,
                         "deleted_count": deleted_count_map.get(fname, 0),
-                        "success_count": target.success_count,
+                        "success_count": success_count_map.get(fname, 0),
                         "is_active": target.is_active
                     })
             
