@@ -1056,6 +1056,8 @@ class BatchPostManager:
                                     status="success"
                                 )
                                 await log_info(f"[{task.strategy}] 成功: {account_id} @ {current_target_fname} ({task.progress}/{task.total})")
+                                # 记录靶场击穿
+                                await self.db.update_target_pool_status(current_target_fname, is_success=True)
                                 if task.progress < actual_total:
                                     await BionicDelay.sleep(delay_min, delay_max)
                                 yield {
@@ -1077,6 +1079,7 @@ class BatchPostManager:
                                 if err_code == 4 or "封禁" in err_msg:
                                     if "本吧" in err_msg:
                                         await self.db.mark_forum_banned(account_id, current_target_fname, reason="发射检测吧封")
+                                        await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="发射检测吧封")
                                     else:
                                         await self.db.update_account_status(account_id, "banned")
                                 
@@ -1095,6 +1098,8 @@ class BatchPostManager:
                     title=current_material.title
                 )
                 await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败")
+                # 记录靶场拦截
+                await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason="多账号尝试均失败")
                 yield {"status": "error", "msg": "物料已由多个账号尝试均告失败，可能内容已变味", "progress": task.progress, "total": task.total}
 
             material_ptr += 1
