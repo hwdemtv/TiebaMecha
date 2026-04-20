@@ -1493,6 +1493,37 @@ class Database:
             await session.commit()
             return updated
 
+    async def backfill_success_count(self) -> int:
+        """回填 TargetPool.success_count：根据 BatchPostLog 历史成功记录统计每个贴吧的击穿数。
+        仅在 success_count=0 的记录上回填，避免覆盖已有数据。Returns: 更新的记录数"""
+        from sqlalchemy import func
+        async with self.async_session() as session:
+            # 统计每个 fname 的成功发帖次数
+            success_stmt = (
+                select(BatchPostLog.fname, func.count(BatchPostLog.id).label("cnt"))
+                .where(BatchPostLog.status == "success")
+                .group_by(BatchPostLog.fname)
+            )
+            result = await session.execute(success_stmt)
+            success_map = {row.fname: row.cnt for row in result.all()}
+            
+            if not success_map:
+                return 0
+            
+            updated = 0
+            for fname, cnt in success_map.items():
+                # 只回填 success_count=0 的记录
+                r = await session.execute(
+                    update(TargetPool)
+                    .where(TargetPool.fname == fname, TargetPool.success_count == 0)
+                    .values(success_count=cnt)
+                )
+                updated += r.rowcount
+            
+            if updated > 0:
+                await session.commit()
+            return updated
+
     async def get_native_post_targets(self, account_id: int | None = None) -> list[str]:
         """获取已标记为 is_post_target=True 且未被封禁的本机安全贴吧名池（自动判定）"""
         async with self.async_session() as session:
