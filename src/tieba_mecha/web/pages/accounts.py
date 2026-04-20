@@ -845,29 +845,25 @@ class AccountsPage:
             fname: 贴吧名称
             is_currently_target: 当前是否已是火力打击目标（True=已在靶场，False=不在靶场）
         """
-        print(f"[TOGGLE] fname={fname}, is_currently_target={is_currently_target}")
+        await log_info(f"一键切换火力: 贴吧={fname}, 当前状态={is_currently_target}")
         try:
             if is_currently_target:
                 # 已在靶场中，点击要移除
                 removed = await self.db.delete_target_pool_by_fnames([fname])
-                print(f"[TOGGLE] 删除结果: {removed}")
+                await log_info(f"已从靶场移除: {removed}")
                 self._show_snackbar(f"🏳️ 已从打击名单中移除 '{fname}'", "info")
             else:
                 # 不在靶场中，点击要添加
                 added = await self.db.upsert_target_pools([fname], "未分类")
-                print(f"[TOGGLE] 添加结果: added={added}")
+                await log_info(f"已添加到靶场: added={added}")
                 self._show_snackbar(f"🎯 已将 '{fname}' 锁定为火力打击目标", "success")
             
-            # 重新加载数据
-            print(f"[TOGGLE] 刷新前 is_target: {next((s['is_target'] for s in self._matrix_stats if s['fname'] == fname), 'NOT FOUND')}")
+            # 刷新列表
             await self._refresh_matrix_stats()
-            print(f"[TOGGLE] 刷新后 is_target: {next((s['is_target'] for s in self._matrix_stats if s['fname'] == fname), 'NOT FOUND')}")
             self.refresh_ui()
             self.page.update()
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"[TOGGLE] 异常: {e}")
+            await log_error(f"火力切换异常: {e}")
             self._show_snackbar(f"操作失败: {str(e)}", "error")
 
     async def _on_complement_follow(self, fname: str):
