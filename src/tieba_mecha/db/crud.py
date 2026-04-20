@@ -1483,16 +1483,20 @@ class Database:
             return sorted(stats_list, key=lambda x: x["account_count"], reverse=True)
 
     async def upsert_target_pools(self, fnames: list[str], post_group: str = "") -> int:
-        """将若干吧名批量加入 TargetPool (已存在则跳过)。返回新增的数量。"""
+        """将若干吧名批量加入 TargetPool (已存在则更新)。返回新增的数量。"""
         added = 0
         async with self.async_session() as session:
             for fname in fnames:
                 existing = await session.execute(
                     select(TargetPool).where(TargetPool.fname == fname)
                 )
-                if existing.scalar_one_or_none() is None:
+                pool = existing.scalar_one_or_none()
+                if pool is None:
                     session.add(TargetPool(fname=fname, post_group=post_group))
                     added += 1
+                else:
+                    # 已存在则更新分组信息
+                    pool.post_group = post_group
             await session.commit()
         return added
 

@@ -3012,7 +3012,7 @@ class BatchPostPage:
         else:
             # 兼容模式：纯文本输出
             color = "onSurfaceVariant" if type == "info" else "error"
-            icon = icons.INFO_OUTLINE if type == "info" else icons.WARNING_AMBER
+            icon = icons.INFO_OUTLINED if type == "info" else icons.WARNING_AMBER
             
             log_item = ft.Container(
                 content=ft.Row([
