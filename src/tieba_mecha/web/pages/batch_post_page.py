@@ -1849,7 +1849,7 @@ class BatchPostPage:
             hint_text="贴吧1, 贴吧2...",
             multiline=True, min_lines=3, text_size=12,
         )
-        groups_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=150)
+        groups_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, expand=True)
         global_count_text = ft.Text(f"已选: {len(global_selected)} 个目标", size=12, color="orange", weight=ft.FontWeight.BOLD)
         
         def update_global_count():
@@ -1871,24 +1871,101 @@ class BatchPostPage:
                 else: global_selected.discard(fn)
             update_global_count()
             self._show_snackbar(f"{'已添加' if is_checked else '已从待选区移除'} 分组 [{group_name}] 中的 {len(fnames)} 个吧点", "info")
+            # 刷新子项勾选状态
+            await refresh_group_items()
         
         global_manual_input.on_change = lambda e: update_global_count()
         
-        def render_groups():
-            groups_container.controls.clear()
-            if not target_groups:
-                groups_container.controls.append(ft.Text("尚无预设靶场分组", size=11, color="onSurfaceVariant", italic=True))
+        # 分组展开状态缓存: {group_name: bool}
+        _group_expanded = {}
+
+        async def toggle_group_expand(group_name: str):
+            """切换分组展开/收起状态"""
+            _group_expanded[group_name] = not _group_expanded.get(group_name, False)
+            await refresh_group_items()
+
+        def on_single_forum_check(e):
+            """单个贴吧勾选/取消"""
+            fn = e.control.data
+            if e.control.value:
+                global_selected.add(fn)
             else:
+                global_selected.discard(fn)
+            update_global_count()
+            # 刷新分组级 Checkbox 的 indeterminate 状态
+            self.page.run_task(refresh_group_items)
+
+        async def refresh_group_items():
+            """刷新分组列表（保留展开状态）"""
+            try:
+                groups_container.controls.clear()
+                if not target_groups:
+                    groups_container.controls.append(ft.Text("尚无预设靶场分组", size=11, color="onSurfaceVariant", italic=True))
+                    return
                 for g in target_groups:
-                    groups_container.controls.append(
-                        ft.Checkbox(
-                            label=f"📁 分组: {g}", data=g,
-                            on_change=lambda ev: self.page.run_task(on_group_check, ev),
-                            label_style=ft.TextStyle(size=11), fill_color="primary"
-                        )
+                    is_expanded = _group_expanded.get(g, False)
+                    # 获取该分组的贴吧名称用于显示
+                    fnames = await self.db.get_target_pools_by_group(g)
+                    # 计算该分组选中状态
+                    all_selected = all(fn in global_selected for fn in fnames) if fnames else False
+
+                    group_header = ft.Container(
+                        content=ft.Row([
+                            ft.Checkbox(
+                                data=g,
+                                value=all_selected,
+                                on_change=lambda ev: self.page.run_task(on_group_check, ev),
+                                fill_color="primary",
+                            ),
+                            ft.GestureDetector(
+                                content=ft.Text(
+                                    f"📂{'▼' if is_expanded else '▶'} {g} ({len(fnames)}个吧, {sum(1 for f in fnames if f in global_selected)}已选)",
+                                    size=11,
+                                ),
+                                on_tap=lambda _, gn=g: self.page.run_task(toggle_group_expand, gn),
+                            ),
+                        ], spacing=0),
+                        border_radius=4,
+                        bgcolor=with_opacity(0.08, "primary") if is_expanded else None,
+                        padding=ft.padding.only(left=2, top=2, bottom=2),
                     )
-            try: groups_container.update()
-            except: pass
+                    controls = [group_header]
+
+                    if is_expanded and fnames:
+                        # 展开显示所有贴吧名称，每个贴吧带独立 Checkbox
+                        forum_items = []
+                        for fn in fnames[:30]:
+                            forum_items.append(
+                                ft.Row([
+                                    ft.Checkbox(
+                                        value=fn in global_selected,
+                                        data=fn,
+                                        on_change=on_single_forum_check,
+                                        fill_color="orange",
+                                        label=fn,
+                                        label_style=ft.TextStyle(size=10),
+                                    ),
+                                ], spacing=0)
+                            )
+                        forum_list = ft.Column(forum_items, spacing=0)
+                        if len(fnames) > 30:
+                            forum_list.controls.append(ft.Text(f"    ... 还有 {len(fnames)-30} 个", size=10, color="onSurfaceVariant"))
+                        controls.append(forum_list)
+                    elif is_expanded:
+                        controls.append(ft.Text("    (空)", size=10, color="onSurfaceVariant"))
+
+                    groups_container.controls.append(ft.Column(controls, spacing=0))
+                try:
+                    groups_container.update()
+                except Exception as ex:
+                    print(f"[DEBUG] refresh_group_items update error: {ex}")
+            except Exception as ex:
+                print(f"[DEBUG] refresh_group_items error: {ex}")
+
+        async def render_groups():
+            """初始化渲染分组列表"""
+            print(f"[DEBUG] render_groups called, target_groups={target_groups}")
+            await refresh_group_items()
         
         async def on_global_lock(_):
             # 合并手动输入
@@ -1951,7 +2028,8 @@ class BatchPostPage:
                             ft.Container(
                                 content=groups_container,
                                 border=ft.border.all(1, with_opacity(0.1, "onSurface")),
-                                border_radius=8, padding=5
+                                border_radius=8, padding=5,
+                                expand=True,
                             ),
                             ft.Row([
                                 global_count_text,
@@ -1962,7 +2040,7 @@ class BatchPostPage:
                                     on_click=lambda e: self.page.run_task(on_global_lock, e)
                                 ),
                             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        ], tight=True),
+                        ], tight=False),  # 改为 False 允许 Column 填充空间
                         padding=10
                     )
                 ),
@@ -1983,7 +2061,7 @@ class BatchPostPage:
         
         self.page.open(fire_dialog)
         render_local_list()
-        render_groups()
+        self.page.run_task(render_groups)
     async def _on_shortlink_search_change(self, e):
         self._search_keyword = e.control.value.lower()
         await self._render_filtered_links()
