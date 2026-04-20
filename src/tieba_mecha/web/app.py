@@ -187,6 +187,17 @@ class TiebaMechaApp:
         # 初始化更新管理器
         get_update_manager(db=db)
 
+        # 启动时自动回填击穿数 & 同步本土作战状态
+        try:
+            backfilled = await self.db.backfill_success_count()
+            if backfilled > 0:
+                from ..core.logger import log_info
+                await log_info(f"启动回填：更新了 {backfilled} 条击穿数记录")
+            await self.db.auto_sync_post_target()
+        except Exception as e:
+            from ..core.logger import log_warn
+            await log_warn(f"启动回填异常（非致命）: {e}")
+
         # 检查是否是首次运行（无账号）
         accounts = await self.db.get_accounts()
         if not accounts:
