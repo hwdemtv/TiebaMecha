@@ -909,6 +909,7 @@ class BatchPostPage:
             await self.db.update_material_survival_status(mid, final_status, death_reason)
 
         is_alive = (final_status == "alive")
+        if is_alive:
             self._show_snackbar("响应成功：贴子目前健康正常开放访问", "success")
         else:
             self._show_snackbar("探测失败：贴子异常或已被抽除", "error")

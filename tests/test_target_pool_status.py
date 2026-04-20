@@ -208,6 +208,158 @@ class TestAutoSyncPostTarget:
         assert banned[0].is_post_target is False
 
 
+@pytest.mark.asyncio
+class TestMaterialSurvivalMarking:
+    """测试 update_material_survival_status 的贴吧标记联动逻辑"""
+
+    async def test_dead_by_mod_marks_forum_banned(self, db):
+        """帖子被吧务删除 → 对应 Forum 标记为 is_banned=True, is_post_target=False"""
+        # 准备：创建账号 + 贴吧 + 物料
+        acc = await db.add_account(name="test_acc", bduss="x" * 192)
+        await db.add_forum(fid=1, fname="target_forum", account_id=acc.id)
+        # 创建物料（需要 posted_tid, posted_account_id, posted_fname）
+        from tieba_mecha.db.models import MaterialPool
+        async with db.async_session() as session:
+            m = MaterialPool(
+                title="test post",
+                content="test content",
+                status="success",
+                posted_tid=12345,
+                posted_account_id=acc.id,
+                posted_fname="target_forum",
+            )
+            session.add(m)
+            await session.commit()
+            mid = m.id
+
+        # 执行：帖子被吧务删除
+        await db.update_material_survival_status(mid, "dead", "deleted_by_mod")
+
+        # 验证：Forum 被标记封禁
+        forums = await db.get_forums(account_id=acc.id)
+        target = [f for f in forums if f.fname == "target_forum"]
+        assert len(target) == 1
+        assert target[0].is_banned is True
+        assert target[0].is_post_target is False
+        assert "吧务删除" in target[0].ban_reason
+
+    async def test_dead_by_system_marks_forum_banned(self, db):
+        """帖子被系统风控删除 → Forum 标记封禁"""
+        acc = await db.add_account(name="test_acc2", bduss="y" * 192)
+        await db.add_forum(fid=2, fname="sys_forum", account_id=acc.id)
+        from tieba_mecha.db.models import MaterialPool
+        async with db.async_session() as session:
+            m = MaterialPool(
+                title="test post",
+                content="test content",
+                status="success",
+                posted_tid=54321,
+                posted_account_id=acc.id,
+                posted_fname="sys_forum",
+            )
+            session.add(m)
+            await session.commit()
+            mid = m.id
+
+        await db.update_material_survival_status(mid, "dead", "deleted_by_system")
+
+        forums = await db.get_forums(account_id=acc.id)
+        target = [f for f in forums if f.fname == "sys_forum"]
+        assert len(target) == 1
+        assert target[0].is_banned is True
+        assert target[0].is_post_target is False
+
+    async def test_alive_does_not_mark_forum_banned(self, db):
+        """帖子存活 → 不标记封禁"""
+        acc = await db.add_account(name="test_acc3", bduss="z" * 192)
+        await db.add_forum(fid=3, fname="alive_forum", account_id=acc.id)
+        from tieba_mecha.db.models import MaterialPool
+        async with db.async_session() as session:
+            m = MaterialPool(
+                title="test post",
+                content="test content",
+                status="success",
+                posted_tid=99999,
+                posted_account_id=acc.id,
+                posted_fname="alive_forum",
+            )
+            session.add(m)
+            await session.commit()
+            mid = m.id
+
+        await db.update_material_survival_status(mid, "alive", "")
+
+        forums = await db.get_forums(account_id=acc.id)
+        target = [f for f in forums if f.fname == "alive_forum"]
+        assert len(target) == 1
+        assert target[0].is_banned is False
+
+    async def test_dead_unknown_reason_does_not_mark_banned(self, db):
+        """帖子阵亡但原因不在封禁列表 → 不标记封禁"""
+        acc = await db.add_account(name="test_acc4", bduss="w" * 192)
+        await db.add_forum(fid=4, fname="unknown_forum", account_id=acc.id)
+        from tieba_mecha.db.models import MaterialPool
+        async with db.async_session() as session:
+            m = MaterialPool(
+                title="test post",
+                content="test content",
+                status="success",
+                posted_tid=11111,
+                posted_account_id=acc.id,
+                posted_fname="unknown_forum",
+            )
+            session.add(m)
+            await session.commit()
+            mid = m.id
+
+        # "deleted_by_user" 不在 ban_reason_map 中
+        await db.update_material_survival_status(mid, "dead", "deleted_by_user")
+
+        forums = await db.get_forums(account_id=acc.id)
+        target = [f for f in forums if f.fname == "unknown_forum"]
+        assert len(target) == 1
+        assert target[0].is_banned is False
+
+    async def test_deleted_count_in_matrix_stats(self, db):
+        """被删帖数量在矩阵统计中正确计算"""
+        acc = await db.add_account(name="test_acc5", bduss="v" * 192)
+        await db.add_forum(fid=5, fname="deleted_forum", account_id=acc.id)
+        await db.upsert_target_pools(["deleted_forum"], "test")
+
+        from tieba_mecha.db.models import MaterialPool
+        async with db.async_session() as session:
+            for i in range(3):
+                m = MaterialPool(
+                    title=f"post {i}",
+                    content="content",
+                    status="success",
+                    posted_tid=20000 + i,
+                    posted_account_id=acc.id,
+                    posted_fname="deleted_forum",
+                )
+                session.add(m)
+            await session.commit()
+            # 手动设置存活状态
+            for i, m_obj in enumerate(
+                (await session.execute(
+                    __import__("sqlalchemy").select(MaterialPool).where(MaterialPool.posted_fname == "deleted_forum")
+                )).scalars().all()
+            ):
+                if i < 2:
+                    m_obj.survival_status = "dead"
+                    m_obj.death_reason = "deleted_by_mod"
+                else:
+                    m_obj.survival_status = "alive"
+                    m_obj.death_reason = ""
+            await session.commit()
+
+        # 获取矩阵统计
+        stats = await db.get_forum_matrix_stats()
+        deleted_stat = [s for s in stats if s["fname"] == "deleted_forum"]
+        assert len(deleted_stat) == 1
+        assert deleted_stat[0]["deleted_count"] == 2
+
+
 # ---- Helper ----
 @pytest_asyncio.fixture
 async def db(temp_db_path):
