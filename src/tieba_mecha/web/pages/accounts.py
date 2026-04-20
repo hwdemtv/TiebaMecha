@@ -907,32 +907,33 @@ class AccountsPage:
                             padding=5,
                             border=ft.border.only(left=ft.border.BorderSide(1, with_opacity(0.1, "primary"))),
                         ),
-                        # 操作菜单
-                        ft.PopupMenuButton(
-                            items=[
-                                ft.PopupMenuItem(
-                                    text="投放火力 (设为 Target)",
-                                    icon=icons.GPS_FIXED_ROUNDED,
-                                    on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, True)
-                                ),
-                                ft.PopupMenuItem(
-                                    text="移除火力 (取消 Target)",
-                                    icon=icons.GPS_OFF_ROUNDED,
-                                    on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, False)
-                                ),
-                                ft.PopupMenuItem(
-                                    text="修改分组/标签",
-                                    icon=icons.LABEL_ROUNDED,
-                                    on_click=lambda e, s=stat: self._show_tag_edit_dialog(s)
-                                ),
-                                ft.PopupMenuItem(
-                                    text="补齐关注（让未关注账号也关注）",
-                                    icon=icons.PERSON_ADD_ALT_1_ROUNDED,
-                                    on_click=lambda e, f=fname: self.page.run_task(self._on_complement_follow, f)
-                                ),
-                            ],
-                            icon=icons.MORE_VERT_ROUNDED,
-                        )
+                        # 操作按钮组
+                        ft.Row([
+                            ft.IconButton(
+                                icon=icons.GPS_FIXED_ROUNDED,
+                                tooltip="投放火力 (设为 Target)",
+                                icon_color="primary" if not is_target else "onSurfaceVariant",
+                                on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, True)
+                            ),
+                            ft.IconButton(
+                                icon=icons.GPS_OFF_ROUNDED,
+                                tooltip="移除火力 (取消 Target)",
+                                icon_color="error" if is_target else "onSurfaceVariant",
+                                on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, False)
+                            ),
+                            ft.IconButton(
+                                icon=icons.LABEL_ROUNDED,
+                                tooltip="修改分组/标签",
+                                icon_color="primary",
+                                on_click=lambda e, s=stat: self._show_tag_edit_dialog(s)
+                            ),
+                            ft.IconButton(
+                                icon=icons.PERSON_ADD_ALT_1_ROUNDED,
+                                tooltip="补齐关注（让未关注账号也关注）",
+                                icon_color="primary",
+                                on_click=lambda e, f=fname: self.page.run_task(self._on_complement_follow, f)
+                            ),
+                        ], spacing=0),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
