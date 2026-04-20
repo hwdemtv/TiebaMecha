@@ -63,10 +63,12 @@ class TestUpdateTargetPoolStatus:
         pool = await db._get_target_pool("test_forum")
         assert pool.is_active is True
 
-    async def test_nonexistent_fname_skipped(self, db):
-        """fname 不在 target_pool 中 → 静默跳过，不报错"""
-        # 不应抛异常
-        await db.update_target_pool_status("nonexistent_forum", is_success=True)
+    async def test_nonexistent_fname_auto_created(self, db):
+        """fname 不在 target_pool 中 → 自动创建记录"""
+        await db.update_target_pool_status("auto_created_forum", is_success=True)
+        pool = await db._get_target_pool("auto_created_forum")
+        assert pool is not None
+        assert pool.success_count == 1
 
     async def test_multiple_successes_accumulate(self, db):
         """多次成功 → success_count 累加"""

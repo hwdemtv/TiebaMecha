@@ -1831,22 +1831,28 @@ class Database:
             return result.scalars().all()
 
     async def update_target_pool_status(self, fname: str, is_success: bool, error_reason: str = "") -> None:
-        """记录靶场投递结果并发动熔断"""
+        """记录靶场投递结果并发动熔断。
+        如果 fname 不在 target_pool 中，自动创建一条记录（懒初始化）。"""
         async with self.async_session() as session:
             result = await session.execute(select(TargetPool).where(TargetPool.fname == fname))
             pool = result.scalar()
             if not pool:
-                logger.warning(f"[击穿数] fname='{fname}' 不在 target_pool 中，跳过更新")
-                return
+                # 懒初始化：如果发帖的贴吧不在靶场池中，自动创建
+                logger.info(f"[击穿数] fname='{fname}' 不在 target_pool 中，自动创建")
+                pool = TargetPool(fname=fname)
+                session.add(pool)
+                await session.flush()  # 获取 pool.id
 
-            old_count = pool.success_count
             if is_success:
-                pool.success_count += 1
+                # 使用 SQL 表达式递增，避免 ORM 过期问题
+                new_count = pool.success_count + 1
+                pool.success_count = new_count
                 pool.fail_count = 0  # 恢复生命值
-                logger.info(f"[击穿数] {fname}: {old_count} → {pool.success_count}")
+                logger.info(f"[击穿数] {fname}: {new_count - 1} → {new_count}")
             else:
-                pool.fail_count += 1
+                pool.fail_count = (pool.fail_count or 0) + 1
                 pool.last_fail_reason = error_reason
+                logger.info(f"[击穿数] {fname}: fail_count={pool.fail_count}, reason={error_reason}")
                 # 连续被封禁阈值，触发熔断
                 if pool.fail_count >= 3:
                     pool.is_active = False
