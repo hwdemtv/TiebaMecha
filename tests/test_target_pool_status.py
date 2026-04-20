@@ -359,6 +359,42 @@ class TestMaterialSurvivalMarking:
         assert len(deleted_stat) == 1
         assert deleted_stat[0]["deleted_count"] == 2
 
+    async def test_deleted_count_includes_empty_death_reason(self, db):
+        """历史数据 death_reason 为空 → 仍计入被删数（排除法逻辑）"""
+        acc = await db.add_account(name="test_acc6", bduss="u" * 192)
+        await db.add_forum(fid=6, fname="legacy_forum", account_id=acc.id)
+        await db.upsert_target_pools(["legacy_forum"], "test")
+
+        from tieba_mecha.db.models import MaterialPool
+        async with db.async_session() as session:
+            m1 = MaterialPool(
+                title="old post",
+                content="content",
+                status="success",
+                posted_tid=30000,
+                posted_account_id=acc.id,
+                posted_fname="legacy_forum",
+                survival_status="dead",
+                death_reason="",  # 历史数据：death_reason 为空
+            )
+            m2 = MaterialPool(
+                title="new post",
+                content="content",
+                status="success",
+                posted_tid=30001,
+                posted_account_id=acc.id,
+                posted_fname="legacy_forum",
+                survival_status="dead",
+                death_reason="deleted_by_user",  # 用户自删，不计入
+            )
+            session.add_all([m1, m2])
+            await session.commit()
+
+        stats = await db.get_forum_matrix_stats()
+        legacy = [s for s in stats if s["fname"] == "legacy_forum"]
+        assert len(legacy) == 1
+        assert legacy[0]["deleted_count"] == 1  # 空原因计入，用户自删不计
+
 
 # ---- Helper ----
 @pytest_asyncio.fixture

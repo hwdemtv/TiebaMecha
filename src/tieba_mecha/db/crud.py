@@ -1460,12 +1460,13 @@ class Database:
         """
         from sqlalchemy import func, update as sa_update
         async with self.async_session() as session:
-            # 获取有被删帖记录的贴吧名集合（吧务删除 + 系统风控删除）
+            # 获取有被删帖记录的贴吧名集合（帖子阵亡且非用户自删/探测异常）
+            _excluded_reasons = ["deleted_by_user", "captcha_required", "error"]
             dead_stmt = (
                 select(MaterialPool.posted_fname)
                 .where(
                     MaterialPool.survival_status == "dead",
-                    MaterialPool.death_reason.in_(["banned_by_mod", "deleted_by_system", "deleted_by_mod"]),
+                    ~MaterialPool.death_reason.in_(_excluded_reasons),
                     MaterialPool.posted_fname.isnot(None),
                     MaterialPool.posted_fname != "",
                 )
@@ -1596,7 +1597,9 @@ class Database:
             target_result = await session.execute(target_stmt)
             target_map = {t.fname: t for t in target_result.scalars().all()}
             
-            # 2.5 获取每个贴吧的被删帖数量（death_reason = banned_by_mod）
+            # 2.5 获取每个贴吧的被删帖数量（帖子阵亡且非用户自删/探测异常）
+            # 排除原因：deleted_by_user（用户自删）、captcha_required（验证码拦截）、error（探测异常）
+            _excluded_reasons = ["deleted_by_user", "captcha_required", "error"]
             dead_stmt = (
                 select(
                     MaterialPool.posted_fname,
@@ -1604,7 +1607,7 @@ class Database:
                 )
                 .where(
                     MaterialPool.survival_status == "dead",
-                    MaterialPool.death_reason.in_(["deleted_by_mod", "deleted_by_system", "banned_by_mod"]),
+                    ~MaterialPool.death_reason.in_(_excluded_reasons),
                     MaterialPool.posted_fname.isnot(None),
                     MaterialPool.posted_fname != "",
                 )
