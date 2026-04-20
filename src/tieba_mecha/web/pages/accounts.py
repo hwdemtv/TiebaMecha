@@ -1358,7 +1358,7 @@ class AccountsPage:
                                 icon=icons.GPS_FIXED_ROUNDED if not is_target else icons.GPS_OFF_ROUNDED,
                                 tooltip="已锁定为火力目标 (点击移除)" if is_target else "投放火力 (设为 Target)",
                                 icon_color="primary" if is_target else "onSurfaceVariant",
-                                on_click=lambda e, f=fname, t=is_target: self.page.run_task(self._on_toggle_target, f, not t)
+                                on_click=lambda e, f=fname, t=is_target: self.page.run_task(self._on_toggle_target, f, t)
                             ),
                             ft.IconButton(
                                 icon=icons.SHIELD_ROUNDED if is_post_target else icons.SHIELD_OUTLINED,
