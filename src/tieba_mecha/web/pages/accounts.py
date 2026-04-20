@@ -262,6 +262,13 @@ class AccountsPage:
             on_click=self._on_sync_matrix,
         )
 
+        clear_search_btn = ft.IconButton(
+            icon=icons.CLEAR,
+            tooltip="清除搜索",
+            icon_color="onSurfaceVariant",
+            on_click=self._on_clear_matrix_search,
+        )
+
         follow_btn = ft.IconButton(
             icon=icons.ADD,
             tooltip="关注贴吧",
@@ -280,7 +287,7 @@ class AccountsPage:
 
         return ft.Column(
             controls=[
-                ft.Row([search_field, sync_btn, follow_btn], spacing=10),
+                ft.Row([search_field, sync_btn, clear_search_btn, follow_btn], spacing=10),
                 self.matrix_header_info,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
                 ft.Container(
@@ -611,6 +618,18 @@ class AccountsPage:
 
     def _on_matrix_search_change(self, e):
         self._matrix_search_text = e.control.value
+        self.refresh_ui()
+
+    def _on_clear_matrix_search(self, e):
+        """清除全域战略吧库搜索"""
+        self._matrix_search_text = ""
+        # 找到搜索框并清空
+        for ctrl in self.tabs.tabs[1].content.controls:
+            if isinstance(ctrl, ft.Row) and len(ctrl.controls) > 0:
+                for c in ctrl.controls:
+                    if isinstance(c, ft.TextField):
+                        c.value = ""
+                        break
         self.refresh_ui()
 
     async def _on_sync_matrix(self, e):
