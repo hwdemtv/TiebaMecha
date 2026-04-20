@@ -1,0 +1,29 @@
+C:\Users\hwdem\AppData\Local\Programs\Python\Python311\Lib\site-packages\requests\__init__.py:109: RequestsDependencyWarning: urllib3 (2.6.0) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-8.0.0, pluggy-1.6.0 -- C:\Users\hwdem\AppData\Local\Programs\Python\Python311\python.exe
+cachedir: .pytest_cache
+rootdir: D:\��������\TiebaMecha
+configfile: pyproject.toml
+plugins: anyio-4.12.0, asyncio-0.23.5, cov-7.1.0, mock-3.15.1, requests-mock-1.12.1
+asyncio: mode=Mode.AUTO
+collecting ... collected 16 items
+
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_success_increments_count PASSED [  6%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_success_resets_fail_count PASSED [ 12%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_fail_increments_fail_count PASSED [ 18%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_circuit_breaker_at_3_fails PASSED [ 25%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_no_circuit_breaker_under_3_fails PASSED [ 31%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_nonexistent_fname_skipped PASSED [ 37%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_multiple_successes_accumulate PASSED [ 43%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_last_used_at_updated PASSED [ 50%]
+tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_from_logs PASSED [ 56%]
+tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_only_updates_zero PASSED [ 62%]
+tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_empty_logs PASSED [ 68%]
+tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_only_counts_success PASSED [ 75%]
+tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_skips_nonexistent_forum PASSED [ 81%]
+tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_idempotent PASSED [ 87%]
+tests/test_target_pool_status.py::TestAutoSyncPostTarget::test_safe_when_not_banned_no_deletions PASSED [ 93%]
+tests/test_target_pool_status.py::TestAutoSyncPostTarget::test_unsafe_when_banned PASSED [100%]
+
+============================= 16 passed in 7.68s ==============================
