@@ -1756,10 +1756,21 @@ class BatchPostPage:
         forums_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
         groups_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=150)
         
+        # 已选数量提示
+        selected_count_text = ft.Text(f"已选: {len(final_selected)} 个目标", size=12, color="primary", weight=ft.FontWeight.BOLD)
+        
+        def update_selected_count():
+            selected_count_text.value = f"已选: {len(final_selected)} 个目标"
+            try:
+                selected_count_text.update()
+            except:
+                pass
+        
         def on_item_check(e):
             fn = e.control.data
             if e.control.value: final_selected.add(fn)
             else: final_selected.discard(fn)
+            update_selected_count()
 
         async def on_group_check(e):
             group_name = e.control.data
@@ -1771,6 +1782,7 @@ class BatchPostPage:
                 else: final_selected.discard(fn)
             # 刷新本地列表的选中状态（如果本地也有重合的吧）
             render_local_list(search_field.value)
+            update_selected_count()
             self._show_snackbar(f"{'已添加' if is_checked else '已从待选区移除'} 分组 [{group_name}] 中的 {len(fnames)} 个吧点", "info")
 
         def render_local_list(keyword=""):
@@ -1848,6 +1860,7 @@ class BatchPostPage:
                         final_selected.add(fn)
                     else:
                         final_selected.discard(fn)
+            update_selected_count()
             try:
                 forums_container.update()
             except:
@@ -1989,6 +2002,7 @@ class BatchPostPage:
             ),
             actions=[
                 ft.TextButton("关闭", on_click=lambda _: self.page.close(fire_dialog)),
+                selected_count_text,
                 ft.FilledButton(
                     "锁定发射坐标", 
                     icon=icons.CHECK, 
