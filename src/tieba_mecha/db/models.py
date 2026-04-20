@@ -194,6 +194,7 @@ class BatchPostTask(Base):
     delay_max: Mapped[float] = mapped_column(Float, default=300.0)
 
     use_ai: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否启用 AI 改写")
+    ai_persona: Mapped[str] = mapped_column(String(50), default="normal", comment="AI 人格设定: normal/resource_god/casual/newbie")
     schedule_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="计划执行时间")
     interval_hours: Mapped[int] = mapped_column(Integer, default=0, comment="重复执行间隔(小时)，0表示不重复")
     status: Mapped[str] = mapped_column(String(20), default="pending", comment="pending/running/completed/failed")

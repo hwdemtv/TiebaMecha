@@ -94,6 +94,7 @@ class Database:
         batch_columns = [
             ("batch_post_tasks", "fnames_json", "TEXT DEFAULT '[]'"),
             ("batch_post_tasks", "strategy", "VARCHAR(20) DEFAULT 'round_robin'"),
+            ("batch_post_tasks", "ai_persona", "VARCHAR(50) DEFAULT 'normal'"),
         ]
         for table, column, col_type in batch_columns:
             try:
@@ -1527,19 +1528,26 @@ class Database:
             updated = 0
             for fname, cnt in success_map.items():
                 if fname not in pool_map:
-                    logger.warning(f"[回填] fname='{fname}' 在 target_pool 中不存在，跳过")
+                    # 自动补全缺失的 TargetPool 记录 (Upsert 逻辑)
+                    logger.info(f"[回填] fname='{fname}' 不在 target_pool 中，正在自动创建并回填击穿数")
+                    new_pool = TargetPool(fname=fname, success_count=cnt)
+                    session.add(new_pool)
+                    updated += 1
                     continue
-                # 只回填 success_count=0 的记录
-                r = await session.execute(
-                    update(TargetPool)
-                    .where(TargetPool.fname == fname, TargetPool.success_count == 0)
-                    .values(success_count=cnt)
-                )
-                updated += r.rowcount
+                
+                # 即使 success_count 不为 0，如果日志中的统计值更大，也进行同步
+                current_cnt = pool_map.get(fname, 0)
+                if cnt > current_cnt:
+                    r = await session.execute(
+                        update(TargetPool)
+                        .where(TargetPool.fname == fname)
+                        .values(success_count=cnt)
+                    )
+                    updated += r.rowcount
 
             if updated > 0:
                 await session.commit()
-            logger.info(f"[回填] 实际更新了 {updated} 条记录")
+            logger.info(f"[回填] 实际同步/回填了 {updated} 条靶场统计记录")
             return updated
 
     async def get_native_post_targets(self, account_id: int | None = None) -> list[str]:
@@ -1592,7 +1600,7 @@ class Database:
                 )
                 .where(
                     MaterialPool.survival_status == "dead",
-                    MaterialPool.death_reason == "banned_by_mod",
+                    MaterialPool.death_reason.in_(["deleted_by_mod", "deleted_by_system", "banned_by_mod"]),
                     MaterialPool.posted_fname.isnot(None),
                     MaterialPool.posted_fname != "",
                 )

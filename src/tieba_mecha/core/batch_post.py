@@ -576,6 +576,7 @@ class BatchPostTask:
     delay_min: float = 120.0  # 保守值：降低被检测风险
     delay_max: float = 600.0  # 保守值：降低被检测风险
     use_ai: bool = False
+    ai_persona: str = "normal"  # AI 人格选择
     status: str = "pending"
     progress: int = 0
     total: int = 0
@@ -963,7 +964,7 @@ class BatchPostManager:
                 if task.use_ai:
                     try:
                         optimizer = AIOptimizer(self.db)
-                        s_ai, opt_t, opt_c, _ = await asyncio.wait_for(optimizer.optimize_post(title, content), timeout=15.0)
+                        s_ai, opt_t, opt_c, _ = await asyncio.wait_for(optimizer.optimize_post(title, content, persona=task.ai_persona), timeout=15.0)
                         if s_ai: 
                             title, content = opt_t, opt_c
                             await self.db.update_material_ai(current_material.id, title, content)
