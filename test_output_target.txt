@@ -14,7 +14,7 @@ tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_success_reset
 tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_fail_increments_fail_count PASSED [ 18%]
 tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_circuit_breaker_at_3_fails PASSED [ 25%]
 tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_no_circuit_breaker_under_3_fails PASSED [ 31%]
-tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_nonexistent_fname_skipped PASSED [ 37%]
+tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_nonexistent_fname_auto_created PASSED [ 37%]
 tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_multiple_successes_accumulate PASSED [ 43%]
 tests/test_target_pool_status.py::TestUpdateTargetPoolStatus::test_last_used_at_updated PASSED [ 50%]
 tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_from_logs PASSED [ 56%]
@@ -26,4 +26,4 @@ tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_idempo
 tests/test_target_pool_status.py::TestAutoSyncPostTarget::test_safe_when_not_banned_no_deletions PASSED [ 93%]
 tests/test_target_pool_status.py::TestAutoSyncPostTarget::test_unsafe_when_banned PASSED [100%]
 
-============================= 16 passed in 10.39s =============================
+============================= 16 passed in 11.16s =============================
