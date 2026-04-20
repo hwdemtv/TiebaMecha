@@ -5,13 +5,15 @@ import json
 import random
 import time
 import urllib.parse
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, AsyncGenerator
+from typing import Any
 
 from aiotieba.exception import TiebaServerError
 
 from ..db.crud import Database
+from ..db.models import Account, Forum
 from .account import get_account_credentials
 from .client_factory import create_client
 from .ai_optimizer import AIOptimizer
@@ -23,19 +25,19 @@ from .auth import get_auth_manager, AuthStatus
 class RateLimiter:
     """基于滑动时间窗的动态令牌限流器 (支持并发安全)"""
     def __init__(self, rpm: int = 15):
-        self.rpm = rpm
-        self.timestamps = []
-        self._lock = asyncio.Lock()
+        self.rpm: int = rpm
+        self.timestamps: list[float] = []
+        self._lock: asyncio.Lock = asyncio.Lock()
         
     async def wait_if_needed(self):
         async with self._lock:
-            now = time.time()
+            now: float = time.time()
             # 淘汰一分钟之前的记录
             self.timestamps = [t for t in self.timestamps if now - t < 60]
             
             if len(self.timestamps) >= self.rpm:
                 # 基于最早时间戳计算休眠时长
-                wait_time = 60 - (now - self.timestamps[0]) + 1
+                wait_time: float = 60 - (now - self.timestamps[0]) + 1
                 await log_warn(f"触发内部速率安全墙 (>{self.rpm}帖/分)，流控休眠 {wait_time:.1f} 秒...")
                 await asyncio.sleep(wait_time)
                 # 唤醒后刷新时间记录以修正窗口
@@ -56,9 +58,9 @@ class PerAccountRateLimiter:
         Args:
             rpm: 每个账号每分钟最大发帖数，默认5帖/分
         """
-        self.rpm = rpm
-        self._account_timestamps = {}  # {account_id: [timestamps]}
-        self._lock = asyncio.Lock()
+        self.rpm: int = rpm
+        self._account_timestamps: dict[int, list[float]] = {}  # {account_id: [timestamps]}
+        self._lock: asyncio.Lock = asyncio.Lock()
     
     async def wait_if_needed(self, account_id: int):
         """检查并等待该账号的限流"""
@@ -66,8 +68,8 @@ class PerAccountRateLimiter:
             if account_id not in self._account_timestamps:
                 self._account_timestamps[account_id] = []
             
-            timestamps = self._account_timestamps[account_id]
-            now = time.time()
+            timestamps: list[float] = self._account_timestamps[account_id]
+            now: float = time.time()
             
             # 淘汰一分钟之前的记录
             timestamps = [t for t in timestamps if now - t < 60]
@@ -76,8 +78,7 @@ class PerAccountRateLimiter:
                 # 基于该账号最早时间戳计算休眠时长
                 wait_time = 60 - (now - timestamps[0]) + 1
                 await log_warn(
-                    f"账号 [{account_id}] 触发独立速率限制 ({self.rpm}帖/分)，"
-                    f"等待 {wait_time:.1f}s..."
+                    f"账号 [{account_id}] 触发独立速率限制 ({self.rpm}帖/分)，等待 {wait_time:.1f}s..."
                 )
                 await asyncio.sleep(wait_time)
                 now = time.time()
@@ -86,13 +87,13 @@ class PerAccountRateLimiter:
             timestamps.append(now)
             self._account_timestamps[account_id] = timestamps
     
-    def get_status(self, account_id: int) -> dict:
+    def get_status(self, account_id: int) -> dict[str, Any]:
         """获取指定账号的限流状态"""
         if account_id not in self._account_timestamps:
             return {"account_id": account_id, "rpm": self.rpm, "recent_posts": 0, "can_post": True}
         
-        now = time.time()
-        recent = [t for t in self._account_timestamps[account_id] if now - t < 60]
+        now: float = time.time()
+        recent: list[float] = [t for t in self._account_timestamps[account_id] if now - t < 60]
         return {
             "account_id": account_id,
             "rpm": self.rpm,
@@ -112,21 +113,21 @@ class AccountForumCooldown:
     确保每个账号在每个贴吧有独立的冷却时间，避免同一账号短时间跨多贴吧被检测。
     """
     def __init__(self, cooldown_seconds: float = 600):
-        self.cooldown_seconds = cooldown_seconds
-        self._last_post = {}  # {(account_id, fname): timestamp}
-        self._lock = asyncio.Lock()
+        self.cooldown_seconds: float = cooldown_seconds
+        self._last_post: dict[tuple[int, str], float] = {}  # {(account_id, fname): timestamp}
+        self._lock: asyncio.Lock = asyncio.Lock()
     
     def can_post(self, account_id: int, fname: str) -> bool:
         """检查账号-贴吧组合是否可以发帖（未在冷却中）"""
-        key = (account_id, fname)
-        last_time = self._last_post.get(key, 0)
+        key: tuple[int, str] = (account_id, fname)
+        last_time: float = self._last_post.get(key, 0)
         return time.time() - last_time >= self.cooldown_seconds
     
     def get_remaining_cooldown(self, account_id: int, fname: str) -> float:
         """获取剩余冷却时间（秒）"""
-        key = (account_id, fname)
-        last_time = self._last_post.get(key, 0)
-        elapsed = time.time() - last_time
+        key: tuple[int, str] = (account_id, fname)
+        last_time: float = self._last_post.get(key, 0)
+        elapsed: float = time.time() - last_time
         return max(0, self.cooldown_seconds - elapsed)
     
     async def record_post(self, account_id: int, fname: str):
@@ -134,7 +135,7 @@ class AccountForumCooldown:
         async with self._lock:
             self._last_post[(account_id, fname)] = time.time()
     
-    async def get_available_forum(self, account_id: int, fnames: List[str]) -> Optional[str]:
+    async def get_available_forum(self, account_id: int, fnames: list[str]) -> str | None:
         """
         为指定账号找一个不在冷却中的贴吧。
         如果所有贴吧都在冷却中，返回 None。
@@ -155,9 +156,9 @@ class CaptchaCircuitBreaker:
         Args:
             cooldown_minutes: 触发验证码后熔断时长，默认30分钟
         """
-        self.cooldown_minutes = cooldown_minutes
-        self._captcha_triggers = {}  # {account_id: timestamp}
-        self._lock = asyncio.Lock()
+        self.cooldown_minutes: int = cooldown_minutes
+        self._captcha_triggers: dict[int, float] = {}  # {account_id: timestamp}
+        self._lock: asyncio.Lock = asyncio.Lock()
     
     async def check_and_trigger(self, account_id: int, err_msg: str, err_code: int) -> bool:
         """
@@ -175,8 +176,7 @@ class CaptchaCircuitBreaker:
             async with self._lock:
                 self._captcha_triggers[account_id] = time.time()
             await log_error(
-                f"🚨 验证码熔断：账号 [{account_id}] 触发验证码，暂停发帖 {self.cooldown_minutes} 分钟。"
-                f"建议：手动验证账号或增加发帖间隔。"
+                f"🚨 验证码熔断：账号 [{account_id}] 触发验证码，暂停发帖 {self.cooldown_minutes} 分钟。建议：手动验证账号或增加发帖间隔。"
             )
             return True
         return False
@@ -186,7 +186,7 @@ class CaptchaCircuitBreaker:
         if account_id not in self._captcha_triggers:
             return False
         
-        elapsed = time.time() - self._captcha_triggers[account_id]
+        elapsed: float = time.time() - self._captcha_triggers[account_id]
         if elapsed >= self.cooldown_minutes * 60:
             # 熔断超时，自动解除
             del self._captcha_triggers[account_id]
@@ -197,8 +197,8 @@ class CaptchaCircuitBreaker:
         """获取验证码熔断剩余时间（秒）"""
         if account_id not in self._captcha_triggers:
             return 0
-        elapsed = time.time() - self._captcha_triggers[account_id]
-        remaining = self.cooldown_minutes * 60 - elapsed
+        elapsed: float = time.time() - self._captcha_triggers[account_id]
+        remaining: float = self.cooldown_minutes * 60 - elapsed
         return max(0, remaining)
 
 
@@ -212,9 +212,9 @@ class ContentSimilarityDetector:
         Args:
             similarity_threshold: 相似度阈值，0-1，越高越严格
         """
-        self.similarity_threshold = similarity_threshold
-        self._history = []  # [(hash, timestamp)]
-        self._lock = asyncio.Lock()
+        self.similarity_threshold: float = similarity_threshold
+        self._history: list[tuple[str, float]] = []  # [(hash, timestamp)]
+        self._lock: asyncio.Lock = asyncio.Lock()
     
     def _normalize_text(self, text: str) -> str:
         """标准化文本：去除标点、空格、小写化"""
@@ -245,7 +245,7 @@ class ContentSimilarityDetector:
             max_similarity = 0.0
             # 只检查最近30分钟内的历史记录
             cutoff = time.time() - 1800
-            recent_history = [h for h in self._history if h[1] > cutoff]
+            recent_history: list[tuple[str, float]] = [h for h in self._history if h[1] > cutoff]
             
             for history_hash, _ in recent_history:
                 similarity = self._compute_similarity(combined_text, history_hash)
@@ -273,10 +273,10 @@ class FailureCircuitBreaker:
             max_consecutive_failures: 最大连续失败次数
             cooldown_minutes: 熔断后暂停时长
         """
-        self.max_consecutive_failures = max_consecutive_failures
-        self.cooldown_minutes = cooldown_minutes
-        self._failure_counts = {}  # {account_id: (count, last_failure_time)}
-        self._lock = asyncio.Lock()
+        self.max_consecutive_failures: int = max_consecutive_failures
+        self.cooldown_minutes: int = cooldown_minutes
+        self._failure_counts: dict[int, tuple[int, float]] = {}  # {account_id: (count, last_failure_time)}
+        self._lock: asyncio.Lock = asyncio.Lock()
     
     async def record_failure(self, account_id: int) -> bool:
         """
@@ -286,8 +286,10 @@ class FailureCircuitBreaker:
             True 表示触发了熔断；False 表示正常
         """
         async with self._lock:
-            now = time.time()
+            now: float = time.time()
             if account_id in self._failure_counts:
+                count: int
+                last_time: float
                 count, last_time = self._failure_counts[account_id]
                 # 如果上次失败超过30分钟，重置计数
                 if now - last_time > 1800:
@@ -300,8 +302,7 @@ class FailureCircuitBreaker:
             count, _ = self._failure_counts[account_id]
             if count >= self.max_consecutive_failures:
                 await log_error(
-                    f"🚨 连续失败熔断：账号 [{account_id}] 连续失败 {count} 次，"
-                    f"暂停 {self.cooldown_minutes} 分钟。请检查账号状态或网络。"
+                    f"🚨 连续失败熔断：账号 [{account_id}] 连续失败 {count} 次，暂停 {self.cooldown_minutes} 分钟。请检查账号状态或网络。"
                 )
                 return True
             return False
@@ -317,11 +318,13 @@ class FailureCircuitBreaker:
         if account_id not in self._failure_counts:
             return False
         
+        count: int
+        last_time: float
         count, last_time = self._failure_counts[account_id]
         if count < self.max_consecutive_failures:
             return False
         
-        elapsed = time.time() - last_time
+        elapsed: float = time.time() - last_time
         if elapsed >= self.cooldown_minutes * 60:
             # 超时自动解除，但保留计数（下次失败会继续累积）
             return False
@@ -339,8 +342,8 @@ class TimeWindowDispatcher:
             quiet_start: 静默开始小时（0-23）
             quiet_end: 静默结束小时（0-23）
         """
-        self.quiet_start = quiet_start
-        self.quiet_end = quiet_end
+        self.quiet_start: int = quiet_start
+        self.quiet_end: int = quiet_end
     
     def is_quiet_hours(self) -> bool:
         """判断是否处于静默时段"""
@@ -383,11 +386,11 @@ class AutoWeightCalculator:
     """
     
     # 各因素权重配置
-    WEIGHT_LEVEL = 0.30      # 等级权重
-    WEIGHT_SIGN = 0.25       # 签到成功率权重
-    WEIGHT_STATUS = 0.20    # 账号状态权重
-    WEIGHT_PROXY = 0.15     # 代理绑定权重
-    WEIGHT_VERIFIED = 0.10  # 验证时效权重
+    WEIGHT_LEVEL: float = 0.30      # 等级权重
+    WEIGHT_SIGN: float = 0.25       # 签到成功率权重
+    WEIGHT_STATUS: float = 0.20    # 账号状态权重
+    WEIGHT_PROXY: float = 0.15     # 代理绑定权重
+    WEIGHT_VERIFIED: float = 0.10  # 验证时效权重
     
     @classmethod
     def calc_level_score(cls, avg_level: float) -> float:
@@ -436,7 +439,6 @@ class AutoWeightCalculator:
         if last_verified is None:
             return 1.0  # 从未验证
         
-        from datetime import timedelta
         days_since = (datetime.now() - last_verified).days
         
         if days_since <= 7:
@@ -449,7 +451,7 @@ class AutoWeightCalculator:
             return 2.0
     
     @classmethod
-    def calculate(cls, account: 'Account', forums: list['Forum'] = None) -> tuple[int, dict]:
+    def calculate(cls, account: Account, forums: list[Forum] | None = None) -> tuple[int, dict[str, Any]]:
         """
         计算账号的推荐权重。
         
@@ -462,31 +464,31 @@ class AutoWeightCalculator:
         """
         # 1. 计算平均等级得分
         if forums:
-            levels = [f.level for f in forums if f.level > 0]
-            avg_level = sum(levels) / len(levels) if levels else 0.0
+            levels: list[int] = [f.level for f in forums if f.level > 0]
+            avg_level: float = sum(levels) / len(levels) if levels else 0.0
         else:
             avg_level = 0.0
         level_score = cls.calc_level_score(avg_level)
         
         # 2. 计算签到成功率得分
         if forums:
-            total_signs = sum(f.history_total for f in forums)
-            success_signs = sum(f.history_success for f in forums)
+            total_signs: int = sum(f.history_total for f in forums)
+            success_signs: int = sum(f.history_success for f in forums)
         else:
             total_signs, success_signs = 0, 0
         sign_score = cls.calc_sign_score(success_signs, total_signs)
         
         # 3. 账号状态得分
-        status_score = cls.calc_status_score(account.status)
+        status_score: float = cls.calc_status_score(account.status)
         
         # 4. 代理绑定得分
-        proxy_score = cls.calc_proxy_score(account.proxy_id is not None)
+        proxy_score: float = cls.calc_proxy_score(account.proxy_id is not None)
         
         # 5. 验证时效得分
-        verified_score = cls.calc_verified_score(account.last_verified)
+        verified_score: float = cls.calc_verified_score(account.last_verified)
         
         # 6. 加权计算总分
-        total_score = (
+        total_score: float = (
             level_score * cls.WEIGHT_LEVEL +
             sign_score * cls.WEIGHT_SIGN +
             status_score * cls.WEIGHT_STATUS +
@@ -495,10 +497,10 @@ class AutoWeightCalculator:
         )
         
         # 7. 映射到 1-10 范围
-        final_weight = max(1, min(10, round(total_score)))
+        final_weight: int = max(1, min(10, round(total_score)))
         
         # 8. 构建详细得分报告
-        details = {
+        details: dict[str, Any] = {
             "account_id": account.id,
             "account_name": account.name,
             "avg_level": round(avg_level, 1),
@@ -553,26 +555,26 @@ class BatchPostTask:
     id: str
     # 目标贴吧（支持多个）
     fname: str                              # 兼容旧字段
-    fnames: List[str] = field(default_factory=list)  # 多贴吧列表（优先）
-    titles: List[str] = field(default_factory=list)
-    contents: List[str] = field(default_factory=list)
-    accounts: List[int] = field(default_factory=list)
+    fnames: list[str] = field(default_factory=list)  # 多贴吧列表（优先）
+    titles: list[str] = field(default_factory=list)
+    contents: list[str] = field(default_factory=list)
+    accounts: list[int] = field(default_factory=list)
     # 发帖策略: round_robin（轮询）/ random（随机）/ weighted（加权）
     strategy: str = "round_robin"
     # 文案组合模式: random (随机) / strict (精准匹配)
     pairing_mode: str = "random"
     # 账号临时权重覆盖（key=account_id, value=权重1–10）
     # 不为空时，覆盖数据库中的全局 post_weight
-    weight_override: dict = field(default_factory=dict)
+    weight_override: dict[int, int] = field(default_factory=dict)
     delay_min: float = 120.0  # 保守值：降低被检测风险
     delay_max: float = 600.0  # 保守值：降低被检测风险
     use_ai: bool = False
     status: str = "pending"
     progress: int = 0
     total: int = 0
-    start_time: Optional[datetime] = None
+    start_time: datetime | None = None
 
-    def get_fnames(self) -> List[str]:
+    def get_fnames(self) -> list[str]:
         """获取目标贴吧列表（优先使用 fnames，回落 fname）"""
         if self.fnames:
             return self.fnames
@@ -585,10 +587,10 @@ class BatchPostManager:
     """管理大规模异步发帖任务，支持三种账号调度策略"""
 
     def __init__(self, db: Database):
-        self.db = db
-        self._active_tasks = {}
+        self.db: Database = db
+        self._active_tasks: dict[str, Any] = {}
 
-    def _weighted_choice(self, accounts_with_weights: list[tuple]) -> int:
+    def _weighted_choice(self, accounts_with_weights: list[tuple[int, int]]) -> int:
         """
         加权随机抽样。
 
@@ -602,7 +604,7 @@ class BatchPostManager:
         weights = [a[1] for a in accounts_with_weights]
         return random.choices(ids, weights=weights, k=1)[0]
 
-    async def _build_weighted_accounts(self, task: BatchPostTask) -> list[tuple]:
+    async def _build_weighted_accounts(self, task: BatchPostTask) -> list[tuple[int, int]]:
         """
         构建账号+权重列表。临时覆盖优先于数据库全局权重。
 
@@ -616,11 +618,11 @@ class BatchPostManager:
         all_accounts = await self.db.get_accounts()
         account_map = {acc.id: acc for acc in all_accounts}
         
-        result = []
+        result: list[tuple[int, int]] = []
         for acc_id in task.accounts:
             # 优先使用临时覆盖权重
             if acc_id in task.weight_override:
-                weight = max(1, min(10, task.weight_override[acc_id]))
+                weight: int = max(1, min(10, task.weight_override[acc_id]))
             else:
                 # 从预加载的账号映射中读取权重
                 acc_obj = account_map.get(acc_id)
@@ -628,7 +630,7 @@ class BatchPostManager:
             result.append((acc_id, weight))
         return result
 
-    async def _pick_account(self, task: BatchPostTask, step: int, weights: list[tuple]) -> int:
+    async def _pick_account(self, task: BatchPostTask, step: int, weights: list[tuple[int, int]]) -> int:
         """
         根据任务策略选取本次发帖使用的账号 ID。
 
@@ -650,9 +652,9 @@ class BatchPostManager:
             return task.accounts[step % len(task.accounts)]
 
     @staticmethod
-    def get_tactical_advice(err_msg: str) -> dict:
+    def get_tactical_advice(err_msg: str) -> dict[str, str]:
         """战术情报分析：将生硬的报错转化为实战建议"""
-        advice_map = {
+        advice_map: dict[str, dict[str, str]] = {
             "用户没有权限": {
                 "reason": "等级不足、被封禁或未关注该吧。",
                 "action": "1. 运行【全域签到】提升等级(需≥4级)；\n2. 开启【安全原初打法】优先用关注老号；\n3. 检查账号是否被该吧吧务列入黑名单。"
@@ -683,13 +685,12 @@ class BatchPostManager:
             "action": "1. 尝试对该账号进行手工登录验证；\n2. 检查代理节点是否依然存活。"
         }
 
-    async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple]) -> int:
+    async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple[int, int]]) -> int:
         """
         靶场智能撮合核心：优先寻找本号已关注且 is_post_target=True 的原生号
         这极大提高了防抽几率（本土作战）。同时跳过已被该吧封禁的账号。
         """
         from sqlalchemy import select
-        from ..db.models import Forum
         
         async with self.db.async_session() as session:
             stmt = select(Forum.account_id).where(
@@ -719,7 +720,7 @@ class BatchPostManager:
         # 如果没有原生号储备，回落大盘调度策略（空降打法）
         return await self._pick_account(task, step, weights)
 
-    async def execute_task(self, task: BatchPostTask) -> AsyncGenerator[dict, None]:
+    async def execute_task(self, task: BatchPostTask) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行批量发帖任务。支持多贴吧、三种策略、临时权重覆盖。
 
@@ -733,14 +734,13 @@ class BatchPostManager:
         if time_dispatcher.is_quiet_hours():
             current_hour = datetime.now().hour
             await log_warn(
-                f"⚠️ 时段风险检测: 当前 {current_hour}:00 处于高风险时段 (凌晨1-6点)，"
-                f"系统将自动启用双倍延迟保护"
+                f"⚠️ 时段风险检测: 当前 {current_hour}:00 处于高风险时段 (凌晨1-6点)，系统将自动启用双倍延迟保护"
             )
 
         # --- 授权门控与配额限制 ---
         am = get_auth_manager()
         # 强制在任务启动前刷新一次本地状态，避免异步加载延迟导致的权限误判 (修复 AI 开启无效问题)
-        await am.check_local_status()
+        _ = await am.check_local_status()
         is_pro = (am.status == AuthStatus.PRO)
         
         if not is_pro:
@@ -767,10 +767,12 @@ class BatchPostManager:
         import sys
         if sys.platform == "win32":
             try:
-                if hasattr(sys.stdout, "reconfigure"):
-                    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-                if hasattr(sys.stderr, "reconfigure"):
-                    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+                stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
+                if stdout_reconfigure:
+                    stdout_reconfigure(encoding='utf-8', errors='replace')
+                stderr_reconfigure = getattr(sys.stderr, "reconfigure", None)
+                if stderr_reconfigure:
+                    stderr_reconfigure(encoding='utf-8', errors='replace')
             except Exception:
                 pass
 
@@ -894,8 +896,7 @@ class BatchPostManager:
             passed, max_sim = await similarity_detector.check(title, content)
             if not passed:
                 await log_warn(
-                    f"[Step 1.5] 内容重复度过高 ({max_sim:.0%})，跳过物料 [{current_material.id}]。"
-                    f"建议：启用 AI 改写或等待一段时间后再发。"
+                    f"[Step 1.5] 内容重复度过高 ({max_sim:.0%})，跳过物料 [{current_material.id}]。建议：启用 AI 改写或等待一段时间后再发。"
                 )
                 await self.db.update_material_status(
                     current_material.id, "failed", 
@@ -1119,7 +1120,7 @@ class BatchPostManager:
                     async with self.db.async_session() as session:
                         from ..db.models import MaterialPool
                         from sqlalchemy import update
-                        await session.execute(
+                        _ = await session.execute(
                             update(MaterialPool).where(MaterialPool.posted_tid == tid).values(is_auto_bump=False)
                         )
                         await session.commit()
@@ -1136,8 +1137,8 @@ class BatchPostManager:
         
         # 如果没有账号关注这些吧，直接清理数据库
         if not account_ids:
-            await self.db.delete_forum_memberships_globally(fnames)
-            await self.db.delete_target_pool_by_fnames(fnames)
+            _ = await self.db.delete_forum_memberships_globally(fnames)
+            _ = await self.db.delete_target_pool_by_fnames(fnames)
             return True
 
         total_actions = len(account_ids) * len(fnames)
@@ -1160,7 +1161,7 @@ class BatchPostManager:
                 ) as client:
                     for fname in fnames:
                         try:
-                            await client.unfollow_forum(fname)
+                            _ = await client.unfollow_forum(fname)
                             await log_info(f"账号 {acc_id} 已成功取消关注 [{fname}]")
                         except Exception as e:
                             await log_error(f"账号 {acc_id} 取消关注 [{fname}] 失败: {str(e)}")
@@ -1181,7 +1182,7 @@ class BatchPostManager:
         await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")
         return True
 
-    async def follow_forums_bulk(self, fnames: list[str], account_ids: list[int] = None, progress_callback=None) -> dict:
+    async def follow_forums_bulk(self, fnames: list[str], account_ids: list[int] | None = None, progress_callback: Any = None) -> dict[str, Any]:
         """
         批量关注贴吧并记录失败结果。
 
@@ -1199,7 +1200,7 @@ class BatchPostManager:
         """
         from .account import get_account_credentials
 
-        result = {"success": [], "failed": [], "skipped": []}
+        result: dict[str, list[dict[str, Any]]] = {"success": [], "failed": [], "skipped": []}
 
         # 1. 确定要操作的账号
         if account_ids is None:
@@ -1249,7 +1250,7 @@ class BatchPostManager:
                             continue
 
                         try:
-                            await client.follow_forum(fname)
+                            _ = await client.follow_forum(fname)
                             result["success"].append({"account_id": acc_id, "fname": fname})
                             await log_info(f"账号 {acc_id} 成功关注 [{fname}]")
 
@@ -1384,12 +1385,12 @@ class AutoBumpManager:
         
         return False, "未知模式"
 
-    def _select_account_for_bump(self, material, matrix_pool: list) -> int | None:
+    def _select_account_for_bump(self, material: Any, matrix_pool: list[Any]) -> int | None:
         """为自顶选取合适的账号"""
         bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
         
         # 过滤掉发帖原号
-        potential_accounts = [acc for acc in matrix_pool if acc.id != material.posted_account_id]
+        potential_accounts: list[Any] = [acc for acc in matrix_pool if acc.id != material.posted_account_id]
         if not potential_accounts:
             return None
         
@@ -1420,11 +1421,11 @@ class AutoBumpManager:
         
         # 1. 读取全局配置
         try:
-            max_bump_count = int(await self.db.get_setting("max_bump_count", "20"))
+            _max_bump_count = int(await self.db.get_setting("max_bump_count", "20"))
             bump_cooldown_minutes = int(await self.db.get_setting("bump_cooldown_minutes", "45"))
             bump_matrix_enabled = (await self.db.get_setting("bump_matrix_enabled", "0")) == "1"
         except Exception:
-            max_bump_count, bump_cooldown_minutes, bump_matrix_enabled = 20, 60, False  # 保守值
+            _max_bump_count, bump_cooldown_minutes, bump_matrix_enabled = 20, 60, False  # 保守值
             
         # 2. 获取开启了自动回帖、发帖成功、且满足冷却时间的物料
         async with self.db.async_session() as session:
@@ -1488,8 +1489,7 @@ class AutoBumpManager:
                 else:
                     # 未开启矩阵模式时，同号自顶风险极高
                     await log_warn(
-                        f"物料 [{material.id}] 跳过自顶：未开启矩阵协同模式。"
-                        f"同号自顶极易触发风控导致封号，请在「自顶配置」中开启「矩阵协同模式」。"
+                        f"物料 [{material.id}] 跳过自顶：未开启矩阵协同模式。同号自顶极易触发风控导致封号，请在「自顶配置」中开启「矩阵协同模式」。"
                     )
                     continue
                 
