@@ -693,31 +693,36 @@ class BatchPostManager:
         from sqlalchemy import select
         
         async with self.db.async_session() as session:
+            # 1. 优先尝试：安全原生号 (关注了该吧且设为发布目标)
             stmt = select(Forum.account_id).where(
                 Forum.fname == target_fname,
                 Forum.is_post_target == True,
-                Forum.is_banned == False,  # 跳过已被该吧封禁的账号
+                Forum.is_banned == False,
                 Forum.account_id.in_(task.accounts)
-            )
+            ).order_by(Forum.account_id.asc())
             result = await session.execute(stmt)
             native_accounts = result.scalars().all()
             
             if native_accounts:
-                # 在这些拥有本土优势的账号中随机挑选一个
+                if task.strategy == "round_robin":
+                    return native_accounts[step % len(native_accounts)]
                 return random.choice(native_accounts)
             
-            # 回退：在大盘账号中排除已封禁的
+            # 2. 次优尝试：普通关注号 (关注了该吧但未设为目标，或未勾选安全开关)
             stmt_fallback = select(Forum.account_id).where(
                 Forum.fname == target_fname,
                 Forum.is_banned == False,
                 Forum.account_id.in_(task.accounts)
-            )
+            ).order_by(Forum.account_id.asc())
             result_fallback = await session.execute(stmt_fallback)
             available_accounts = result_fallback.scalars().all()
+            
             if available_accounts:
+                if task.strategy == "round_robin":
+                    return available_accounts[step % len(available_accounts)]
                 return random.choice(available_accounts)
                 
-        # 如果没有原生号储备，回落大盘调度策略（空降打法）
+        # 3. 最终回退：大盘调度策略 (空降兵打法)
         return await self._pick_account(task, step, weights)
 
     async def execute_task(self, task: BatchPostTask) -> AsyncGenerator[dict[str, Any], None]:
@@ -727,6 +732,7 @@ class BatchPostManager:
         Yields:
             dict: {status, tid/msg, progress, total, fname, account_id}
         """
+        import httpx
         task.progress = 0
 
         # [风控增强] 执行前时段风险评估
@@ -820,267 +826,178 @@ class BatchPostManager:
         # 根据时段调整发帖延迟
         delay_min, delay_max = time_dispatcher.get_adjusted_delay(task.delay_min, task.delay_max)
 
-        for i in range(actual_total):
-            # 选取账号：智能撮合，本土原生号优先
-            account_id = await self._pick_optimal_account_for_target(task, fnames[0], i, weighted_accounts)
-
-            # 验证码熔断检查
-            if captcha_breaker.is_in_cooldown(account_id):
-                remaining = captcha_breaker.get_remaining_cooldown(account_id)
-                await log_warn(
-                    f"账号 [{account_id}] 处于验证码熔断中 (剩余 {remaining:.0f}s)，跳过"
+        # [重构核心] 智能化调度与多账号 Failover 循环体系
+        material_ptr = 0
+        while task.progress < actual_total and material_ptr < len(pending_materials):
+            current_material = pending_materials[material_ptr]
+            
+            # --- [Step 0: 阵地轮替与账号精准匹配] ---
+            # 基于物料索引进行阵地轮替，实现多贴吧负载均衡
+            base_target_fname = fnames[material_ptr % len(fnames)]
+            
+            # 容灾跟踪
+            tried_accounts = set()
+            max_account_retries = min(3, len(task.accounts))
+            success_for_this_material = False
+            
+            for attempt_idx in range(max_account_retries):
+                # 选取账号：传入 material_ptr+attempt_idx 以保证 Failover 时的轮转顺序
+                account_id = await self._pick_optimal_account_for_target(
+                    task, base_target_fname, material_ptr + attempt_idx, weighted_accounts
                 )
-                yield {"status": "skipped", "msg": f"账号 {account_id} 验证码熔断中", "progress": task.progress, "total": task.total}
-                continue
-
-            # 连续失败熔断检查
-            if failure_breaker.is_in_cooldown(account_id):
-                await log_warn(f"账号 [{account_id}] 连续失败熔断中，跳过")
-                yield {"status": "skipped", "msg": f"账号 {account_id} 连续失败熔断", "progress": task.progress, "total": task.total}
-                continue
-
-            # 账号-贴吧隔离：为该账号找一个不在冷却中的贴吧
-            target_fname = await af_tracker.get_available_forum(account_id, fnames)
-            if not target_fname:
-                remaining = af_tracker.get_remaining_cooldown(account_id, fnames[0])
-                await log_warn(
-                    f"账号 [{account_id}] 所有目标贴吧均在冷却中 (剩余 {remaining:.0f}s)，跳过本次轮次"
-                )
-                yield {"status": "skipped", "msg": f"账号 {account_id} 贴吧冷却中", "progress": task.progress, "total": task.total}
-                continue
-
-            # 每账号独立限流检查（先选账号再限流，确保每个账号独立计数）
-            await per_account_limiter.wait_if_needed(account_id)
-
-            # 检查代理状态：代理失效则跳过该账号
-            acc = account_map.get(account_id)
-            if acc and acc.status == "suspended_proxy":
-                await log_warn(f"账号 [{account_id}] 代理已挂起，跳过本次发帖")
-                await failure_breaker.record_failure(account_id)
-                yield {"status": "skipped", "msg": f"账号 {account_id} 代理挂起，已跳过", "progress": task.progress, "total": task.total}
-                continue
-
-            creds = await get_account_credentials(self.db, account_id)
-            if not creds:
-                await log_warn(f"账号 [{account_id}] 凭证获取失败，跳过")
-                await failure_breaker.record_failure(account_id)
-                continue
-
-            _, bduss, stoken, proxy_id, cuid, ua = creds
-
-            # 使用数据库物料实体
-            current_material = pending_materials[i]
-            title = current_material.title
-            content = current_material.content
-
-            # [Step 1: AI 动态变体增强] (增加强制 15 秒超时避免单个挂起全队)
-            try:
-                if task.use_ai:
-                    optimizer = AIOptimizer(self.db)
-                    success_ai, opt_title, opt_content, err_ai = await asyncio.wait_for(
-                        optimizer.optimize_post(title, content),
-                        timeout=15.0
-                    )
-                    if success_ai:
-                        title, content = opt_title, opt_content
-                        # 将生成的变体同步回数据库，让用户在 UI 界面可见
-                        await self.db.update_material_ai(current_material.id, title, content)
-                        short_title = title[:15] + "..." if len(title) > 15 else title
-                        await log_info(f"[Step 1] AI 变体生成成功: [{short_title}]")
+                
+                # 强行排除重复尝试
+                if account_id in tried_accounts:
+                    remaining = [aid for aid in task.accounts if aid not in tried_accounts]
+                    if not remaining: break
+                    account_id = random.choice(remaining)
+                
+                tried_accounts.add(account_id)
+                current_target_fname = base_target_fname
+                
+                # --- [状态预检] ---
+                if captcha_breaker.is_in_cooldown(account_id) or failure_breaker.is_in_cooldown(account_id):
+                    continue
+                
+                # 阵地冷却检查与动态跳转
+                if not af_tracker.can_post(account_id, current_target_fname):
+                    alt_fname = await af_tracker.get_available_forum(account_id, fnames)
+                    if alt_fname:
+                        current_target_fname = alt_fname
                     else:
-                        await log_warn(f"[Step 1] AI 改写拒稿，回落原始文案: {err_ai}")
-            except Exception as ex:
-                await log_warn(f"[Step 1] AI 服务异常或超时: {str(ex)}")
+                        continue # 该账号没坑位了，换下一个号尝试本物料
+                
+                acc = account_map.get(account_id)
+                if not acc or acc.status == "suspended_proxy":
+                    continue
+                
+                # 独立限流等待
+                await per_account_limiter.wait_if_needed(account_id)
+                
+                creds = await get_account_credentials(self.db, account_id)
+                if not creds: continue
+                _, bduss, stoken, proxy_id, cuid, ua = creds
 
-            # [Step 1.5: 内容重复度检测]
-            passed, max_sim = await similarity_detector.check(title, content)
-            if not passed:
-                await log_warn(
-                    f"[Step 1.5] 内容重复度过高 ({max_sim:.0%})，跳过物料 [{current_material.id}]。建议：启用 AI 改写或等待一段时间后再发。"
-                )
-                await self.db.update_material_status(
-                    current_material.id, "failed", 
-                    f"内容重复度过高 ({max_sim:.0%})，疑似机器批量行为"
-                )
-                yield {"status": "skipped", "msg": f"内容重复度 {max_sim:.0%}", "fname": target_fname, "progress": task.progress, "total": task.total}
-                continue
-
-            # 核心执行链
-            try:
-                async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
-                    import httpx
-                    
-                    # 确保获取上下文 TBS
+                # --- [Step 1: 文案重组与仿生微扰] ---
+                title = current_material.title
+                content = current_material.content
+                
+                # AI 改写
+                if task.use_ai:
                     try:
-                        await client.get_self_info()
-                    except Exception: pass
-                    
-                    if not getattr(client.account, 'tbs', None):
-                        yield {"status": "error", "msg": "获取账号发帖凭证(TBS)失败", "fname": target_fname, "progress": task.progress, "total": task.total}
-                        continue
+                        optimizer = AIOptimizer(self.db)
+                        s_ai, opt_t, opt_c, _ = await asyncio.wait_for(optimizer.optimize_post(title, content), timeout=15.0)
+                        if s_ai: 
+                            title, content = opt_t, opt_c
+                            await self.db.update_material_ai(current_material.id, title, content)
+                    except: pass
+                
+                # [关键强化] 注入随机符号/表情，打破内容 Hash
+                content = Obfuscator.inject_random_symbols(content)
+                
+                # 零宽字符与间距混淆
+                content = Obfuscator.inject_zero_width_chars(content, density=0.15)
+                safe_content = Obfuscator.humanize_spacing(content)
+                
+                # 重复度熔断
+                passed, _ = await similarity_detector.check(title, safe_content)
+                if not passed:
+                    await log_warn(f"物料 [{current_material.id}] 历史重复度过高，已跳过")
+                    break # 该物料本身有问题，不再换号试，直接换物料
 
-                    forum = await client.get_forum(target_fname)
-                    
-                    # 代理配置
-                    proxy_model = await self.db.get_proxy(proxy_id) if proxy_id else None
-                    proxy_url = None
-                    if proxy_model:
-                        from .account import decrypt_value
-                        scheme = proxy_model.protocol
-                        h = proxy_model.host
-                        p = proxy_model.port
-                        user = decrypt_value(proxy_model.username) if proxy_model.username else ""
-                        pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
-                        proxy_url = f"{scheme}://{user}:{pwd}@{h}:{p}" if user and pwd else f"{scheme}://{h}:{p}"
-
-                    # --- [Step 2: 文案安全清洗、强制编码转换及混淆] ---
-                    try:
-                        # [关键修复] 强制 UTF-8 清洗，并剔除可能导致 Win32 环境崩溃的非法字符
-                        title = title.encode('utf-8', 'replace').decode('utf-8')
-                        content = content.encode('utf-8', 'replace').decode('utf-8')
+                # --- [Step 2: 仿真协议发射链] ---
+                try:
+                    async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
+                        # 2.1 模拟个人身份获取 (产生轨迹并获取 TBS)
+                        try: await client.get_self_info()
+                        except: pass
+                        if not getattr(client.account, 'tbs', None): continue
                         
-                        # 混淆逻辑
-                        obfuscated_content = Obfuscator.inject_zero_width_chars(content, density=0.2)
-                        safe_content = Obfuscator.humanize_spacing(obfuscated_content)
-                    except Exception as e:
-                        err_msg = f"[Step 2] 文本预处理异常: {str(e)}"
-                        await self.db.update_material_status(current_material.id, "failed", err_msg, posted_fname=target_fname, posted_account_id=account_id)
-                        yield {"status": "error", "msg": err_msg, "fname": target_fname, "progress": task.progress, "total": task.total}
-                        continue
+                        # 2.2 仿生预热浏览 (模拟进入贴吧首页)
+                        quoted_fname = urllib.parse.quote(current_target_fname)
+                        
+                        # 代理处理
+                        proxy_model = await self.db.get_proxy(proxy_id) if proxy_id else None
+                        proxy_url = None
+                        if proxy_model:
+                            from .account import decrypt_value
+                            p_user = decrypt_value(proxy_model.username) if proxy_model.username else ""
+                            p_pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
+                            proxy_url = f"{proxy_model.protocol}://{p_user}:{p_pwd}@{proxy_model.host}:{proxy_model.port}" if p_user else f"{proxy_model.protocol}://{proxy_model.host}:{proxy_model.port}"
 
-                    # --- [Step 3: 网络协议发射] ---
-                    tid = 0
-                    success = False
-                    err_msg = ""
-                    try:
-                        # [关键修复] 对 URL 路径中的中文进行 Percent-encoding 转义
-                        # 核心原因：Windows 系统某些环境下请求头不允许非 ASCII 字符，必须转义为 % 形式
-                        quoted_fname = urllib.parse.quote(target_fname)
                         headers = {
                             "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
-                            "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                            "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                             "Referer": f"https://tieba.baidu.com/f?kw={quoted_fname}",
                             "Origin": "https://tieba.baidu.com",
-                            "X-Requested-With": "XMLHttpRequest",
-                            "Accept": "application/json, text/javascript, */*; q=0.01",
-                            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                            "Accept-Language": f"zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
                             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                        }
-                        data = {
-                            "ie": "utf-8",
-                            "kw": target_fname,
-                            "fid": getattr(forum, 'fid', 0),
-                            "tbs": getattr(client.account, 'tbs', ''),
-                            "title": title,
-                            "content": safe_content,
-                            "anonymous": 0
                         }
                         
                         async with httpx.AsyncClient(proxy=proxy_url) as http_client:
-                            # 仿生预热流量 (转义后的 URL)
+                            # 预热延迟
                             try:
                                 await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
-                                await asyncio.sleep(1.2)
+                                await asyncio.sleep(random.uniform(1.2, 3.5)) 
                             except: pass
                                 
-                            # [终极加固] 手动对 Body 进行 UTF-8 编码，防止系统 ASCII 环境干扰导致崩溃
+                            forum_info = await client.get_forum(current_target_fname)
+                            data = {
+                                "ie": "utf-8", "kw": current_target_fname, "fid": getattr(forum_info, 'fid', 0),
+                                "tbs": client.account.tbs, "title": title, "content": safe_content, "anonymous": 0
+                            }
                             body_content = urllib.parse.urlencode(data).encode('utf-8')
                             
                             res = await http_client.post(
                                 "https://tieba.baidu.com/f/commit/thread/add",
-                                headers=headers,
-                                content=body_content,
-                                timeout=20.0
+                                headers=headers, content=body_content, timeout=25.0
                             )
                             res_json = res.json()
                             err_code = res_json.get("err_code", 0)
                             
                             if err_code == 0:
                                 tid = res_json.get("data", {}).get("tid", 0)
-                                success = True
+                                success_for_this_material = True
+                                task.progress += 1
+                                await failure_breaker.record_success(account_id)
+                                await af_tracker.record_post(account_id, current_target_fname)
+                                await similarity_detector.record(title, safe_content)
+                                await self.db.update_material_status(
+                                    current_material.id, "success", 
+                                    posted_fname=current_target_fname, posted_tid=tid,
+                                    posted_account_id=account_id, posted_time=datetime.now()
+                                )
+                                await log_info(f"[{task.strategy}] 成功: {account_id} @ {current_target_fname} ({task.progress}/{task.total})")
+                                if task.progress < actual_total:
+                                    await BionicDelay.sleep(delay_min, delay_max)
+                                yield {
+                                    "status": "success", "tid": tid, "fname": current_target_fname,
+                                    "account_id": account_id, "progress": task.progress, "total": task.total,
+                                }
+                                break # 退出账号重试循环
                             else:
                                 err_msg = str(res_json.get('error') or res_json)
+                                # 验证码与熔断逻辑集成
+                                await captcha_breaker.check_and_trigger(account_id, err_msg, err_code)
+                                await failure_breaker.record_failure(account_id)
                                 
-                                # 验证码熔断检测
-                                triggered = await captcha_breaker.check_and_trigger(account_id, err_msg, err_code)
-                                if triggered:
-                                    await failure_breaker.record_failure(account_id)
-                                    yield {"status": "captcha", "msg": f"账号 {account_id} 触发验证码，暂停", "fname": target_fname, "progress": task.progress, "total": task.total}
-                                    continue
-                                
-                                # 识别全局级封禁与吧务封禁逻辑
-                                if err_code == 4 or "封禁" in err_msg or "屏蔽" in err_msg:
-                                    if err_code == 3250004 or "本吧" in err_msg or "此吧" in err_msg:
-                                        # 局部封禁：仅在该吧熔断
-                                        await log_error(f"检测到吧务封禁！账号 {account_id} 已在 {target_fname} 自动熔断。")
-                                        await self.db.mark_forum_banned(account_id, target_fname, reason="Step 3 发射检测到吧务封禁")
-                                        await failure_breaker.record_failure(account_id)
-                                        try: await client.unfollow_forum(target_fname)
-                                        except: pass
+                                # 封禁逻辑识别
+                                if err_code == 4 or "封禁" in err_msg:
+                                    if "本吧" in err_msg:
+                                        await self.db.mark_forum_banned(account_id, current_target_fname, reason="发射检测吧封")
                                     else:
-                                        # 全局封禁：账号级隔离
-                                        await log_error(f"🚨 警报：检测到全局封禁特征！账号 {account_id} 已遭到百度彻底封杀。")
                                         await self.db.update_account_status(account_id, "banned")
-                                        await failure_breaker.record_failure(account_id)
-                                elif err_code == 340001:
-                                    await log_warn(f"{target_fname} 正在升级中，已跳过该点位。")
-                                    await failure_breaker.record_failure(account_id)
-                                    continue
-                                else:
-                                    # 其他错误也记录失败次数
-                                    await failure_breaker.record_failure(account_id)
-                    except Exception as e:
-                        # [环境诊断] 如果进入此块，str(e) 将明确告知是否仍为 encoding 错误
-                        err_msg = f"[Step 3] 通讯过程异常 (账号:{account_id} @ {target_fname}): {str(e)}"
-                        await log_error(err_msg)
-                        await failure_breaker.record_failure(account_id)
-                        await self.db.update_material_status(current_material.id, "failed", err_msg, posted_fname=target_fname, posted_account_id=account_id)
-                        yield {"status": "error", "msg": err_msg, "fname": target_fname, "progress": task.progress, "total": task.total}
-                        continue
+                                
+                                await log_warn(f"账号 {account_id} 发射遭拦截: {err_msg}，准备换号重试...")
+                except Exception as ex:
+                    await log_error(f"执行链异常 ({account_id} @ {current_target_fname}): {str(ex)}")
+                    await failure_breaker.record_failure(account_id)
+            
+            if not success_for_this_material:
+                await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败")
+                yield {"status": "error", "msg": "物料已由多个账号尝试均告失败，可能内容已变味", "progress": task.progress, "total": task.total}
 
-                    if success:
-                        task.progress += 1
-                        # 重置连续失败计数（成功发帖）
-                        await failure_breaker.record_success(account_id)
-                        # 账号-贴吧隔离：记录本次发帖，更新冷却时间
-                        await af_tracker.record_post(account_id, target_fname)
-                        # 记录发帖内容到历史（用于重复度检测）
-                        await similarity_detector.record(title, content)
-                        await self.db.update_material_status(
-                            current_material.id, 
-                            "success", 
-                            posted_fname=target_fname, 
-                            posted_tid=tid,
-                            posted_account_id=account_id,
-                            posted_time=datetime.now()
-                        )
-                        await self.db.update_target_pool_status(target_fname, is_success=True)
-                        await log_info(
-                            f"[{task.strategy}] 账号 {account_id} → {target_fname} 发帖成功 ({task.progress}/{task.total})"
-                        )
-                        # 拟人化随机休眠逻辑（使用时段调整后的延迟）
-                        if i < actual_total - 1:
-                            await BionicDelay.sleep(delay_min, delay_max)
-                        yield {
-                            "status": "success", "tid": tid, "fname": target_fname,
-                            "account_id": account_id, "progress": task.progress, "total": task.total,
-                        }
-                    else:
-                        await self.db.update_material_status(
-                            current_material.id, 
-                            "failed", 
-                            last_error=err_msg,
-                            posted_fname=target_fname,
-                            posted_account_id=account_id
-                        )
-                        await self.db.update_target_pool_status(target_fname, is_success=False, error_reason=err_msg)
-                        yield {"status": "error", "msg": f"发帖拦截: {err_msg}", "fname": target_fname, "progress": task.progress, "total": task.total}
-            except TiebaServerError as e:
-                await self.db.update_material_status(current_material.id, "failed", f"平台拒绝: {e.msg}")
-                await asyncio.sleep(30.0)
-            except Exception as e:
-                await self.db.update_material_status(current_material.id, "failed", f"执行异常: {str(e)}")
-                await asyncio.sleep(60.0)
+            material_ptr += 1
 
         task.status = "completed"
         await log_info(f"批量发帖任务完成: {fnames} | 成功: {task.progress}/{task.total}")
