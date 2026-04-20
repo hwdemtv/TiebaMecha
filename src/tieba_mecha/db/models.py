@@ -348,3 +348,25 @@ class CaptchaEvent(Base):
         Index("ix_captcha_events_status", "status"),
         Index("ix_captcha_events_created_at", "created_at"),
     )
+
+class BatchPostLog(Base):
+    """批量发帖流水日志 (持久化存储)"""
+
+    __tablename__ = "batch_post_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="关联任务ID")
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="关联账号ID")
+    account_name: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="账号名称")
+    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名称")
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="帖子标题")
+    tid: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="成功后的帖子ID")
+    status: Mapped[str] = mapped_column(String(20), default="success", comment="发送结果: success/error/skipped")
+    message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="错误详情或备注")
+    data_json: Mapped[str] = mapped_column(Text, default="{}", comment="扩展业务数据 JSON")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="记录时间")
+
+    __table_args__ = (
+        Index("ix_batch_post_logs_created_at", "created_at"),
+        Index("ix_batch_post_logs_task_id", "task_id"),
+    )

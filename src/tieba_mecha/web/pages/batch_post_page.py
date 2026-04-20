@@ -134,6 +134,24 @@ class BatchPostPage:
             self._refresh_account_pool()
             self._refresh_forum_pool()
             await self._refresh_material_table()
+
+            # [持久化同步] 从数据库加载最近的流水记录
+            logs = await self.db.get_batch_post_logs(limit=100)
+            self.log_list.controls[:] = []  # 加载新数据前清空
+            for log in reversed(logs):
+                log_data = {
+                    "status": log.status,
+                    "account_name": log.account_name,
+                    "fname": log.fname,
+                    "title": log.title,
+                    "tid": log.tid,
+                    "msg": log.message,
+                    "error": log.message,
+                    "account_id": log.account_id,
+                    "progress": "-", "total": "-"
+                }
+                self._add_log(log_data, timestamp=log.created_at.strftime("%H:%M:%S"))
+            
         except Exception as e:
             from ...core.logger import log_error
             await log_error(f"[UI ERROR] load_data failed: {e}")
@@ -2922,12 +2940,12 @@ class BatchPostPage:
             self.progress_bar.visible = False
             self.page.update()
 
-    def _add_log(self, data, type="info"):
+    def _add_log(self, data, type="info", timestamp=None):
         """
         结构化日志输出系统 (Cyber-Mecha 风格)
         data: 可以是纯字符串，也可以是包含业务元数据的字典
         """
-        now = datetime.now().strftime("%H:%M:%S")
+        now = timestamp if timestamp else datetime.now().strftime("%H:%M:%S")
         
         if isinstance(data, dict):
             status = data.get("status", "info")
@@ -3012,7 +3030,12 @@ class BatchPostPage:
 
     def _show_rejection_detail(self, e):
         """显示拒稿的具体原因弹窗 (增强版：附带战术建议 + 账号/贴吧详情)"""
-        data = e.control.data
+        # 兼容处理：既支持 Flet 事件，也支持直接传入数据字典
+        if hasattr(e, "control") and hasattr(e.control, "data"):
+            data = e.control.data
+        else:
+            data = e
+        
         if isinstance(data, dict):
             error_msg = data.get("error") or "未知拒稿原因"
             account_id = data.get("account_id") or "未知"

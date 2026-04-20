@@ -979,6 +979,16 @@ class BatchPostManager:
                                     posted_fname=current_target_fname, posted_tid=tid,
                                     posted_account_id=account_id, posted_time=datetime.now()
                                 )
+                                # --- 集成：流水持久化 ---
+                                await self.db.add_batch_post_log(
+                                    task_id=str(task.id),
+                                    account_id=account_id,
+                                    account_name=acc.name if acc else f"ID:{account_id}",
+                                    fname=current_target_fname,
+                                    title=title,
+                                    tid=tid,
+                                    status="success"
+                                )
                                 await log_info(f"[{task.strategy}] 成功: {account_id} @ {current_target_fname} ({task.progress}/{task.total})")
                                 if task.progress < actual_total:
                                     await BionicDelay.sleep(delay_min, delay_max)
@@ -1010,6 +1020,14 @@ class BatchPostManager:
                     await failure_breaker.record_failure(account_id)
             
             if not success_for_this_material:
+                # --- 集成：失败流水持久化 ---
+                await self.db.add_batch_post_log(
+                    task_id=str(task.id),
+                    fname=base_target_fname,
+                    status="error",
+                    message="物料已由多个账号尝试均告失败，可能触发内容风控",
+                    title=current_material.title
+                )
                 await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败")
                 yield {"status": "error", "msg": "物料已由多个账号尝试均告失败，可能内容已变味", "progress": task.progress, "total": task.total}
 
