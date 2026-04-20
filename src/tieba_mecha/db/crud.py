@@ -1680,22 +1680,24 @@ class Database:
             ]
 
     async def upsert_target_pools(self, fnames: list[str], post_group: str = "") -> int:
-        """将若干吧名标记为火力目标（仅更新已有记录的分组，不创建新记录）。"""
-        updated = 0
+        """将若干吧名标记为火力目标（不存在则创建，已存在则追加分组）。"""
+        added = 0
         async with self.async_session() as session:
             for fname in fnames:
                 existing = await session.execute(
                     select(TargetPool).where(TargetPool.fname == fname)
                 )
                 pool = existing.scalar_one_or_none()
-                if pool is not None:
+                if pool is None:
+                    # 不存在则创建
+                    session.add(TargetPool(fname=fname, post_group=post_group))
+                    added += 1
+                else:
                     # 已存在则追加分组
                     if post_group and post_group not in (pool.post_group or "").split(","):
                         pool.post_group = f"{pool.post_group or ''},{post_group}".strip(",")
-                    updated += 1
-                # 不存在则不创建，交给 backfill_success_count 或手动锁定时创建
             await session.commit()
-        return updated
+        return added
 
     async def delete_target_pool_by_fnames(self, fnames: list[str]) -> int:
         """从 TargetPool 中删除指定的贴吧列表。返回删除的数量。"""
