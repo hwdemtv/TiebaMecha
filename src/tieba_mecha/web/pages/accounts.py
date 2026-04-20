@@ -330,11 +330,18 @@ class AccountsPage:
             on_click=self._bulk_matrix_edit_tag,
             visible=False,
         )
+        self.matrix_bulk_clear_target_btn = ft.TextButton(
+            "清理靶场", icon=icons.CLEANING_SERVICES_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._bulk_matrix_clear_target),
+            tooltip="从靶场池中移除（不取消关注）",
+            visible=False,
+        )
         self.matrix_bulk_bar = ft.Row([
             self.matrix_select_all_cb,
             self.matrix_bulk_toggle_target_btn,
             self.matrix_bulk_follow_btn,
             self.matrix_bulk_unfollow_btn,
+            self.matrix_bulk_clear_target_btn,
             self.matrix_bulk_tag_btn,
         ], spacing=5, wrap=True)
 
@@ -935,11 +942,13 @@ class AccountsPage:
         self.matrix_bulk_toggle_target_btn.visible = has_sel
         self.matrix_bulk_follow_btn.visible = has_sel
         self.matrix_bulk_unfollow_btn.visible = has_sel
+        self.matrix_bulk_clear_target_btn.visible = has_sel
         self.matrix_bulk_tag_btn.visible = has_sel
         if has_sel:
             self.matrix_bulk_toggle_target_btn.text = f"批量切换火力 ({count})"
             self.matrix_bulk_follow_btn.text = f"批量补齐关注 ({count})"
             self.matrix_bulk_unfollow_btn.text = f"批量取消关注 ({count})"
+            self.matrix_bulk_clear_target_btn.text = f"清理靶场 ({count})"
             self.matrix_bulk_tag_btn.text = f"批量修改标签 ({count})"
         self.page.update()
 
@@ -1026,6 +1035,33 @@ class AccountsPage:
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
                 ft.FilledButton("确认取消", icon=icons.HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
+            ]
+        )
+        self.page.open(dialog)
+
+    async def _bulk_matrix_clear_target(self):
+        """从靶场池中移除选中的贴吧（不取消关注）"""
+        if not self._matrix_selected_fnames: return
+        fnames = list(self._matrix_selected_fnames)
+
+        async def do_clear(e):
+            try:
+                self.page.close(dialog)
+                removed = await self.db.delete_target_pool_by_fnames(fnames)
+                self._show_snackbar(f"✅ 已从靶场移除 {removed} 个贴吧", "success")
+            except Exception as ex:
+                self._show_snackbar(f"❌ 清理靶场失败: {str(ex)}", "error")
+            self._matrix_selected_fnames.clear()
+            await self._refresh_matrix_stats()
+            self._update_matrix_bulk_bar()
+            self.refresh_ui()
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.CLEANING_SERVICES_ROUNDED, color="error"), ft.Text("确认清理靶场？")]),
+            content=ft.Text(f"确定要从靶场池中移除以下 {len(fnames)} 个贴吧吗？\n此操作不影响账号的关注状态，仅清理历史战绩数据。\n\n{', '.join(fnames[:10])}{'...' if len(fnames) > 10 else ''}"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("确认移除", icon=icons.CLEANING_SERVICES_ROUNDED, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_clear),
             ]
         )
         self.page.open(dialog)
