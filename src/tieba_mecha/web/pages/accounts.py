@@ -30,6 +30,7 @@ class AccountsPage:
         self._matrix_search_text = ""
         self._matrix_selected_fnames: set[str] = set()
         self._matrix_banned_filter = False  # 封禁筛选开关
+        self._matrix_deleted_filter = False  # 被删筛选开关
         self._active_tab_index = 0
         
         # 存活分析数据
@@ -297,6 +298,13 @@ class AccountsPage:
             on_click=self._on_toggle_banned_filter,
         )
 
+        self.deleted_filter_btn = ft.IconButton(
+            icon=icons.DELETE_SWEEP_OUTLINED,
+            tooltip="筛选有删帖的贴吧",
+            icon_color="onSurfaceVariant",
+            on_click=self._on_toggle_deleted_filter,
+        )
+
         self.matrix_header_info = ft.Text("战略贴吧总数: 0 | 矩阵覆盖率: 0%", size=12, color="onSurfaceVariant")
 
         # 批量操作栏
@@ -339,7 +347,7 @@ class AccountsPage:
 
         return ft.Column(
             controls=[
-                ft.Row([search_field, self.banned_filter_btn, sync_btn, clear_search_btn, follow_btn], spacing=10),
+                ft.Row([search_field, self.banned_filter_btn, self.deleted_filter_btn, sync_btn, clear_search_btn, follow_btn], spacing=10),
                 self.matrix_bulk_bar,
                 self.matrix_header_info,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
@@ -684,6 +692,17 @@ class AccountsPage:
             self.banned_filter_btn.icon = icons.FILTER_LIST
             self.banned_filter_btn.icon_color = "onSurfaceVariant"
             self.banned_filter_btn.tooltip = "筛选封禁贴吧"
+        self.refresh_ui()
+
+    def _on_toggle_deleted_filter(self, e):
+        """切换被删帖贴吧筛选"""
+        self._matrix_deleted_filter = not self._matrix_deleted_filter
+        if self._matrix_deleted_filter:
+            self.deleted_filter_btn.icon_color = "error"
+            self.deleted_filter_btn.tooltip = "显示全部贴吧"
+        else:
+            self.deleted_filter_btn.icon_color = "onSurfaceVariant"
+            self.deleted_filter_btn.tooltip = "筛选有删帖的贴吧"
         self.refresh_ui()
 
     def _on_clear_matrix_search(self, e):
@@ -1130,12 +1149,17 @@ class AccountsPage:
         total = len(self._matrix_stats)
         covered = sum(1 for s in self._matrix_stats if s['account_count'] > 0)
         banned_count = sum(1 for s in self._matrix_stats if s.get('is_banned'))
+        deleted_count = sum(1 for s in self._matrix_stats if s.get('deleted_count', 0) > 0)
         percent = (covered / total * 100) if total > 0 else 0
         base_info = f"战略资源: {total} 个贴吧 | 矩阵实存火力涵盖: {covered} 个 (覆盖率 {percent:.1f}%)"
         if banned_count > 0:
             base_info += f" | 🚫 封禁: {banned_count} 个"
+        if deleted_count > 0:
+            base_info += f" | 🗑️ 有删帖: {deleted_count} 个"
         if self._matrix_banned_filter:
             base_info = f"🚫 封禁筛选模式 | 显示 {banned_count} 个被封禁贴吧"
+        elif self._matrix_deleted_filter:
+            base_info = f"🗑️ 删帖筛选模式 | 显示 {deleted_count} 个有删帖的贴吧"
         self.matrix_header_info.value = base_info
 
     def _build_matrix_items(self) -> list[ft.Control]:
@@ -1149,6 +1173,9 @@ class AccountsPage:
                 continue
             # 封禁筛选：仅显示被封禁的贴吧
             if self._matrix_banned_filter and not stat.get('is_banned', False):
+                continue
+            # 被删筛选：仅显示有删帖记录的贴吧
+            if self._matrix_deleted_filter and stat.get('deleted_count', 0) == 0:
                 continue
                 
             acc_count = stat['account_count']
