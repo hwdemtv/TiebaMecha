@@ -458,15 +458,26 @@ async def check_post_survival(tid: int) -> tuple[str, str]:
 
     Returns:
         (存活状态: "alive"/"dead", 被删原因)
+        被删原因分类:
+        - "": 存活
+        - "deleted_by_system": 系统风控删除（百度AI/反作弊自动删帖）
+        - "deleted_by_mod": 吧务手动删除
+        - "deleted_by_user": 用户自删/楼主删除
+        - "deleted_unknown": 帖子已删除但无法确定删除者
+        - "auto_removed": 帖子不存在/404
+        - "captcha_required": 验证码拦截
+        - "error": 其他异常
     """
+    from aiotieba.exception import TiebaServerError
+
     try:
         async with aiotieba.Client() as client:
             res = await client.get_posts(tid)
-            
+
             # 检测验证码拦截
             if res and hasattr(res, 'text') and '验证码' in str(res.text or ''):
                 return "dead", "captcha_required"
-            
+
             if res and res.forum and res.forum.fid > 0:
                 # 增强判断：检查帖子基本信息完整性
                 if res.thread:
@@ -479,15 +490,51 @@ async def check_post_survival(tid: int) -> tuple[str, str]:
                 # 兜底：只要有有效的 forum fid 就视为存活
                 return "alive", ""
             else:
-                return "dead", "unknown_error"
+                return "dead", "deleted_unknown"
+    except TiebaServerError as ex:
+        # 百度返回结构化错误，利用 code + msg 精细分类
+        code = ex.code
+        msg = (ex.msg or "").lower()
+
+        # 验证码拦截
+        if "captcha" in msg or "验证码" in msg:
+            return "dead", "captcha_required"
+
+        # 帖子已删除类（错误码 273 或其他含删除关键词）
+        if code == 273 or "删除" in msg or "deleted" in msg or "removed" in msg:
+            # 进一步细分删帖原因
+            if "系统" in msg or "system" in msg or "违规" in msg or "spam" in msg:
+                return "dead", "deleted_by_system"
+            elif "吧务" in msg or "吧主" in msg or "mod" in msg or "banned" in msg or "blocked" in msg:
+                return "dead", "deleted_by_mod"
+            elif "用户" in msg or "楼主" in msg or "自删" in msg:
+                return "dead", "deleted_by_user"
+            else:
+                # 错误码273但无法区分删除者 → 尝试二次确认
+                # 百度系统删帖通常无具体提示文本，吧务删帖可能有提示
+                if not msg.strip() or msg in ("", "帖子已删除", "帖子不存在"):
+                    return "dead", "deleted_by_system"  # 无提示文本倾向于系统删帖
+                return "dead", "deleted_unknown"
+
+        # 封禁类
+        if "banned" in msg or "blocked" in msg or "封禁" in msg:
+            if "本吧" in msg:
+                return "dead", "deleted_by_mod"
+            return "dead", "deleted_by_mod"
+
+        # 帖子不存在
+        if "not found" in msg or "404" in msg or code == 269:
+            return "dead", "auto_removed"
+
+        return "dead", "error"
     except Exception as ex:
         error_msg = str(ex).lower()
         if "captcha" in error_msg or "验证码" in str(ex):
             return "dead", "captcha_required"
         elif "deleted" in error_msg or "removed" in error_msg:
-            return "dead", "deleted_by_user"
+            return "dead", "deleted_unknown"
         elif "banned" in error_msg or "blocked" in error_msg:
-            return "dead", "banned_by_mod"
+            return "dead", "deleted_by_mod"
         elif "not found" in error_msg or "404" in error_msg:
             return "dead", "auto_removed"
         else:

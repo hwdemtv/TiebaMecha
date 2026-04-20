@@ -1058,7 +1058,7 @@ class AccountsPage:
             else:
                 reasons.append("🚫 该贴吧存在被封禁的账号")
         if deleted_count > 0:
-            reasons.append(f"⚠️ 存在 {deleted_count} 条被吧务删除的帖子记录")
+            reasons.append(f"⚠️ 存在 {deleted_count} 条被删除的帖子记录（含吧务/系统删除）")
 
         if is_post_target:
             result_text = "✅ 本土作战已开启"

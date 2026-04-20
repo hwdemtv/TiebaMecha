@@ -26,4 +26,4 @@ tests/test_target_pool_status.py::TestBackfillSuccessCount::test_backfill_idempo
 tests/test_target_pool_status.py::TestAutoSyncPostTarget::test_safe_when_not_banned_no_deletions PASSED [ 93%]
 tests/test_target_pool_status.py::TestAutoSyncPostTarget::test_unsafe_when_banned PASSED [100%]
 
-============================= 16 passed in 7.68s ==============================
+============================= 16 passed in 10.39s =============================

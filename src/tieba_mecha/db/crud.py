@@ -1354,9 +1354,16 @@ class Database:
                 m.death_reason = death_reason
                 m.last_checked_at = datetime.now()
 
-                # 联动标记：帖子被吧务删除时，标记该账号在该贴吧为封禁状态
-                if status == "dead" and death_reason == "banned_by_mod" and m.posted_account_id and m.posted_fname:
-                    # Forum 已在文件顶部导入
+                # 联动标记：帖子被删除时，标记该账号在该贴吧为封禁/风控状态
+                # banned_by_mod: 吧务手动删除 → 标记封禁
+                # deleted_by_system: 系统风控删除 → 标记风控（同样影响本土作战许可）
+                ban_reason_map = {
+                    "banned_by_mod": "存活探测：帖子被吧务删除",
+                    "deleted_by_system": "存活探测：帖子被系统风控删除",
+                    "deleted_by_mod": "存活探测：帖子被吧务删除",
+                }
+                if status == "dead" and death_reason in ban_reason_map and m.posted_account_id and m.posted_fname:
+                    ban_reason = ban_reason_map[death_reason]
                     forum = await session.execute(
                         select(Forum).where(
                             Forum.account_id == m.posted_account_id,
@@ -1367,17 +1374,16 @@ class Database:
                     if forum_obj:
                         if not forum_obj.is_banned:
                             forum_obj.is_banned = True
-                            forum_obj.ban_reason = "存活探测：帖子被吧务删除"
+                            forum_obj.ban_reason = ban_reason
                             forum_obj.is_post_target = False
                     else:
-                        # Forum 记录不存在（可能未关注记录），创建一条封禁记录
                         import random
                         session.add(Forum(
                             fid=random.randint(1, 2**31 - 1),
                             fname=m.posted_fname,
                             account_id=m.posted_account_id,
                             is_banned=True,
-                            ban_reason="存活探测：帖子被吧务删除",
+                            ban_reason=ban_reason,
                             is_post_target=False,
                         ))
 
@@ -1448,12 +1454,12 @@ class Database:
         """
         from sqlalchemy import func, update as sa_update
         async with self.async_session() as session:
-            # 获取有被吧务删帖记录的贴吧名集合
+            # 获取有被删帖记录的贴吧名集合（吧务删除 + 系统风控删除）
             dead_stmt = (
                 select(MaterialPool.posted_fname)
                 .where(
                     MaterialPool.survival_status == "dead",
-                    MaterialPool.death_reason == "banned_by_mod",
+                    MaterialPool.death_reason.in_(["banned_by_mod", "deleted_by_system", "deleted_by_mod"]),
                     MaterialPool.posted_fname.isnot(None),
                     MaterialPool.posted_fname != "",
                 )
