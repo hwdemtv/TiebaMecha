@@ -331,7 +331,7 @@ class AccountsPage:
             visible=False,
         )
         self.matrix_bulk_clear_target_btn = ft.TextButton(
-            "清理靶场", icon=icons.CLEANING_SERVICES_ROUNDED,
+            "清理靶场", icon=icons.REMOVE_CIRCLE_OUTLINED,
             on_click=lambda e: self.page.run_task(self._bulk_matrix_clear_target),
             tooltip="从靶场池中移除（不取消关注）",
             visible=False,
@@ -1066,11 +1066,11 @@ class AccountsPage:
             self.refresh_ui()
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.CLEANING_SERVICES_ROUNDED, color="error"), ft.Text("确认清理靶场？")]),
+            title=ft.Row([ft.Icon(icons.REMOVE_CIRCLE_OUTLINED, color="error"), ft.Text("确认清理靶场？")]),
             content=ft.Text(f"确定要从靶场池中移除以下 {len(fnames)} 个贴吧吗？\n此操作不影响账号的关注状态，仅清理历史战绩数据。\n\n{', '.join(fnames[:10])}{'...' if len(fnames) > 10 else ''}"),
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
-                ft.FilledButton("确认移除", icon=icons.CLEANING_SERVICES_ROUNDED, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_clear),
+                ft.FilledButton("确认移除", icon=icons.REMOVE_CIRCLE_OUTLINED, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_clear),
             ]
         )
         self.page.open(dialog)
