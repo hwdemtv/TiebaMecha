@@ -845,31 +845,29 @@ class AccountsPage:
             fname: 贴吧名称
             is_currently_target: 当前是否已是火力打击目标（True=已在靶场，False=不在靶场）
         """
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"[TOGGLE] fname={fname}, is_currently_target={is_currently_target}")
+        print(f"[TOGGLE] fname={fname}, is_currently_target={is_currently_target}")
         try:
             if is_currently_target:
                 # 已在靶场中，点击要移除
                 removed = await self.db.delete_target_pool_by_fnames([fname])
-                logger.warning(f"[TOGGLE] 删除结果: {removed}")
+                print(f"[TOGGLE] 删除结果: {removed}")
                 self._show_snackbar(f"🏳️ 已从打击名单中移除 '{fname}'", "info")
             else:
                 # 不在靶场中，点击要添加
                 added = await self.db.upsert_target_pools([fname], "未分类")
-                logger.warning(f"[TOGGLE] 添加结果: added={added}")
+                print(f"[TOGGLE] 添加结果: added={added}")
                 self._show_snackbar(f"🎯 已将 '{fname}' 锁定为火力打击目标", "success")
             
             # 重新加载数据
-            logger.warning(f"[TOGGLE] 刷新前 _matrix_stats 中的 is_target: {next((s['is_target'] for s in self._matrix_stats if s['fname'] == fname), 'NOT FOUND')}")
+            print(f"[TOGGLE] 刷新前 is_target: {next((s['is_target'] for s in self._matrix_stats if s['fname'] == fname), 'NOT FOUND')}")
             await self._refresh_matrix_stats()
-            logger.warning(f"[TOGGLE] 刷新后 _matrix_stats 中的 is_target: {next((s['is_target'] for s in self._matrix_stats if s['fname'] == fname), 'NOT FOUND')}")
+            print(f"[TOGGLE] 刷新后 is_target: {next((s['is_target'] for s in self._matrix_stats if s['fname'] == fname), 'NOT FOUND')}")
             self.refresh_ui()
             self.page.update()
         except Exception as e:
             import traceback
             traceback.print_exc()
-            logger.error(f"[TOGGLE] 异常: {e}")
+            print(f"[TOGGLE] 异常: {e}")
             self._show_snackbar(f"操作失败: {str(e)}", "error")
 
     async def _on_complement_follow(self, fname: str):
