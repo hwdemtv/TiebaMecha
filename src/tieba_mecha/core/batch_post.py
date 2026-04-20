@@ -63,7 +63,8 @@ class PerAccountRateLimiter:
         self._lock: asyncio.Lock = asyncio.Lock()
     
     async def wait_if_needed(self, account_id: int):
-        """检查并等待该账号的限流"""
+        """检查并等待该账号的限流（锁内计算等待时间，锁外执行休眠，避免阻塞其他账号）"""
+        wait_time: float = 0.0
         async with self._lock:
             if account_id not in self._account_timestamps:
                 self._account_timestamps[account_id] = []
@@ -80,12 +81,19 @@ class PerAccountRateLimiter:
                 await log_warn(
                     f"账号 [{account_id}] 触发独立速率限制 ({self.rpm}帖/分)，等待 {wait_time:.1f}s..."
                 )
-                await asyncio.sleep(wait_time)
+            else:
+                timestamps.append(now)
+                self._account_timestamps[account_id] = timestamps
+
+        # 在锁外执行休眠，不阻塞其他账号的限流检查
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+            async with self._lock:
                 now = time.time()
+                timestamps = self._account_timestamps.get(account_id, [])
                 timestamps = [t for t in timestamps if now - t < 60]
-            
-            timestamps.append(now)
-            self._account_timestamps[account_id] = timestamps
+                timestamps.append(now)
+                self._account_timestamps[account_id] = timestamps
     
     def get_status(self, account_id: int) -> dict[str, Any]:
         """获取指定账号的限流状态"""
@@ -326,7 +334,8 @@ class FailureCircuitBreaker:
         
         elapsed: float = time.time() - last_time
         if elapsed >= self.cooldown_minutes * 60:
-            # 超时自动解除，但保留计数（下次失败会继续累积）
+            # 超时自动解除，同时清零失败计数，避免下次立刻重新触发熔断
+            del self._failure_counts[account_id]
             return False
         return True
 
@@ -545,7 +554,7 @@ class BionicDelay:
     @staticmethod
     async def sleep(min_sec: float, max_sec: float):
         delay = BionicDelay.get_delay(min_sec, max_sec)
-        await log_info(f"拟人化随机休眠: {delay}s...")
+        await log_info(f"拟人化休眠 {delay:.1f}s")
         await asyncio.sleep(delay)
 
 
@@ -556,12 +565,10 @@ class BatchPostTask:
     # 目标贴吧（支持多个）
     fname: str                              # 兼容旧字段
     fnames: list[str] = field(default_factory=list)  # 多贴吧列表（优先）
-    titles: list[str] = field(default_factory=list)
-    contents: list[str] = field(default_factory=list)
     accounts: list[int] = field(default_factory=list)
     # 发帖策略: round_robin（轮询）/ random（随机）/ weighted（加权）
     strategy: str = "round_robin"
-    # 文案组合模式: random (随机) / strict (精准匹配)
+    # 文案组合模式: random (随机) / strict (精准匹配：物料索引与贴吧索引绑定)
     pairing_mode: str = "random"
     # 账号临时权重覆盖（key=account_id, value=权重1–10）
     # 不为空时，覆盖数据库中的全局 post_weight
@@ -604,7 +611,7 @@ class BatchPostManager:
         weights = [a[1] for a in accounts_with_weights]
         return random.choices(ids, weights=weights, k=1)[0]
 
-    async def _build_weighted_accounts(self, task: BatchPostTask) -> list[tuple[int, int]]:
+    async def _build_weighted_accounts(self, task: BatchPostTask, all_accounts: list[Account] | None = None) -> list[tuple[int, int]]:
         """
         构建账号+权重列表。临时覆盖优先于数据库全局权重。
 
@@ -614,8 +621,9 @@ class BatchPostManager:
         Note:
             预构建权重列表,避免在发帖循环中重复查询数据库(N+1问题)
         """
-        # 一次性获取所有账号,避免N+1查询
-        all_accounts = await self.db.get_accounts()
+        # 优先使用传入的账号列表，避免重复查询
+        if all_accounts is None:
+            all_accounts = await self.db.get_accounts()
         account_map = {acc.id: acc for acc in all_accounts}
         
         result: list[tuple[int, int]] = []
@@ -685,55 +693,80 @@ class BatchPostManager:
             "action": "1. 尝试对该账号进行手工登录验证；\n2. 检查代理节点是否依然存活。"
         }
 
-    async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple[int, int]]) -> int:
+    async def _build_native_account_map(self, accounts: list[int]) -> dict[str, list[int]]:
+        """
+        预构建 贴吧名→原生账号ID列表 映射，避免在发帖循环中逐次查库 (N+1问题)。
+
+        Returns:
+            {fname: [account_id, ...]} - 已关注且 is_post_target=True 且未封禁的账号列表
+        """
+        from sqlalchemy import select
+
+        async with self.db.async_session() as session:
+            stmt = select(Forum.fname, Forum.account_id).where(
+                Forum.is_post_target == True,
+                Forum.is_banned == False,
+                Forum.account_id.in_(accounts)
+            ).order_by(Forum.account_id.asc())
+            result = await session.execute(stmt)
+            mapping: dict[str, list[int]] = {}
+            for fname, acc_id in result.all():
+                mapping.setdefault(fname, []).append(acc_id)
+            return mapping
+
+    async def _build_followed_account_map(self, accounts: list[int]) -> dict[str, list[int]]:
+        """
+        预构建 贴吧名→关注账号ID列表 映射 (包含 is_post_target=False 的普通关注号)。
+
+        Returns:
+            {fname: [account_id, ...]} - 已关注且未封禁的账号列表
+        """
+        from sqlalchemy import select
+
+        async with self.db.async_session() as session:
+            stmt = select(Forum.fname, Forum.account_id).where(
+                Forum.is_banned == False,
+                Forum.account_id.in_(accounts)
+            ).order_by(Forum.account_id.asc())
+            result = await session.execute(stmt)
+            mapping: dict[str, list[int]] = {}
+            for fname, acc_id in result.all():
+                mapping.setdefault(fname, []).append(acc_id)
+            return mapping
+
+    async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple[int, int]], native_map: dict[str, list[int]], followed_map: dict[str, list[int]]) -> int:
         """
         靶场智能撮合核心：优先寻找本号已关注且 is_post_target=True 的原生号
         这极大提高了防抽几率（本土作战）。同时跳过已被该吧封禁的账号。
+        
+        Args:
+            native_map: 预构建的贴吧→原生安全账号映射
+            followed_map: 预构建的贴吧→关注账号映射
         """
         # [核平级增强] 如果是严格轮询模式，直接强跳原生探测，实现绝对平均分配
         if task.strategy == "strict_round_robin":
             return await self._pick_account(task, step, weights)
 
-        from sqlalchemy import select
-        
-        async with self.db.async_session() as session:
-            # 1. 优先尝试：安全原生号 (关注了该吧且设为发布目标)
-            stmt = select(Forum.account_id).where(
-                Forum.fname == target_fname,
-                Forum.is_post_target == True,
-                Forum.is_banned == False,
-                Forum.account_id.in_(task.accounts)
-            ).order_by(Forum.account_id.asc())
-            result = await session.execute(stmt)
-            native_accounts = result.scalars().all()
-            
-            if native_accounts:
-                if task.strategy == "round_robin":
-                    # [优化] 优先寻找全局索引命中的账号，实现真正的全局均匀分布
-                    desired_acc_id = task.accounts[step % len(task.accounts)]
-                    if desired_acc_id in native_accounts:
-                        return desired_acc_id
-                    # fallback: 在原生号中轮询，但使用全局索引以保持某种程度的散列
-                    return native_accounts[step % len(native_accounts)]
-                return random.choice(native_accounts)
-            
-            # 2. 次优尝试：普通关注号 (关注了该吧但未设为目标，或未勾选安全开关)
-            stmt_fallback = select(Forum.account_id).where(
-                Forum.fname == target_fname,
-                Forum.is_banned == False,
-                Forum.account_id.in_(task.accounts)
-            ).order_by(Forum.account_id.asc())
-            result_fallback = await session.execute(stmt_fallback)
-            available_accounts = result_fallback.scalars().all()
-            
-            if available_accounts:
-                if task.strategy == "round_robin":
-                    desired_acc_id = task.accounts[step % len(task.accounts)]
-                    if desired_acc_id in available_accounts:
-                        return desired_acc_id
-                    return available_accounts[step % len(available_accounts)]
-                return random.choice(available_accounts)
-                
+        # 1. 优先尝试：安全原生号 (关注了该吧且设为发布目标)
+        native_accounts = native_map.get(target_fname, [])
+        if native_accounts:
+            if task.strategy == "round_robin":
+                desired_acc_id = task.accounts[step % len(task.accounts)]
+                if desired_acc_id in native_accounts:
+                    return desired_acc_id
+                return native_accounts[step % len(native_accounts)]
+            return random.choice(native_accounts)
+
+        # 2. 次优尝试：普通关注号 (关注了该吧但未设为目标，或未勾选安全开关)
+        available_accounts = followed_map.get(target_fname, [])
+        if available_accounts:
+            if task.strategy == "round_robin":
+                desired_acc_id = task.accounts[step % len(task.accounts)]
+                if desired_acc_id in available_accounts:
+                    return desired_acc_id
+                return available_accounts[step % len(available_accounts)]
+            return random.choice(available_accounts)
+
         # 3. 最终回退：大盘调度策略 (空降兵打法)
         return await self._pick_account(task, step, weights)
 
@@ -807,11 +840,14 @@ class BatchPostManager:
             task.accounts = [active_acc.id]
 
         # 预构建权重列表（避免每次循环都查数据库）
-        weighted_accounts = await self._build_weighted_accounts(task)
-        
-        # 预加载所有账号信息,避免N+1查询
+        # 同时复用此查询结果构建 account_map，避免重复查询
         all_accounts = await self.db.get_accounts()
         account_map = {acc.id: acc for acc in all_accounts}
+        weighted_accounts = await self._build_weighted_accounts(task, all_accounts)
+
+        # 预构建贴吧→账号映射，避免循环中 N+1 查询
+        native_map = await self._build_native_account_map(task.accounts)
+        followed_map = await self._build_followed_account_map(task.accounts)
 
         # 从全局数据库拉取所有 Pending 物料
         pending_materials = await self.db.get_materials(status="pending")
@@ -840,22 +876,48 @@ class BatchPostManager:
 
         # [重构核心] 智能化调度与多账号 Failover 循环体系
         material_ptr = 0
+        consecutive_no_account_skips = 0  # 连续"无可用账号"跳过计数，用于检测死锁
         while task.progress < actual_total and material_ptr < len(pending_materials):
             current_material = pending_materials[material_ptr]
             
             # --- [Step 0: 阵地轮替与账号精准匹配] ---
-            # 基于物料索引进行阵地轮替，实现多贴吧负载均衡
+            # strict 模式：物料索引与贴吧索引严格绑定（1对1精准匹配，不允许阵地跳转）
+            # random 模式：物料索引轮替贴吧（负载均衡，允许冷却时动态跳转）
             base_target_fname = fnames[material_ptr % len(fnames)]
+            
+            # [死锁检测] 检查是否还有任何账号可用（非熔断、非封禁、非暂停代理）
+            available_account_ids = [
+                aid for aid in task.accounts
+                if not captcha_breaker.is_in_cooldown(aid)
+                and not failure_breaker.is_in_cooldown(aid)
+                and (aid in account_map and account_map[aid].status != "suspended_proxy")
+            ]
+            if not available_account_ids:
+                consecutive_no_account_skips += 1
+                if consecutive_no_account_skips >= 3:
+                    await log_warn("⚠️ 连续3个物料无可用账号（全部熔断/封禁/暂停），提前终止任务")
+                    yield {
+                        "status": "error",
+                        "msg": f"所有账号均不可用（熔断/封禁），任务提前终止。已成功 {task.progress}/{task.total}",
+                        "progress": task.progress, "total": task.total,
+                    }
+                    break
+                # 还没达到阈值，跳过本物料等待账号恢复
+                await log_warn(f"物料 [{current_material.id}] 暂无可用账号，跳过等待恢复 ({consecutive_no_account_skips}/3)")
+                material_ptr += 1
+                continue
+            else:
+                consecutive_no_account_skips = 0  # 有可用账号则重置计数
             
             # 容灾跟踪
             tried_accounts = set()
-            max_account_retries = min(3, len(task.accounts))
+            max_account_retries = min(3, len(available_account_ids))
             success_for_this_material = False
             
             for attempt_idx in range(max_account_retries):
                 # 选取账号：传入 material_ptr+attempt_idx 以保证 Failover 时的轮转顺序
                 account_id = await self._pick_optimal_account_for_target(
-                    task, base_target_fname, material_ptr + attempt_idx, weighted_accounts
+                    task, base_target_fname, material_ptr + attempt_idx, weighted_accounts, native_map, followed_map
                 )
                 
                 # 强行排除重复尝试
@@ -873,6 +935,9 @@ class BatchPostManager:
                 
                 # 阵地冷却检查与动态跳转
                 if not af_tracker.can_post(account_id, current_target_fname):
+                    if task.pairing_mode == "strict":
+                        # 严格配对模式：不允许阵地跳转，该账号此贴吧冷却中则换号
+                        continue
                     alt_fname = await af_tracker.get_available_forum(account_id, fnames)
                     if alt_fname:
                         current_target_fname = alt_fname
@@ -902,7 +967,8 @@ class BatchPostManager:
                         if s_ai: 
                             title, content = opt_t, opt_c
                             await self.db.update_material_ai(current_material.id, title, content)
-                    except: pass
+                    except Exception as ai_err:
+                        await log_warn(f"AI改写失败，使用原文: {ai_err}")
                 
                 # [关键强化] 注入随机符号/表情，打破内容 Hash
                 content = Obfuscator.inject_random_symbols(content)
@@ -922,7 +988,7 @@ class BatchPostManager:
                     async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
                         # 2.1 模拟个人身份获取 (产生轨迹并获取 TBS)
                         try: await client.get_self_info()
-                        except: pass
+                        except Exception: pass  # 非关键操作，TBS获取失败会在后续判断中跳过
                         if not getattr(client.account, 'tbs', None): continue
                         
                         # 2.2 仿生预热浏览 (模拟进入贴吧首页)
@@ -950,8 +1016,8 @@ class BatchPostManager:
                             # 预热延迟
                             try:
                                 await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
-                                await asyncio.sleep(random.uniform(1.2, 3.5)) 
-                            except: pass
+                                await asyncio.sleep(random.uniform(1.2, 3.5))
+                            except Exception: pass  # 预热非关键，失败不影响主流程
                                 
                             forum_info = await client.get_forum(current_target_fname)
                             data = {
@@ -1215,9 +1281,8 @@ class BatchPostManager:
                                 )
                                 forum = existing.scalar_one_or_none()
                                 if not forum:
-                                    # 生成唯一的 fid（使用时间戳+随机数确保唯一）
-                                    import time
-                                    unique_fid = int(time.time() * 1000) % (2**31)
+                                    # 生成唯一的 fid：使用随机数避免快速连续创建时的碰撞
+                                    unique_fid = random.randint(1, 2**31 - 1)
                                     session.add(Forum(fid=unique_fid, fname=fname, account_id=acc_id))
                                     await session.commit()
                         except Exception as e:
@@ -1227,8 +1292,7 @@ class BatchPostManager:
                             elif "被拉黑" in err_msg or "400013" in err_msg:
                                 result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "账号被该吧拉黑"})
                                 # 标记为封禁（如果 Forum 记录不存在则先创建）
-                                import time
-                                unique_fid = int(time.time() * 1000) % (2**31)
+                                unique_fid = random.randint(1, 2**31 - 1)
                                 async with self.db.async_session() as session:
                                     from sqlalchemy import select
                                     from ..db.models import Forum

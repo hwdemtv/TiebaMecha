@@ -44,7 +44,8 @@ class BatchPostPage:
         self._selected_account_ids = set()
         self._selected_forum_names = set()
         self._selected_group_names = set()
-        self._temp_target_fnames = []  # 新增：用于在弹窗间流转的临时吧名列表
+        self._temp_local_fnames = []    # 本地自留区锁定的吧名
+        self._temp_global_fnames = []   # 全域轰炸组锁定的吧名
         
         # 账号选择增强状态
         self._account_search_text = ""
@@ -100,16 +101,18 @@ class BatchPostPage:
                 self.bump_mode_group.value = bump_mode_raw
                 self.bump_loop_container.visible = (bump_mode_raw == "matrix_loop")
             
-            # [持久化同步] 恢复上次选中的贴吧 
-            last_forums_raw = await self.db.get_setting("last_selected_target_forums")
-            if last_forums_raw:
+            # [持久化同步] 恢复上次选中的贴吧 (分本地/全域两组独立)
+            last_local_raw = await self.db.get_setting("last_selected_local_forums")
+            if last_local_raw:
                 try:
-                    self._temp_target_fnames = json.loads(last_forums_raw)
-                    count = len(self._temp_target_fnames)
-                    if count > 0:
-                        self.forum_select_btn.text = f"🎯 火力已锁定: {count} 个目标点"
-                        self.forum_select_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
+                    self._temp_local_fnames = json.loads(last_local_raw)
                 except: pass
+            last_global_raw = await self.db.get_setting("last_selected_global_forums")
+            if last_global_raw:
+                try:
+                    self._temp_global_fnames = json.loads(last_global_raw)
+                except: pass
+            self._update_forum_select_btn()
 
             # [持久化同步] 恢复上次选中的账号
             last_acc_raw = await self.db.get_setting("last_selected_account_ids")
@@ -432,46 +435,46 @@ class BatchPostPage:
 
 
     async def _open_native_forum_config(self, e):
-        """配置本机原发安全圈的弹窗 - 增加搜索与全选"""
+        """查看本机原发安全圈状态（自动判定，不可手动切换）"""
+        # 先自动同步，确保数据最新
+        await self.db.auto_sync_post_target()
         forums = await self.db.get_all_unique_forums()
         
         forum_list_container = ft.Column(spacing=5, height=300, scroll=ft.ScrollMode.ADAPTIVE)
-        
-        async def on_toggle(e):
-            fid = e.control.data
-            is_checked = e.control.value
-            await self.db.toggle_forum_post_target(fid, is_checked)
-            self._show_snackbar(f"原生发帖防线 {'[启用]' if is_checked else '[关闭]'} 成功！", "success")
 
         def build_items(filter_text=""):
             items = []
+            safe_count = 0
+            unsafe_count = 0
             for f in forums:
                 if filter_text.lower() in f['fname'].lower():
+                    is_safe = f['is_post_target']
+                    if is_safe:
+                        safe_count += 1
+                    else:
+                        unsafe_count += 1
                     items.append(
-                        ft.Checkbox(
-                            label=f['fname'],
-                            value=f['is_post_target'],
-                            data=f['fid'],
-                            on_change=lambda ev: self.page.run_task(on_toggle, ev),
-                            fill_color="green",
-                            label_style=ft.TextStyle(color="onSurface")
-                        )
+                        ft.Row([
+                            ft.Icon(icons.SHIELD_ROUNDED if is_safe else icons.SHIELD_OUTLINED,
+                                    size=16, color="green" if is_safe else "error"),
+                            ft.Text(f['fname'], size=12, weight="bold" if is_safe else None,
+                                    color="onSurface" if is_safe else "onSurfaceVariant"),
+                            ft.Text("安全" if is_safe else ("封禁" if f.get('is_banned') else "有删帖记录"),
+                                    size=10, color="green" if is_safe else "error"),
+                        ], spacing=6)
                     )
+            summary_text.value = f"✅ 安全: {safe_count} 个 | ⚠️ 不安全: {unsafe_count} 个"
             return items
 
         def on_search(e):
             forum_list_container.controls = build_items(e.control.value)
-            forum_list_container.update()
+            try:
+                forum_list_container.update()
+                summary_text.update()
+            except:
+                pass
 
-        def on_select_all(e):
-            val = e.control.value
-            for cb in forum_list_container.controls:
-                if isinstance(cb, ft.Checkbox):
-                    cb.value = val
-                    # 触发后端更新
-                    self.page.run_task(self.db.toggle_forum_post_target, cb.data, val)
-            forum_list_container.update()
-            self._show_snackbar(f"已批量{'开启' if val else '关闭'}安全权限", "info")
+        summary_text = ft.Text("", size=12, weight="bold")
 
         search_field = ft.TextField(
             hint_text="搜索贴吧名...",
@@ -491,18 +494,15 @@ class BatchPostPage:
         async def close_dialog(_):
             self.page.close(dialog)
             await self.load_data()
-            # 设置完立刻刷新底层的 UI，不强制踢出用户
             self._refresh_forum_pool()
             self.page.update()
 
         dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
+            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法状态（自动判定）")]),
             content=ft.Column([
-                ft.Row([
-                    search_field,
-                    ft.Checkbox(label="全选", on_change=on_select_all, fill_color="green"),
-                ], spacing=10),
-                ft.Text("开启专属保护开关后，会强制优先调用原生关注小号出战：", size=11, color="onSurfaceVariant"),
+                ft.Text("本土作战许可已改为自动判定：未封禁且无删帖记录 = 安全", size=11, color="onSurfaceVariant"),
+                summary_text,
+                ft.Row([search_field], spacing=10),
                 ft.Container(
                     content=forum_list_container,
                     border=ft.border.all(1, with_opacity(0.1, "green")),
@@ -511,7 +511,7 @@ class BatchPostPage:
                 )
             ], tight=True, width=450, spacing=10),
             actions=[
-                ft.FilledButton("防抽网络编织完毕锁定", icon=icons.SECURITY, on_click=close_dialog, style=ft.ButtonStyle(bgcolor="green", color="white"))
+                ft.FilledButton("确认返回", icon=icons.CHECK_CIRCLE_ROUNDED, on_click=close_dialog, style=ft.ButtonStyle(bgcolor="green", color="white"))
             ]
         )
         self.page.open(dialog)
@@ -1622,15 +1622,59 @@ class BatchPostPage:
 
     async def _open_forum_dialog(self, e):
         """直接进入火力配置主页面"""
-        await self._open_firepower_dialog(set(self._temp_target_fnames))
+        await self._open_firepower_dialog(0)
+
+    async def _open_firepower_dialog_tab(self, tab_index: int):
+        """按指定 tab 打开火力配置对话框"""
+        await self._open_firepower_dialog(tab_index)
+
+    def _update_forum_select_btn(self):
+        """根据本地/全域两组锁定状态刷新主界面按钮"""
+        local_count = len(self._temp_local_fnames)
+        global_count = len(self._temp_global_fnames)
+        total = local_count + global_count
+
+        # 原始按钮：仅两组都无选择时显示
+        if total == 0:
+            self.forum_select_btn.text = "点击选择目标贴吧"
+            self.forum_select_btn.style = ft.ButtonStyle(color="onSurfaceVariant", bgcolor=None)
+            self.forum_select_btn.visible = True
+            self.local_status_btn.visible = False
+            self.global_status_btn.visible = False
+        else:
+            self.forum_select_btn.visible = False
+            # 本地自留区按钮
+            if local_count > 0:
+                self.local_status_btn.text = f"🏠 本地自留区: {local_count} 个目标"
+                self.local_status_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
+            else:
+                self.local_status_btn.text = "🏠 本地自留区: 未选择"
+                self.local_status_btn.style = ft.ButtonStyle(color="onSurfaceVariant", bgcolor=None)
+            self.local_status_btn.visible = True
+            # 全域轰炸组按钮
+            if global_count > 0:
+                self.global_status_btn.text = f"🔥 全域轰炸组: {global_count} 个目标"
+                self.global_status_btn.style = ft.ButtonStyle(color="white", bgcolor="orange")
+            else:
+                self.global_status_btn.text = "🔥 全域轰炸组: 未选择"
+                self.global_status_btn.style = ft.ButtonStyle(color="onSurfaceVariant", bgcolor=None)
+            self.global_status_btn.visible = True
+
+        try:
+            self.forum_select_btn.update()
+            self.local_status_btn.update()
+            self.global_status_btn.update()
+        except:
+            pass
 
     async def _open_safety_config_dialog(self, pre_selected: set):
-        """[子弹窗] 安全原初打法配置 - 配置完返回火力配置"""
+        """[子弹窗] 安全原初打法状态查看（自动判定，不可手动切换）"""
         
-        # 1. 获取包含安全状态 (is_post_target) 的贴吧详情字典列表
+        # 1. 先自动同步，确保数据最新
+        await self.db.auto_sync_post_target()
         forums = await self.db.get_all_unique_forums()
         
-        # 2. 搜索与全选控制
+        # 2. 搜索控制（全选仅用于选择贴吧，不修改安全状态）
         search_field = ft.TextField(
             label="搜索贴吧名...",
             prefix_icon=icons.SEARCH,
@@ -1639,77 +1683,53 @@ class BatchPostPage:
             expand=True
         )
         
-        select_all_cb = ft.Checkbox(label="全选", value=False)
-        
         # 3. 贴吧容器
         forums_list_container = ft.Column(spacing=5, scroll=ft.ScrollMode.ADAPTIVE, height=300)
-        
-        async def on_item_check(e):
-            fid = e.control.data
-            is_checked = e.control.value
-            await self.db.toggle_forum_post_target(fid, is_checked)
-            # 同步更新内存状态，确保搜索重渲染时状态不丢失
-            for f in forums:
-                if f['fid'] == fid:
-                    f['is_post_target'] = is_checked
-                    break
 
         def render_forums(keyword=""):
             forums_list_container.controls.clear()
+            safe_count = 0
+            unsafe_count = 0
             for f in forums:
                 if keyword and keyword.lower() not in f['fname'].lower(): continue
+                is_safe = f['is_post_target']
+                if is_safe:
+                    safe_count += 1
+                else:
+                    unsafe_count += 1
                 forums_list_container.controls.append(
-                    ft.Checkbox(
-                        label=f['fname'], 
-                        value=f['is_post_target'], 
-                        data=f['fid'], 
-                        on_change=lambda ev: self.page.run_task(on_item_check, ev),
-                        fill_color="green",
-                        label_style=ft.TextStyle(color="onSurface")
-                    )
+                    ft.Row([
+                        ft.Icon(icons.SHIELD_ROUNDED if is_safe else icons.SHIELD_OUTLINED, 
+                                size=16, color="green" if is_safe else "error"),
+                        ft.Text(f['fname'], size=12, weight="bold" if is_safe else None,
+                                color="onSurface" if is_safe else "onSurfaceVariant"),
+                        ft.Text("安全" if is_safe else ("封禁" if f.get('is_banned') else "有删帖记录"),
+                                size=10, color="green" if is_safe else "error"),
+                    ], spacing=6)
                 )
+            # 在顶部显示统计
+            summary_text.value = f"✅ 安全: {safe_count} 个 | ⚠️ 不安全: {unsafe_count} 个"
             try:
                 forums_list_container.update()
+                summary_text.update()
             except:
                 pass
 
         search_field.on_change = lambda e: render_forums(e.control.value)
-        
-        def on_select_all_change(e):
-            """安全配置弹窗的全选处理"""
-            select_all = e.control.value
-            for cb in forums_list_container.controls:
-                if isinstance(cb, ft.Checkbox):
-                    cb.value = select_all
-                    self.page.run_task(self.db.toggle_forum_post_target, cb.data, select_all)
-                    # 同步更新内存状态
-                    for f in forums:
-                        if f['fid'] == cb.data:
-                            f['is_post_target'] = select_all
-                            break
-            try:
-                forums_list_container.update()
-            except:
-                pass
-            self._show_snackbar(f"已批量{'开启' if select_all else '关闭'}安全权限", "info")
 
-        select_all_cb.on_change = on_select_all_change
+        summary_text = ft.Text("", size=12, weight="bold")
 
-        async def on_lock_safety(_):
-            """锁定安全配置，返回火力配置阶段"""
+        async def on_close(_):
             self.page.close(safety_dialog)
-            # 配置已更新，将原来的火力准备 (pre_selected) 传回，不干涉火力配置
-            await self._open_firepower_dialog(pre_selected)
+            await self._open_firepower_dialog(0)
 
         safety_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法配置")]),
+            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法状态（自动判定）")]),
             content=ft.Container(
                 content=ft.Column([
-                    ft.Row([
-                        search_field, 
-                        select_all_cb,
-                    ], spacing=10),
-                    ft.Text("开启专属保护开关后，会强制优先调用原生关注小号出战:", size=11, color="onSurfaceVariant"),
+                    ft.Text("本土作战许可已改为自动判定：未封禁且无删帖记录 = 安全", size=11, color="onSurfaceVariant"),
+                    summary_text,
+                    ft.Row([search_field], spacing=10),
                     ft.Container(
                         content=forums_list_container,
                         padding=10,
@@ -1720,86 +1740,59 @@ class BatchPostPage:
                 width=450,
             ),
             actions=[
-                ft.TextButton("取消", on_click=on_lock_safety),
+                ft.TextButton("取消", on_click=lambda _: self.page.close(safety_dialog)),
                 ft.FilledButton(
-                    "防抽网络编织完毕锁定", 
-                    icon=icons.LOCK_ROUNDED, 
+                    "确认返回", 
+                    icon=icons.CHECK_CIRCLE_ROUNDED, 
                     style=ft.ButtonStyle(bgcolor="green", color="white"),
-                    on_click=on_lock_safety
+                    on_click=on_close
                 ),
             ],
         )
         
         self.page.open(safety_dialog)
-        render_forums() # 先开弹窗，后执行包含 update() 的渲染
-    async def _open_firepower_dialog(self, pre_selected_fnames: set):
-        """[火力配置主页面] 配置火力抛射靶场"""
+        render_forums()
+    async def _open_firepower_dialog(self, initial_tab: int = 0):
+        """[火力配置主页面] 本地自留区与全域轰炸组独立锁定"""
         
-        final_selected = pre_selected_fnames.copy()
-        # [优化] 获取所有不重复的贴吧及其权限状态
+        # 获取数据
         local_forums = await self.db.get_all_unique_forums()
-        # [新增] 获取靶位组列表
         target_groups = await self.db.get_target_pool_groups()
         
-        # 1. 搜索过滤与全选 (用于本地自留区)
-        search_field = ft.TextField(
+        # ===== 两个独立的选中集合 =====
+        local_selected = set(self._temp_local_fnames)   # 本地自留区选中
+        global_selected = set(self._temp_global_fnames)  # 全域轰炸组选中
+        
+        # ===== 本地自留区 UI =====
+        local_search_field = ft.TextField(
             label="过滤本地吧...",
             prefix_icon=icons.SEARCH,
             dense=True,
             text_size=12,
             expand=True
         )
+        local_select_all_cb = ft.Checkbox(label="全选", value=False, scale=0.8)
+        local_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
+        local_count_text = ft.Text(f"已选: {len(local_selected)} 个目标", size=12, color="primary", weight=ft.FontWeight.BOLD)
         
-        select_all_cb = ft.Checkbox(label="全选", value=False, scale=0.8)
+        def update_local_count():
+            local_count_text.value = f"已选: {len(local_selected)} 个目标"
+            try: local_count_text.update()
+            except: pass
         
-        # 2. 容器预处理
-        forums_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
-        groups_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=150)
-        
-        # 已选数量提示
-        selected_count_text = ft.Text(f"已选: {len(final_selected)} 个目标", size=12, color="primary", weight=ft.FontWeight.BOLD)
-        
-        def update_selected_count():
-            selected_count_text.value = f"已选: {len(final_selected)} 个目标"
-            try:
-                selected_count_text.update()
-            except:
-                pass
-        
-        def on_item_check(e):
+        def on_local_item_check(e):
             fn = e.control.data
-            if e.control.value: final_selected.add(fn)
-            else: final_selected.discard(fn)
-            update_selected_count()
-
-        async def on_group_check(e):
-            group_name = e.control.data
-            is_checked = e.control.value
-            # 直接拉取数据库中的分组吧名
-            fnames = await self.db.get_target_pools_by_group(group_name)
-            for fn in fnames:
-                if is_checked: final_selected.add(fn)
-                else: final_selected.discard(fn)
-            # 刷新本地列表的选中状态（如果本地也有重合的吧）
-            render_local_list(search_field.value)
-            update_selected_count()
-            self._show_snackbar(f"{'已添加' if is_checked else '已从待选区移除'} 分组 [{group_name}] 中的 {len(fnames)} 个吧点", "info")
-
+            if e.control.value: local_selected.add(fn)
+            else: local_selected.discard(fn)
+            update_local_count()
+        
         def render_local_list(keyword=""):
-            forums_container.controls.clear()
-            
+            local_container.controls.clear()
             if not local_forums:
-                forums_container.controls.append(
+                local_container.controls.append(
                     ft.Container(
-                        content=ft.Text(
-                            "系统内尚无贴吧数据\n请先前往 Dashboard 运行签到或同步关注贴吧", 
-                            color="onSurfaceVariant", 
-                            text_align="center", 
-                            size=12
-                        ),
-                        alignment=ft.alignment.center,
-                        expand=True,
-                        padding=ft.padding.only(top=40)
+                        content=ft.Text("系统内尚无贴吧数据\n请先前往 Dashboard 运行签到或同步关注贴吧", color="onSurfaceVariant", text_align="center", size=12),
+                        alignment=ft.alignment.center, expand=True, padding=ft.padding.only(top=40)
                     )
                 )
             else:
@@ -1807,90 +1800,59 @@ class BatchPostPage:
                     fn = f['fname']
                     is_safe = f['is_post_target']
                     if keyword and keyword.lower() not in fn.lower(): continue
-                    
-                    # 安全目标增加标识与颜色区分
                     label_text = f"🛡️ {fn} [安全]" if is_safe else fn
                     item_color = "green" if is_safe else "onSurface"
-                    
-                    forums_container.controls.append(
+                    local_container.controls.append(
                         ft.Checkbox(
-                            label=label_text, 
-                            value=(fn in final_selected), 
-                            data=fn, 
-                            on_change=on_item_check,
+                            label=label_text, value=(fn in local_selected), data=fn, on_change=on_local_item_check,
                             fill_color="green" if is_safe else None,
                             label_style=ft.TextStyle(color=item_color, size=11, weight=ft.FontWeight.W_500 if is_safe else None)
                         )
                     )
-            try:
-                forums_container.update()
-            except:
-                pass
-
-        def render_groups():
-            groups_container.controls.clear()
-            if not target_groups:
-                groups_container.controls.append(ft.Text("尚无预设靶场分组", size=11, color="onSurfaceVariant", italic=True))
-            else:
-                for g in target_groups:
-                    groups_container.controls.append(
-                        ft.Checkbox(
-                            label=f"📁 分组: {g}",
-                            data=g,
-                            on_change=lambda ev: self.page.run_task(on_group_check, ev),
-                            label_style=ft.TextStyle(size=11),
-                            fill_color="primary"
-                        )
-                    )
-            try:
-                groups_container.update()
-            except:
-                pass
-
-        search_field.on_change = lambda e: render_local_list(e.control.value)
+            try: local_container.update()
+            except: pass
         
-        def on_select_all_change(e):
-            """全选/取消全选当前显示列表中的所有贴吧"""
+        local_search_field.on_change = lambda e: render_local_list(e.control.value)
+        
+        def on_local_select_all(e):
             select_all = e.control.value
-            for cb in forums_container.controls:
+            for cb in local_container.controls:
                 if isinstance(cb, ft.Checkbox):
                     cb.value = select_all
                     fn = cb.data
-                    if select_all:
-                        final_selected.add(fn)
-                    else:
-                        final_selected.discard(fn)
-            update_selected_count()
-            try:
-                forums_container.update()
-            except:
-                pass
+                    if select_all: local_selected.add(fn)
+                    else: local_selected.discard(fn)
+            update_local_count()
+            try: local_container.update()
+            except: pass
         
-        select_all_cb.on_change = on_select_all_change
+        local_select_all_cb.on_change = on_local_select_all
+        
+        async def on_local_lock(_):
+            self._temp_local_fnames = list(local_selected)
+            if self.db:
+                self.page.run_task(self.db.set_setting, "last_selected_local_forums", json.dumps(self._temp_local_fnames))
+            self._update_forum_select_btn()
+            self.page.close(fire_dialog)
+            self._show_snackbar(f"🏠 本地自留区已锁定 {len(local_selected)} 个目标", "success")
         
         async def on_bulk_unfollow_click(_):
-            selected_to_purge = [fn for fn in list(final_selected)]
+            selected_to_purge = list(local_selected)
             if not selected_to_purge:
                 self._show_snackbar("请先勾选需要清理的阵地", "warning")
                 return
-
             async def do_purge(e):
                 self.page.close(confirm_dialog)
-                # 执行清理
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
                 self._show_snackbar(f"开始对 {len(selected_to_purge)} 个吧执行全局清理，请稍后...", "info")
-                
                 await pm.unfollow_forums_bulk(selected_to_purge)
-                
-                # 刷新状态
-                final_selected.clear()
-                # 重载全量数据并刷新 UI
+                local_selected.clear()
                 nonlocal local_forums
                 local_forums = await self.db.get_all_unique_forums()
                 render_local_list()
-                self._show_snackbar(f"✅ 阵地清理完成，已从数据库抹除并尝试让所有账号取关", "success")
-
+                update_local_count()
+                self._show_snackbar("✅ 阵地清理完成，已从数据库抹除并尝试让所有账号取关", "success")
             confirm_dialog = ft.AlertDialog(
                 title=ft.Row([ft.Icon(icons.WARNING, color="orange"), ft.Text("确认全局清理并取关")]),
                 content=ft.Text(f"将对已选的 {len(selected_to_purge)} 个贴吧执行【全局取关】并彻底删除本地记录。\n此操作不可逆，且会触发矩阵网络请求。是否继续？"),
@@ -1900,92 +1862,126 @@ class BatchPostPage:
                 ]
             )
             self.page.open(confirm_dialog)
-
-        # 3. 手动输入框 (用于全域轰炸组)
-        manual_input = ft.TextField(
-            label="手动补充吧名 (英文逗号分隔)", 
-            hint_text="贴吧1, 贴吧2...",
-            multiline=True, 
-            min_lines=5, 
-            text_size=12,
-        )
         
-        async def on_confirm(_):
-            # 合并手动输入的内容
-            if manual_input.value:
-                manual_fnames = [f.strip() for f in manual_input.value.split(",") if f.strip()]
-                for fn in manual_fnames: final_selected.add(fn)
-            
-            count = len(final_selected)
-            self._temp_target_fnames = list(final_selected)
-            
-            # [持久化] 保存到数据库
-            if self.db:
-                self.page.run_task(self.db.set_setting, "last_selected_target_forums", json.dumps(self._temp_target_fnames))
-            
-            # 同步更新主界面按钮状态
-            if count > 0:
-                self.forum_select_btn.text = f"🎯 火力已锁定: {count} 个目标点"
-                self.forum_select_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
+        # ===== 全域轰炸组 UI =====
+        global_manual_input = ft.TextField(
+            label="手动补充吧名 (英文逗号分隔)",
+            hint_text="贴吧1, 贴吧2...",
+            multiline=True, min_lines=3, text_size=12,
+        )
+        groups_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=150)
+        global_count_text = ft.Text(f"已选: {len(global_selected)} 个目标", size=12, color="orange", weight=ft.FontWeight.BOLD)
+        
+        def update_global_count():
+            # 合计手动输入 + 分组选择
+            manual_fnames = set()
+            if global_manual_input.value:
+                manual_fnames = {f.strip() for f in global_manual_input.value.split(",") if f.strip()}
+            total = len(global_selected | manual_fnames)
+            global_count_text.value = f"已选: {total} 个目标"
+            try: global_count_text.update()
+            except: pass
+        
+        async def on_group_check(e):
+            group_name = e.control.data
+            is_checked = e.control.value
+            fnames = await self.db.get_target_pools_by_group(group_name)
+            for fn in fnames:
+                if is_checked: global_selected.add(fn)
+                else: global_selected.discard(fn)
+            update_global_count()
+            self._show_snackbar(f"{'已添加' if is_checked else '已从待选区移除'} 分组 [{group_name}] 中的 {len(fnames)} 个吧点", "info")
+        
+        global_manual_input.on_change = lambda e: update_global_count()
+        
+        def render_groups():
+            groups_container.controls.clear()
+            if not target_groups:
+                groups_container.controls.append(ft.Text("尚无预设靶场分组", size=11, color="onSurfaceVariant", italic=True))
             else:
-                self.forum_select_btn.text = "点击选择目标贴吧"
-                self.forum_select_btn.style = ft.ButtonStyle(color="onSurfaceVariant", bgcolor=None)
-
+                for g in target_groups:
+                    groups_container.controls.append(
+                        ft.Checkbox(
+                            label=f"📁 分组: {g}", data=g,
+                            on_change=lambda ev: self.page.run_task(on_group_check, ev),
+                            label_style=ft.TextStyle(size=11), fill_color="primary"
+                        )
+                    )
+            try: groups_container.update()
+            except: pass
+        
+        async def on_global_lock(_):
+            # 合并手动输入
+            if global_manual_input.value:
+                manual_fnames = [f.strip() for f in global_manual_input.value.split(",") if f.strip()]
+                for fn in manual_fnames: global_selected.add(fn)
+            self._temp_global_fnames = list(global_selected)
+            if self.db:
+                self.page.run_task(self.db.set_setting, "last_selected_global_forums", json.dumps(self._temp_global_fnames))
+            self._update_forum_select_btn()
             self.page.close(fire_dialog)
-            self._show_snackbar(f"🎯 已锁定 {len(final_selected)} 个发射坐标点，准备完毕", "success")
-            self.page.update()
-
-        # 标题栏
+            self._show_snackbar(f"🔥 全域轰炸组已锁定 {len(global_selected)} 个目标", "success")
+        
+        # ===== 构造弹窗 =====
         dialog_title = ft.Row([
-            ft.Icon(icons.SETTINGS_SUGGEST, color="blue"), 
+            ft.Icon(icons.SETTINGS_SUGGEST, color="blue"),
             ft.Text("配置火力抛射靶场"),
         ], alignment=ft.MainAxisAlignment.START)
-
-        # 4. 构造页签
+        
         tabs = ft.Tabs(
-            selected_index=0,
+            selected_index=initial_tab,
             tabs=[
                 ft.Tab(
-                    text="本地自留区", 
-                    icon=icons.GPS_FIXED, 
+                    text="本地自留区",
+                    icon=icons.GPS_FIXED,
                     content=ft.Container(
                         content=ft.Column([
                             ft.Row([
-                                search_field, 
-                                select_all_cb, 
+                                local_search_field,
+                                local_select_all_cb,
                                 ft.IconButton(icons.DELETE_SWEEP, icon_color="error", tooltip="删除选中项并同步取消关注", on_click=on_bulk_unfollow_click),
-                                ft.IconButton(
-                                    icons.SETTINGS, 
-                                    icon_color="green", 
-                                    tooltip="安全原初打法配置",
-                                    on_click=lambda _: self.page.run_task(self._open_safety_config_dialog, final_selected)
-                                )
                             ], spacing=5),
                             ft.Container(
-                                content=forums_container,
+                                content=local_container,
                                 border=ft.border.all(1, with_opacity(0.1, "onSurface")),
-                                border_radius=8,
-                                padding=5
-                            )
+                                border_radius=8, padding=5
+                            ),
+                            ft.Row([
+                                local_count_text,
+                                ft.FilledButton(
+                                    "锁定本地自留区",
+                                    icon=icons.LOCK_ROUNDED,
+                                    style=ft.ButtonStyle(bgcolor="primary", color="white"),
+                                    on_click=lambda e: self.page.run_task(on_local_lock, e)
+                                ),
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ], tight=True),
                         padding=10
                     )
                 ),
                 ft.Tab(
-                    text="全域轰炸组", 
-                    icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED, 
+                    text="全域轰炸组",
+                    icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED,
                     content=ft.Container(
                         content=ft.Column([
                             ft.Text("在这里输入从未关注但在轰炸计划内的外部目标吧:", size=11, color="onSurfaceVariant"),
-                            manual_input,
+                            global_manual_input,
                             ft.Divider(height=10, color="transparent"),
                             ft.Text("或者从已录入的靶位组中选取 (Target Pool Groups):", size=11, color="onSurfaceVariant"),
                             ft.Container(
                                 content=groups_container,
                                 border=ft.border.all(1, with_opacity(0.1, "onSurface")),
-                                border_radius=8,
-                                padding=5
-                            )
+                                border_radius=8, padding=5
+                            ),
+                            ft.Row([
+                                global_count_text,
+                                ft.FilledButton(
+                                    "锁定全域轰炸组",
+                                    icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED,
+                                    style=ft.ButtonStyle(bgcolor="orange", color="white"),
+                                    on_click=lambda e: self.page.run_task(on_global_lock, e)
+                                ),
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ], tight=True),
                         padding=10
                     )
@@ -1998,21 +1994,13 @@ class BatchPostPage:
             content=ft.Container(
                 content=tabs,
                 width=500,
-                height=450,
+                height=500,
             ),
             actions=[
                 ft.TextButton("关闭", on_click=lambda _: self.page.close(fire_dialog)),
-                selected_count_text,
-                ft.FilledButton(
-                    "锁定发射坐标", 
-                    icon=icons.CHECK, 
-                    style=ft.ButtonStyle(bgcolor="primary", color="white"),
-                    on_click=on_confirm
-                ),
             ],
         )
         
-        # [关键修复] 先开弹窗，后执行渲染逻辑
         self.page.open(fire_dialog)
         render_local_list()
         render_groups()
@@ -2219,11 +2207,19 @@ class BatchPostPage:
             on_click=self._open_forum_dialog,
             style=ft.ButtonStyle(color="onSurfaceVariant"),
         )
-        self.manual_forum_input = ft.TextField(
-            label="手动补充吧名 (英文逗号分隔)", 
-            hint_text="例如: c语言,python", 
-            text_size=11,
-            border_color=with_opacity(0.2, "onSurface")
+        self.local_status_btn = ft.OutlinedButton(
+            "🏠 本地自留区: 未选择",
+            icon=icons.GPS_FIXED,
+            on_click=lambda _: self.page.run_task(self._open_firepower_dialog_tab, 0),
+            style=ft.ButtonStyle(color="onSurfaceVariant"),
+            visible=False,
+        )
+        self.global_status_btn = ft.OutlinedButton(
+            "🔥 全域轰炸组: 未选择",
+            icon=icons.LOCAL_FIRE_DEPARTMENT_ROUNDED,
+            on_click=lambda _: self.page.run_task(self._open_firepower_dialog_tab, 1),
+            style=ft.ButtonStyle(color="onSurfaceVariant"),
+            visible=False,
         )
         self._stats_text = ft.Text("状态分布:  ⏳待发(0)   ✅成功(0)   ❌失败(0)", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant")
         
@@ -2555,7 +2551,10 @@ class BatchPostPage:
                             content=ft.Column([
                                 ft.Text("目标贴吧 / TARGET FORUMS (必填)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.BOLD),
                                 self.forum_select_btn,
-                                self.manual_forum_input,
+                                ft.Row([
+                                    self.local_status_btn,
+                                    self.global_status_btn,
+                                ], spacing=8, wrap=True),
                             ], spacing=8),
                             padding=10, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
@@ -2835,25 +2834,14 @@ class BatchPostPage:
             self.page.update()
             return
 
-        # 获取选中的账号
-        selected_accounts = [cb.data for cb in self.account_pool_column.controls if cb.value]
+        # 获取选中的账号（使用权威数据源而非遍历 UI 控件，避免搜索过滤后不同步）
+        selected_accounts = list(self._selected_account_ids)
         if not selected_accounts:
             self._show_snackbar("请在中间栏至少勾选一个执行账号", "error")
             return
 
-        # 获取选中的本地贴吧
-        selected_forums = [cb.data for cb in self.forum_pool_column.controls if isinstance(cb, ft.Checkbox) and cb.value]
-        
-        # 获取选中的全域轰炸分组并解包成明文吧名
-        if hasattr(self, "global_group_column"):
-            selected_groups = [cb.data for cb in self.global_group_column.controls if isinstance(cb, ft.Checkbox) and cb.value]
-            for g in selected_groups:
-                g_fnames = await self.db.get_target_pools_by_group(g)
-                selected_forums.extend(g_fnames)
-
-        manual_forums = [f.strip() for f in self.manual_forum_input.value.replace("，", ",").split(",") if f.strip()]
-        dialog_forums = getattr(self, "_temp_target_fnames", [])
-        fnames = list(set(selected_forums + manual_forums + dialog_forums))
+        # 合并本地自留区 + 全域轰炸组 (两组独立锁定，仅合并已锁定的)
+        fnames = list(set(self._temp_local_fnames + self._temp_global_fnames))
 
         # Validation
         pending_m = [m for m in self._materials if m.status == "pending"]
@@ -2916,8 +2904,6 @@ class BatchPostPage:
             id=f"TASK_{int(datetime.now().timestamp())}",
             fname=fnames[0],
             fnames=fnames,
-            titles=[],
-            contents=[],
             accounts=selected_accounts,
             strategy=strategy,
             total=int(self.post_count.value),

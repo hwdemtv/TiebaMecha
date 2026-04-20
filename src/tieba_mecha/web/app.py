@@ -306,8 +306,6 @@ class TiebaMechaApp:
                             id=str(t.id),
                             fname=t.fname,
                             fnames=fnames_list,
-                            titles=json.loads(t.titles_json),
-                            contents=json.loads(t.contents_json),
                             accounts=json.loads(t.accounts_json),
                             strategy=real_strategy,
                             pairing_mode=pairing_mode,

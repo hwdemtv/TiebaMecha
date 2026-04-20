@@ -28,6 +28,8 @@ class AccountsPage:
         # 吧库管理相关状态
         self._matrix_stats = []
         self._matrix_search_text = ""
+        self._matrix_selected_fnames: set[str] = set()
+        self._matrix_banned_filter = False  # 封禁筛选开关
         self._active_tab_index = 0
         
         # 存活分析数据
@@ -49,13 +51,23 @@ class AccountsPage:
         self._proxies = await self.db.get_active_proxies()
 
         # 加载全吧库统计
-        self._matrix_stats = await self.db.get_forum_matrix_stats()
+        await self._refresh_matrix_stats()
         
         # 加载存活统计数据
         self._survival_stats = await self.db.get_survival_stats()
         self._survival_by_account = await self.db.get_survival_by_account()
         
         self.refresh_ui()
+
+    async def _refresh_matrix_stats(self):
+        """统一刷新矩阵统计数据（含封禁详情），替代散落各处的单独刷新"""
+        # 自动同步 is_post_target（根据封禁状态和删帖记录自动判定）
+        await self.db.auto_sync_post_target()
+        self._matrix_stats = await self.db.get_forum_matrix_stats()
+        self._banned_forum_details = await self.db.get_banned_forums_detail()
+        self._banned_forum_map: dict[str, list[dict]] = {}
+        for item in self._banned_forum_details:
+            self._banned_forum_map.setdefault(item['fname'], []).append(item)
 
     def refresh_ui(self):
         """刷新 UI"""
@@ -276,7 +288,52 @@ class AccountsPage:
             on_click=lambda e: self._show_follow_forum_dialog(e),
         )
 
+        self.banned_filter_btn = ft.IconButton(
+            icon=icons.FILTER_LIST,
+            tooltip="筛选封禁贴吧",
+            icon_color="onSurfaceVariant",
+            on_click=self._on_toggle_banned_filter,
+        )
+
         self.matrix_header_info = ft.Text("战略贴吧总数: 0 | 矩阵覆盖率: 0%", size=12, color="onSurfaceVariant")
+
+        # 批量操作栏
+        self.matrix_select_all_cb = ft.Checkbox(label="全选", on_change=self._on_matrix_select_all)
+        self.matrix_bulk_target_btn = ft.TextButton(
+            "批量投放火力", icon=icons.GPS_FIXED_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._bulk_matrix_set_target, True),
+            visible=False,
+        )
+        self.matrix_bulk_untarget_btn = ft.TextButton(
+            "批量移除火力", icon=icons.GPS_OFF_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._bulk_matrix_set_target, False),
+            style=ft.ButtonStyle(color="error"),
+            visible=False,
+        )
+        self.matrix_bulk_follow_btn = ft.TextButton(
+            "批量补齐关注", icon=icons.PERSON_ADD_ALT_1_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._bulk_matrix_complement_follow),
+            visible=False,
+        )
+        self.matrix_bulk_unfollow_btn = ft.TextButton(
+            "批量取消关注", icon=icons.HEART_BROKEN,
+            on_click=lambda e: self.page.run_task(self._bulk_matrix_unfollow),
+            style=ft.ButtonStyle(color="error"),
+            visible=False,
+        )
+        self.matrix_bulk_tag_btn = ft.TextButton(
+            "批量修改标签", icon=icons.LABEL_ROUNDED,
+            on_click=self._bulk_matrix_edit_tag,
+            visible=False,
+        )
+        self.matrix_bulk_bar = ft.Row([
+            self.matrix_select_all_cb,
+            self.matrix_bulk_target_btn,
+            self.matrix_bulk_untarget_btn,
+            self.matrix_bulk_follow_btn,
+            self.matrix_bulk_unfollow_btn,
+            self.matrix_bulk_tag_btn,
+        ], spacing=5, wrap=True)
 
         # 列表容器
         self.matrix_list = ft.ListView(
@@ -287,7 +344,8 @@ class AccountsPage:
 
         return ft.Column(
             controls=[
-                ft.Row([search_field, sync_btn, clear_search_btn, follow_btn], spacing=10),
+                ft.Row([search_field, self.banned_filter_btn, sync_btn, clear_search_btn, follow_btn], spacing=10),
+                self.matrix_bulk_bar,
                 self.matrix_header_info,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
                 ft.Container(
@@ -620,6 +678,19 @@ class AccountsPage:
         self._matrix_search_text = e.control.value
         self.refresh_ui()
 
+    def _on_toggle_banned_filter(self, e):
+        """切换封禁贴吧筛选"""
+        self._matrix_banned_filter = not self._matrix_banned_filter
+        if self._matrix_banned_filter:
+            self.banned_filter_btn.icon = icons.FILTER_LIST
+            self.banned_filter_btn.icon_color = "error"
+            self.banned_filter_btn.tooltip = "显示全部贴吧"
+        else:
+            self.banned_filter_btn.icon = icons.FILTER_LIST
+            self.banned_filter_btn.icon_color = "onSurfaceVariant"
+            self.banned_filter_btn.tooltip = "筛选封禁贴吧"
+        self.refresh_ui()
+
     def _on_clear_matrix_search(self, e):
         """清除全域战略吧库搜索"""
         self._matrix_search_text = ""
@@ -643,7 +714,7 @@ class AccountsPage:
             added = await sync_forums_to_db(self.db)
             
             # 重新加载统计数据
-            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            await self._refresh_matrix_stats()
             self.refresh_ui()
             
             self._show_snackbar(f"✅ 全域同步完成！矩阵新增 {added} 个战略支点", "success")
@@ -717,7 +788,7 @@ class AccountsPage:
                     self._show_snackbar(f"ℹ️ {skipped_count} 个已跳过（无需重复关注）", "info")
 
                 # 刷新列表
-                self._matrix_stats = await self.db.get_forum_matrix_stats()
+                await self._refresh_matrix_stats()
                 self.refresh_ui()
 
             except Exception as ex:
@@ -757,7 +828,7 @@ class AccountsPage:
                 self._show_snackbar(f"🏳️ 已从打击名单中移除 '{fname}'", "info")
             
             # 重新加载数据
-            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            await self._refresh_matrix_stats()
             self.refresh_ui()
         except Exception as e:
             self._show_snackbar(f"操作失败: {str(e)}", "error")
@@ -790,11 +861,229 @@ class AccountsPage:
                 self._show_snackbar(f"⚠️ {failed_count} 个账号关注失败", "warning")
             
             # 刷新列表
-            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            await self._refresh_matrix_stats()
             self.refresh_ui()
             
         except Exception as e:
             self._show_snackbar(f"❌ 补齐失败: {str(e)}", "error")
+
+    async def _on_unfollow_forum(self, fname: str):
+        """取消关注：所有账号取关该贴吧"""
+        async def do_unfollow(e):
+            try:
+                self.page.close(dialog)
+                from ...core.batch_post import BatchPostManager
+                pm = BatchPostManager(self.db)
+                await pm.unfollow_forums_bulk([fname])
+                self._show_snackbar(f"✅ 已取消关注 '{fname}'", "success")
+                await self._refresh_matrix_stats()
+                self.refresh_ui()
+            except Exception as ex:
+                self._show_snackbar(f"❌ 取消关注失败: {str(ex)}", "error")
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.HEART_BROKEN, color="error"), ft.Text("确认取消关注？")]),
+            content=ft.Text(f"确定要取消关注 '{fname}' 吗？此操作将让所有账号取关该贴吧，并从战略吧库中移除。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("确认取消", icon=icons.HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
+            ]
+        )
+        self.page.open(dialog)
+
+    # ── 批量操作 ──
+
+    def _on_matrix_item_select(self, e):
+        fname = e.control.data
+        if e.control.value:
+            self._matrix_selected_fnames.add(fname)
+        else:
+            self._matrix_selected_fnames.discard(fname)
+        self._update_matrix_bulk_bar()
+
+    def _on_matrix_select_all(self, e):
+        search_lower = self._matrix_search_text.lower()
+        if e.control.value:
+            for stat in self._matrix_stats:
+                fname = stat['fname']
+                if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
+                    continue
+                self._matrix_selected_fnames.add(fname)
+        else:
+            self._matrix_selected_fnames.clear()
+        self.refresh_ui()
+        self._update_matrix_bulk_bar()
+
+    def _update_matrix_bulk_bar(self):
+        count = len(self._matrix_selected_fnames)
+        has_sel = count > 0
+        self.matrix_bulk_target_btn.visible = has_sel
+        self.matrix_bulk_untarget_btn.visible = has_sel
+        self.matrix_bulk_follow_btn.visible = has_sel
+        self.matrix_bulk_unfollow_btn.visible = has_sel
+        self.matrix_bulk_tag_btn.visible = has_sel
+        if has_sel:
+            self.matrix_bulk_target_btn.text = f"批量投放火力 ({count})"
+            self.matrix_bulk_untarget_btn.text = f"批量移除火力 ({count})"
+            self.matrix_bulk_follow_btn.text = f"批量补齐关注 ({count})"
+            self.matrix_bulk_unfollow_btn.text = f"批量取消关注 ({count})"
+            self.matrix_bulk_tag_btn.text = f"批量修改标签 ({count})"
+        self.page.update()
+
+    async def _bulk_matrix_set_target(self, is_target: bool):
+        """批量设置/取消 Target"""
+        if not self._matrix_selected_fnames: return
+        fnames = list(self._matrix_selected_fnames)
+        count = len(fnames)
+        try:
+            for f in fnames:
+                await self._on_toggle_target(f, is_target)
+            self._show_snackbar(f"✅ 已{'投放' if is_target else '移除'} {count} 个贴吧的火力标记", "success")
+        except Exception as e:
+            self._show_snackbar(f"❌ 批量操作失败: {str(e)}", "error")
+        self._matrix_selected_fnames.clear()
+        self.matrix_select_all_cb.value = False
+        self._update_matrix_bulk_bar()
+        self.refresh_ui()
+
+    async def _bulk_matrix_complement_follow(self):
+        """批量补齐关注"""
+        if not self._matrix_selected_fnames: return
+        fnames = list(self._matrix_selected_fnames)
+        total_success = 0
+        total_failed = 0
+        try:
+            for f in fnames:
+                missing_accounts = await self.db.get_accounts_not_following_forum(f)
+                if not missing_accounts:
+                    continue
+                missing_ids = [acc.id for acc in missing_accounts]
+                from ...core.batch_post import BatchPostManager
+                pm = BatchPostManager(self.db)
+                result = await pm.follow_forums_bulk([f], account_ids=missing_ids)
+                total_success += len(result["success"])
+                total_failed += len(result["failed"])
+            self._show_snackbar(f"✅ 补齐关注完成: 成功 {total_success}, 失败 {total_failed}", "success")
+        except Exception as e:
+            self._show_snackbar(f"❌ 批量补齐失败: {str(e)}", "error")
+        self._matrix_selected_fnames.clear()
+        await self._refresh_matrix_stats()
+        self._update_matrix_bulk_bar()
+        self.refresh_ui()
+
+    async def _bulk_matrix_unfollow(self):
+        """批量取消关注"""
+        if not self._matrix_selected_fnames: return
+        fnames = list(self._matrix_selected_fnames)
+
+        async def do_unfollow(e):
+            try:
+                self.page.close(dialog)
+                from ...core.batch_post import BatchPostManager
+                pm = BatchPostManager(self.db)
+                await pm.unfollow_forums_bulk(fnames)
+                self._show_snackbar(f"✅ 已批量取消关注 {len(fnames)} 个贴吧", "success")
+            except Exception as ex:
+                self._show_snackbar(f"❌ 批量取关失败: {str(ex)}", "error")
+            self._matrix_selected_fnames.clear()
+            await self._refresh_matrix_stats()
+            self._update_matrix_bulk_bar()
+            self.refresh_ui()
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.HEART_BROKEN, color="error"), ft.Text("确认批量取消关注？")]),
+            content=ft.Text(f"确定要取消关注以下 {len(fnames)} 个贴吧吗？所有账号将取关这些贴吧，并从战略吧库中移除。\n\n{', '.join(fnames[:10])}{'...' if len(fnames) > 10 else ''}"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("确认取消", icon=icons.HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
+            ]
+        )
+        self.page.open(dialog)
+
+    def _bulk_matrix_edit_tag(self, e):
+        """批量修改标签"""
+        if not self._matrix_selected_fnames: return
+        fnames = list(self._matrix_selected_fnames)
+        tag_input = ft.TextField(
+            label="所属吧组 / 标签",
+            hint_text="使用英文逗号分隔多个标签 (如: IT,资源,北京)",
+            text_size=13,
+            autofocus=True,
+        )
+
+        async def on_save(_):
+            group = tag_input.value.strip() if tag_input.value else ""
+            await self.db.bulk_update_target_group(fnames, group)
+            self.page.close(dialog)
+            self._matrix_selected_fnames.clear()
+            await self._refresh_matrix_stats()
+            self._update_matrix_bulk_bar()
+            self.refresh_ui()
+            self._show_snackbar(f"🏷️ 已批量更新 {len(fnames)} 个贴吧的标签", "success")
+
+        dialog = ft.AlertDialog(
+            title=ft.Text(f"批量修改标签 ({len(fnames)} 个贴吧)"),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Text(f"将修改: {', '.join(fnames[:8])}{'...' if len(fnames) > 8 else ''}", size=11, color="onSurfaceVariant"),
+                    tag_input,
+                ], tight=True, spacing=10),
+                padding=10,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("保存", on_click=lambda e: self.page.run_task(on_save, e))
+            ]
+        )
+        self.page.open(dialog)
+
+    def _show_safety_detail(self, stat: dict):
+        """显示本土作战自动判定详情"""
+        fname = stat['fname']
+        is_post_target = stat.get('is_post_target', False)
+        is_banned = stat.get('is_banned', False)
+        deleted_count = stat.get('deleted_count', 0)
+        acc_count = stat.get('account_count', 0)
+
+        # 构建判定原因
+        reasons = []
+        if is_banned:
+            # 查找封禁详情
+            ban_items = self._banned_forum_map.get(fname, [])
+            if ban_items:
+                for b in ban_items:
+                    reasons.append(f"🚫 账号 {b['account_name']} 被封禁: {b['ban_reason']}")
+            else:
+                reasons.append("🚫 该贴吧存在被封禁的账号")
+        if deleted_count > 0:
+            reasons.append(f"⚠️ 存在 {deleted_count} 条被吧务删除的帖子记录")
+
+        if is_post_target:
+            result_text = "✅ 本土作战已开启"
+            result_color = "green"
+            detail = "判定依据：该贴吧未被封禁且无被吧务删帖记录，判定为安全。"
+            detail += f"\n\n当前有 {acc_count} 个账号部署在该贴吧。" if acc_count > 0 else "\n\n暂无账号部署。"
+        else:
+            result_text = "❌ 本土作战未开启"
+            result_color = "error"
+            detail = "判定依据：\n" + "\n".join(reasons)
+            detail += "\n\n💡 当封禁解除且删帖记录清除后，将自动恢复为安全状态。"
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED if is_post_target else icons.SHIELD_OUTLINED, color=result_color), ft.Text(f"{fname} — 安全判定")]),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Text(result_text, size=16, weight="bold", color=result_color),
+                    ft.Divider(height=5),
+                    ft.Text(detail, size=13),
+                ], tight=True, spacing=10),
+                padding=5,
+            ),
+            actions=[
+                ft.TextButton("关闭", on_click=lambda _: self.page.close(dialog)),
+            ]
+        )
+        self.page.open(dialog)
 
     def _show_tag_edit_dialog(self, stat: dict):
         """显示修改吧组标签对话框"""
@@ -811,7 +1100,7 @@ class AccountsPage:
             group = tag_input.value.strip() if tag_input.value else ""
             await self.db.bulk_update_target_group([fname], group)
             self.page.close(dialog)
-            self._matrix_stats = await self.db.get_forum_matrix_stats()
+            await self._refresh_matrix_stats()
             self.refresh_ui()
             self._show_snackbar(f"🏷️ '{fname}' 标签已更新", "success")
 
@@ -829,8 +1118,14 @@ class AccountsPage:
         """更新吧库头部统计信息"""
         total = len(self._matrix_stats)
         covered = sum(1 for s in self._matrix_stats if s['account_count'] > 0)
+        banned_count = sum(1 for s in self._matrix_stats if s.get('is_banned'))
         percent = (covered / total * 100) if total > 0 else 0
-        self.matrix_header_info.value = f"战略资源: {total} 个贴吧 | 矩阵实存火力涵盖: {covered} 个 (覆盖率 {percent:.1f}%)"
+        base_info = f"战略资源: {total} 个贴吧 | 矩阵实存火力涵盖: {covered} 个 (覆盖率 {percent:.1f}%)"
+        if banned_count > 0:
+            base_info += f" | 🚫 封禁: {banned_count} 个"
+        if self._matrix_banned_filter:
+            base_info = f"🚫 封禁筛选模式 | 显示 {banned_count} 个被封禁贴吧"
+        self.matrix_header_info.value = base_info
 
     def _build_matrix_items(self) -> list[ft.Control]:
         """构建战略贴吧列表项"""
@@ -841,10 +1136,16 @@ class AccountsPage:
             fname = stat['fname']
             if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
                 continue
+            # 封禁筛选：仅显示被封禁的贴吧
+            if self._matrix_banned_filter and not stat.get('is_banned', False):
+                continue
                 
             acc_count = stat['account_count']
             groups = stat['post_group']
             is_target = stat['is_target']
+            is_post_target = stat.get('is_post_target', False)
+            is_banned = stat.get('is_banned', False)
+            is_selected = fname in self._matrix_selected_fnames
             
             # 分组标签 chips
             group_chips = []
@@ -870,9 +1171,52 @@ class AccountsPage:
                     )
                 )
 
-            item = ft.Container(
-                content=ft.Row(
+            if is_banned:
+                # 构建封禁详情 tooltip
+                banned_items = self._banned_forum_map.get(fname, [])
+                if banned_items:
+                    ban_lines = [f"· {b['account_name']}: {b['ban_reason']}" for b in banned_items]
+                    ban_tooltip = "封禁详情:\n" + "\n".join(ban_lines)
+                else:
+                    ban_tooltip = "该吧已被吧务封禁，禁止发帖"
+                group_chips.insert(0,
+                    ft.Container(
+                        content=ft.Text("封禁", size=9, weight="bold", color="white"),
+                        bgcolor="error",
+                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                        border_radius=4,
+                        tooltip=ban_tooltip,
+                    )
+                )
+
+            # 封禁详情行（仅封禁筛选模式下直接展示）
+            ban_detail_row = None
+            if is_banned and self._matrix_banned_filter and banned_items:
+                ban_detail_row = ft.Column([
+                    ft.Row([
+                        ft.Icon(icons.BLOCK, size=12, color="error"),
+                        ft.Text(f"{b['account_name']}", size=11, weight="bold", color="error"),
+                        ft.Text(f"— {b['ban_reason']}", size=11, color="error", italic=True),
+                    ], spacing=4)
+                    for b in banned_items
+                ], spacing=2)
+
+            if is_post_target and acc_count > 0:
+                group_chips.insert(0,
+                    ft.Container(
+                        content=ft.Text("本土作战", size=9, weight="bold", color="white"),
+                        bgcolor="green",
+                        padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                        border_radius=4,
+                        tooltip="自动判定安全：未封禁且无删帖记录，优先派遣本吧原生号出战"
+                    )
+                )
+
+            # 卡片主体行
+            main_row = ft.Row(
                     controls=[
+                        # 选择框
+                        ft.Checkbox(value=is_selected, data=fname, on_change=self._on_matrix_item_select),
                         # 吧名
                         ft.Column([
                             ft.Text(fname, size=16, weight="bold"),
@@ -907,6 +1251,17 @@ class AccountsPage:
                             padding=5,
                             border=ft.border.only(left=ft.border.BorderSide(1, with_opacity(0.1, "primary"))),
                         ),
+                        # 被删帖数统计
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text(f"{stat.get('deleted_count', 0)}", size=14, weight="bold",
+                                        color="error" if stat.get('deleted_count', 0) > 0 else "onSurfaceVariant"),
+                                ft.Text("被删", size=9, color="onSurfaceVariant")
+                            ], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            width=50,
+                            padding=5,
+                            border=ft.border.only(left=ft.border.BorderSide(1, with_opacity(0.1, "error") if stat.get('deleted_count', 0) > 0 else with_opacity(0.1, "primary"))),
+                        ),
                         # 操作按钮组
                         ft.Row([
                             ft.IconButton(
@@ -922,6 +1277,12 @@ class AccountsPage:
                                 on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, False)
                             ),
                             ft.IconButton(
+                                icon=icons.SHIELD_ROUNDED if is_post_target else icons.SHIELD_OUTLINED,
+                                tooltip="本土作战已开启 (自动判定)" if is_post_target else "本土作战未开启 (点击查看原因)",
+                                icon_color="green" if is_post_target else "error",
+                                on_click=lambda e, s=stat: self._show_safety_detail(s),
+                            ),
+                            ft.IconButton(
                                 icon=icons.LABEL_ROUNDED,
                                 tooltip="修改分组/标签",
                                 icon_color="primary",
@@ -933,10 +1294,24 @@ class AccountsPage:
                                 icon_color="primary",
                                 on_click=lambda e, f=fname: self.page.run_task(self._on_complement_follow, f)
                             ),
+                            ft.IconButton(
+                                icon=icons.HEART_BROKEN,
+                                tooltip="取消关注（所有账号取关该贴吧）",
+                                icon_color="error",
+                                on_click=lambda e, f=fname: self.page.run_task(self._on_unfollow_forum, f)
+                            ),
                         ], spacing=0),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
+                )
+
+            # 组装卡片内容（主行 + 封禁详情行）
+            card_children = [main_row]
+            if ban_detail_row:
+                card_children.append(ban_detail_row)
+
+            item = ft.Container(
+                content=ft.Column(card_children, spacing=4),
                 padding=12,
                 border_radius=10,
                 border=ft.border.all(1, with_opacity(0.1, "primary")),
