@@ -301,15 +301,9 @@ class AccountsPage:
 
         # 批量操作栏
         self.matrix_select_all_cb = ft.Checkbox(label="全选", on_change=self._on_matrix_select_all)
-        self.matrix_bulk_target_btn = ft.TextButton(
-            "批量投放火力", icon=icons.GPS_FIXED_ROUNDED,
-            on_click=lambda e: self.page.run_task(self._bulk_matrix_set_target, True),
-            visible=False,
-        )
-        self.matrix_bulk_untarget_btn = ft.TextButton(
-            "批量移除火力", icon=icons.GPS_OFF_ROUNDED,
-            on_click=lambda e: self.page.run_task(self._bulk_matrix_set_target, False),
-            style=ft.ButtonStyle(color="error"),
+        self.matrix_bulk_toggle_target_btn = ft.TextButton(
+            "批量切换火力", icon=icons.SWAP_HORIZ_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._bulk_matrix_toggle_target),
             visible=False,
         )
         self.matrix_bulk_follow_btn = ft.TextButton(
@@ -330,8 +324,7 @@ class AccountsPage:
         )
         self.matrix_bulk_bar = ft.Row([
             self.matrix_select_all_cb,
-            self.matrix_bulk_target_btn,
-            self.matrix_bulk_untarget_btn,
+            self.matrix_bulk_toggle_target_btn,
             self.matrix_bulk_follow_btn,
             self.matrix_bulk_unfollow_btn,
             self.matrix_bulk_tag_btn,
@@ -919,28 +912,38 @@ class AccountsPage:
     def _update_matrix_bulk_bar(self):
         count = len(self._matrix_selected_fnames)
         has_sel = count > 0
-        self.matrix_bulk_target_btn.visible = has_sel
-        self.matrix_bulk_untarget_btn.visible = has_sel
+        self.matrix_bulk_toggle_target_btn.visible = has_sel
         self.matrix_bulk_follow_btn.visible = has_sel
         self.matrix_bulk_unfollow_btn.visible = has_sel
         self.matrix_bulk_tag_btn.visible = has_sel
         if has_sel:
-            self.matrix_bulk_target_btn.text = f"批量投放火力 ({count})"
-            self.matrix_bulk_untarget_btn.text = f"批量移除火力 ({count})"
+            self.matrix_bulk_toggle_target_btn.text = f"批量切换火力 ({count})"
             self.matrix_bulk_follow_btn.text = f"批量补齐关注 ({count})"
             self.matrix_bulk_unfollow_btn.text = f"批量取消关注 ({count})"
             self.matrix_bulk_tag_btn.text = f"批量修改标签 ({count})"
         self.page.update()
 
-    async def _bulk_matrix_set_target(self, is_target: bool):
-        """批量设置/取消 Target"""
+    async def _bulk_matrix_toggle_target(self):
+        """批量切换 Target（已投放→移除，未投放→投放）"""
         if not self._matrix_selected_fnames: return
         fnames = list(self._matrix_selected_fnames)
         count = len(fnames)
         try:
+            # 获取当前选中贴吧的 target 状态
+            target_fnames = set()
             for f in fnames:
-                await self._on_toggle_target(f, is_target)
-            self._show_snackbar(f"✅ 已{'投放' if is_target else '移除'} {count} 个贴吧的火力标记", "success")
+                stat = self._matrix_stats_map.get(f, {})
+                if stat.get('is_target'):
+                    target_fnames.add(f)
+            non_target_fnames = set(fnames) - target_fnames
+
+            # 投放未投放的
+            for f in non_target_fnames:
+                await self._on_toggle_target(f, True)
+            # 移除已投放的
+            for f in target_fnames:
+                await self._on_toggle_target(f, False)
+            self._show_snackbar(f"✅ 已切换 {count} 个贴吧的火力标记（投放 {len(non_target_fnames)}，移除 {len(target_fnames)}）", "success")
         except Exception as e:
             self._show_snackbar(f"❌ 批量操作失败: {str(e)}", "error")
         self._matrix_selected_fnames.clear()
@@ -1267,16 +1270,10 @@ class AccountsPage:
                         # 操作按钮组
                         ft.Row([
                             ft.IconButton(
-                                icon=icons.GPS_FIXED_ROUNDED,
-                                tooltip="投放火力 (设为 Target)",
-                                icon_color="primary" if not is_target else "onSurfaceVariant",
-                                on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, True)
-                            ),
-                            ft.IconButton(
-                                icon=icons.GPS_OFF_ROUNDED,
-                                tooltip="移除火力 (取消 Target)",
-                                icon_color="error" if is_target else "onSurfaceVariant",
-                                on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, False)
+                                icon=icons.GPS_FIXED_ROUNDED if not is_target else icons.GPS_OFF_ROUNDED,
+                                tooltip="已锁定为火力目标 (点击移除)" if is_target else "投放火力 (设为 Target)",
+                                icon_color="primary" if is_target else "onSurfaceVariant",
+                                on_click=lambda e, f=fname: self.page.run_task(self._on_toggle_target, f, not is_target)
                             ),
                             ft.IconButton(
                                 icon=icons.SHIELD_ROUNDED if is_post_target else icons.SHIELD_OUTLINED,
