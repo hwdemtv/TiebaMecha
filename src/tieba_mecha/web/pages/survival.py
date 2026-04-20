@@ -9,6 +9,24 @@ from ..components.icons import (
     DELETE_OUTLINE
 )
 
+# 删帖原因英文代码 → 中文友好显示
+_DEATH_REASON_MAP = {
+    "deleted_by_system": "🤖 系统风控删除",
+    "deleted_by_mod": "👮 吧务手动删除",
+    "deleted_by_user": "👤 用户自删",
+    "deleted_unknown": "❓ 帖子已删除（原因未明）",
+    "banned_by_mod": "👮 吧务删除（触发封禁）",
+    "auto_removed": "🗑️ 帖子不存在/已过期",
+    "captcha_required": "🔐 验证码拦截",
+    "error": "⚠️ 检测异常",
+    "unknown_error": "❓ 未知错误",
+}
+
+
+def _death_reason_display(reason: str) -> str:
+    """将 death_reason 代码转为中文友好显示"""
+    return _DEATH_REASON_MAP.get(reason, reason)
+
 
 class SurvivalPage:
     """存活分析页面"""
@@ -46,7 +64,9 @@ class SurvivalPage:
             self._fname_options = [ft.dropdown.Option(f, f) for f in fnames]
             # 获取阵亡原因列表
             reasons = await self.db.get_distinct_death_reasons()
-            self._death_reason_options = [ft.dropdown.Option(r, r) for r in reasons]
+            self._death_reason_options = [
+                ft.dropdown.Option(r, _death_reason_display(r)) for r in reasons
+            ]
             await self._load_page(1)
         except Exception as e:
             import traceback
@@ -315,7 +335,8 @@ class SurvivalPage:
 
         # 阵亡原因
         if m.survival_status == "dead" and m.death_reason:
-            meta_items.append(ft.Text(f"原因: {m.death_reason}", size=11, color="error", italic=True))
+            reason_text = _death_reason_display(m.death_reason)
+            meta_items.append(ft.Text(f"原因: {reason_text}", size=11, color="error", italic=True))
 
         bottom_row = ft.Row(meta_items, spacing=12, wrap=True)
 
@@ -385,7 +406,8 @@ class SurvivalPage:
 
         # 阵亡原因
         if m.survival_status == "dead" and m.death_reason:
-            detail_items.append(ft.Row([ft.Text("阵亡原因:", size=12, weight=ft.FontWeight.BOLD, color="error"), ft.Text(m.death_reason, size=12, color="error", expand=True, selectable=True)]))
+            reason_text = _death_reason_display(m.death_reason)
+            detail_items.append(ft.Row([ft.Text("阵亡原因:", size=12, weight=ft.FontWeight.BOLD, color="error"), ft.Text(reason_text, size=12, color="error", expand=True, selectable=True)]))
 
         # 最后检测时间
         if m.last_checked_at:
