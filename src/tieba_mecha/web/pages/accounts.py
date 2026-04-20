@@ -63,6 +63,8 @@ class AccountsPage:
         """统一刷新矩阵统计数据（含封禁详情），替代散落各处的单独刷新"""
         # 自动同步 is_post_target（根据封禁状态和删帖记录自动判定）
         await self.db.auto_sync_post_target()
+        # 回填历史击穿数（仅补 success_count=0 的记录，幂等）
+        await self.db.backfill_success_count()
         self._matrix_stats = await self.db.get_forum_matrix_stats()
         self._banned_forum_details = await self.db.get_banned_forums_detail()
         self._banned_forum_map: dict[str, list[dict]] = {}
