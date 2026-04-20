@@ -1877,7 +1877,8 @@ class Database:
 
             if is_success:
                 pool.fail_count = 0  # 成功 → 清零连续失败
-                logger.info(f"[靶场] {fname}: 发帖成功, fail_count 归零")
+                pool.success_count = (pool.success_count or 0) + 1  # 实时累加命中数
+                logger.info(f"[靶场] {fname}: 发帖成功, fail_count 归零, 击穿数={pool.success_count}")
             else:
                 pool.fail_count = (pool.fail_count or 0) + 1
                 pool.last_fail_reason = error_reason
