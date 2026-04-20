@@ -1779,8 +1779,11 @@ class BatchPostPage:
                     if keyword and keyword.lower() not in fn.lower(): continue
                     label_text = f"🛡️ {fn} [安全]" if is_safe else fn
                     item_color = "green" if is_safe else "onSurface"
-                    # 之前锁定过的贴吧按锁定状态；未锁定过的贴吧按本地作战状态默认（安全→选，不安全→不选）
-                    is_checked = (fn in local_selected) if (fn in local_selected) else is_safe
+                    # 之前锁定过（在 local_selected 中）→ 选中；未锁定过 → 按本地作战状态默认（安全→选，不安全→不选）
+                    if fn in local_selected:
+                        is_checked = True
+                    else:
+                        is_checked = is_safe
                     local_container.controls.append(
                         ft.Checkbox(
                             label=label_text, value=is_checked, data=fn, on_change=on_local_item_check,
