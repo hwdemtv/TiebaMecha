@@ -1622,8 +1622,13 @@ class BatchPostPage:
                         label_style=ft.TextStyle(color="onSurface")
                     )
                 )
-            self.page.update()
+            try:
+                forums_list_container.update()
+            except:
+                pass
 
+        search_field.on_change = lambda e: render_forums(e.control.value)
+        
         def on_select_all_change(e):
             """安全配置弹窗的全选处理"""
             select_all = e.control.value
@@ -1636,11 +1641,13 @@ class BatchPostPage:
                         if f['fid'] == cb.data:
                             f['is_post_target'] = select_all
                             break
-            forums_list_container.update()
+            try:
+                forums_list_container.update()
+            except:
+                pass
             self._show_snackbar(f"已批量{'开启' if select_all else '关闭'}安全权限", "info")
 
         select_all_cb.on_change = on_select_all_change
-        search_field.on_change = lambda e: render_forums(e.control.value)
 
         async def on_lock_safety(_):
             """锁定安全配置，返回火力配置阶段"""
@@ -1677,9 +1684,8 @@ class BatchPostPage:
             ],
         )
         
-        render_forums()
         self.page.open(safety_dialog)
-
+        render_forums() # 先开弹窗，后执行包含 update() 的渲染
     async def _open_firepower_dialog(self, pre_selected_fnames: set):
         """[火力配置主页面] 配置火力抛射靶场"""
         
@@ -1758,7 +1764,10 @@ class BatchPostPage:
                             label_style=ft.TextStyle(color=item_color, size=11, weight=ft.FontWeight.W_500 if is_safe else None)
                         )
                     )
-            self.page.update()
+            try:
+                forums_container.update()
+            except:
+                pass
 
         def render_groups():
             groups_container.controls.clear()
@@ -1775,10 +1784,10 @@ class BatchPostPage:
                             fill_color="primary"
                         )
                     )
-            groups_container.update()
-
-        render_local_list()
-        render_groups()
+            try:
+                groups_container.update()
+            except:
+                pass
 
         search_field.on_change = lambda e: render_local_list(e.control.value)
         
@@ -1793,7 +1802,10 @@ class BatchPostPage:
                         final_selected.add(fn)
                     else:
                         final_selected.discard(fn)
-            forums_container.update()
+            try:
+                forums_container.update()
+            except:
+                pass
         
         select_all_cb.on_change = on_select_all_change
         
@@ -1936,9 +1948,10 @@ class BatchPostPage:
             ],
         )
         
-        render_local_list()
+        # [关键修复] 先开弹窗，后执行渲染逻辑
         self.page.open(fire_dialog)
-
+        render_local_list()
+        render_groups()
     async def _on_shortlink_search_change(self, e):
         self._search_keyword = e.control.value.lower()
         await self._render_filtered_links()
