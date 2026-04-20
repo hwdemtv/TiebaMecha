@@ -93,10 +93,9 @@ async def do_batch_post_tasks():
             id=str(task.id),
             fname=task.fname,
             fnames=json.loads(task.fnames_json),
-            titles=[], # 新版引擎从 DB 读，这里传空即可
-            contents=[],
             accounts=json.loads(task.accounts_json),
             strategy=task.strategy.split(":")[0] if ":" in task.strategy else task.strategy,
+            pairing_mode=task.strategy.split(":")[1] if ":" in task.strategy else "random",
             delay_min=task.delay_min,
             delay_max=task.delay_max,
             use_ai=task.use_ai,

@@ -1334,8 +1334,8 @@ class Database:
                 if posted_time is not None:
                     m.posted_time = posted_time
                 
-                # [修复] 状态重置为 pending 或重新发送成功时，清空自顶计数与记录
-                if status in ("pending", "success"):
+                # [修复] 状态重置为 pending 时清空自顶计数与记录；成功发帖时保留历史自顶数据
+                if status == "pending":
                     m.bump_count = 0
                     m.last_bumped_at = None
                 
@@ -1346,13 +1346,41 @@ class Database:
                 await session.commit()
 
     async def update_material_survival_status(self, material_id: int, status: str, death_reason: str = "") -> None:
-        """更新并持久化物料的存活探测状态"""
+        """更新并持久化物料的存活探测状态，并联动标记删帖贴吧"""
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
             if m:
                 m.survival_status = status
                 m.death_reason = death_reason
                 m.last_checked_at = datetime.now()
+
+                # 联动标记：帖子被吧务删除时，标记该账号在该贴吧为封禁状态
+                if status == "dead" and death_reason == "banned_by_mod" and m.posted_account_id and m.posted_fname:
+                    # Forum 已在文件顶部导入
+                    forum = await session.execute(
+                        select(Forum).where(
+                            Forum.account_id == m.posted_account_id,
+                            Forum.fname == m.posted_fname
+                        )
+                    )
+                    forum_obj = forum.scalar_one_or_none()
+                    if forum_obj:
+                        if not forum_obj.is_banned:
+                            forum_obj.is_banned = True
+                            forum_obj.ban_reason = "存活探测：帖子被吧务删除"
+                            forum_obj.is_post_target = False
+                    else:
+                        # Forum 记录不存在（可能未关注记录），创建一条封禁记录
+                        import random
+                        session.add(Forum(
+                            fid=random.randint(1, 2**31 - 1),
+                            fname=m.posted_fname,
+                            account_id=m.posted_account_id,
+                            is_banned=True,
+                            ban_reason="存活探测：帖子被吧务删除",
+                            is_post_target=False,
+                        ))
+
                 await session.commit()
 
     async def update_material_bump(self, material_id: int) -> None:
@@ -1409,8 +1437,64 @@ class Database:
 
     # ========== Forum Targets & Global Target Pool ==========
 
+    async def auto_sync_post_target(self) -> int:
+        """根据 is_banned 和 deleted_count 自动同步 is_post_target 字段。
+        
+        自动判定规则：
+        - 安全 (is_post_target=True): 未被封禁 且 无被吧务删帖记录
+        - 不安全 (is_post_target=False): 被封禁 或 有被吧务删帖记录
+        
+        Returns: 更新的记录数
+        """
+        from sqlalchemy import func, update as sa_update
+        async with self.async_session() as session:
+            # 获取有被吧务删帖记录的贴吧名集合
+            dead_stmt = (
+                select(MaterialPool.posted_fname)
+                .where(
+                    MaterialPool.survival_status == "dead",
+                    MaterialPool.death_reason == "banned_by_mod",
+                    MaterialPool.posted_fname.isnot(None),
+                    MaterialPool.posted_fname != "",
+                )
+                .distinct()
+            )
+            dead_result = await session.execute(dead_stmt)
+            deleted_fnames = {row.posted_fname for row in dead_result.all()}
+            
+            updated = 0
+            # 1. 封禁的贴吧 → is_post_target=False
+            ban_result = await session.execute(
+                sa_update(Forum)
+                .where(Forum.is_banned == True, Forum.is_post_target == True)
+                .values(is_post_target=False)
+            )
+            updated += ban_result.rowcount
+            
+            # 2. 有被删帖记录的贴吧 → is_post_target=False
+            if deleted_fnames:
+                del_result = await session.execute(
+                    sa_update(Forum)
+                    .where(Forum.fname.in_(deleted_fnames), Forum.is_post_target == True, Forum.is_banned == False)
+                    .values(is_post_target=False)
+                )
+                updated += del_result.rowcount
+            
+            # 3. 未被封禁且无删帖记录的贴吧 → is_post_target=True
+            safe_stmt = sa_update(Forum).where(
+                Forum.is_banned == False,
+                Forum.is_post_target == False,
+            )
+            if deleted_fnames:
+                safe_stmt = safe_stmt.where(Forum.fname.notin_(deleted_fnames))
+            safe_result = await session.execute(safe_stmt.values(is_post_target=True))
+            updated += safe_result.rowcount
+            
+            await session.commit()
+            return updated
+
     async def get_native_post_targets(self, account_id: int | None = None) -> list[str]:
-        """获取已标记为 is_post_target=True 且未被封禁的本机安全贴吧名池"""
+        """获取已标记为 is_post_target=True 且未被封禁的本机安全贴吧名池（自动判定）"""
         async with self.async_session() as session:
             stmt = select(Forum.fname).where(
                 Forum.is_post_target == True,
@@ -1425,7 +1509,7 @@ class Database:
         """
         获取矩阵全局吧库统计数据。
         汇总所有账号关注的贴吧，并补充 TargetPool 中的吧组/标签信息。
-        返回格式: [{'fname', 'account_count', 'account_names', 'post_group', 'is_target', 'success_count'}]
+        返回格式: [{'fname', 'account_count', 'account_names', 'post_group', 'is_target', 'is_post_target', 'success_count'}]
         """
         from sqlalchemy import func
         async with self.async_session() as session:
@@ -1435,7 +1519,9 @@ class Database:
                 select(
                     Forum.fname,
                     func.count(Forum.account_id).label("account_count"),
-                    func.group_concat(Account.name).label("account_names")
+                    func.group_concat(Account.name).label("account_names"),
+                    func.max(Forum.is_post_target).label("is_post_target"),
+                    func.max(Forum.is_banned).label("is_banned"),
                 )
                 .join(Account, Forum.account_id == Account.id)
                 .group_by(Forum.fname)
@@ -1449,6 +1535,23 @@ class Database:
             target_result = await session.execute(target_stmt)
             target_map = {t.fname: t for t in target_result.scalars().all()}
             
+            # 2.5 获取每个贴吧的被删帖数量（death_reason = banned_by_mod）
+            dead_stmt = (
+                select(
+                    MaterialPool.posted_fname,
+                    func.count(MaterialPool.id).label("deleted_count"),
+                )
+                .where(
+                    MaterialPool.survival_status == "dead",
+                    MaterialPool.death_reason == "banned_by_mod",
+                    MaterialPool.posted_fname.isnot(None),
+                    MaterialPool.posted_fname != "",
+                )
+                .group_by(MaterialPool.posted_fname)
+            )
+            dead_result = await session.execute(dead_stmt)
+            deleted_count_map = {row.posted_fname: row.deleted_count for row in dead_result.all()}
+            
             # 3. 合并数据
             stats_list = []
             for row in forum_rows:
@@ -1461,6 +1564,9 @@ class Database:
                     "account_names": row.account_names,
                     "post_group": target_info.post_group if target_info else "",
                     "is_target": target_info is not None,
+                    "is_post_target": bool(row.is_post_target),
+                    "is_banned": bool(row.is_banned),
+                    "deleted_count": deleted_count_map.get(fname, 0),
                     "success_count": target_info.success_count if target_info else 0,
                     "is_active": target_info.is_active if target_info else True
                 })
@@ -1475,12 +1581,40 @@ class Database:
                         "account_names": "",
                         "post_group": target.post_group,
                         "is_target": True,
+                        "is_post_target": False,
+                        "is_banned": False,
+                        "deleted_count": deleted_count_map.get(fname, 0),
                         "success_count": target.success_count,
                         "is_active": target.is_active
                     })
             
             # 按兵力部署多少排序
             return sorted(stats_list, key=lambda x: x["account_count"], reverse=True)
+
+    async def get_banned_forums_detail(self) -> list[dict]:
+        """
+        获取所有被封禁的贴吧详情（含封禁原因和关联账号）。
+        用于矩阵视图和封禁列表展示。
+        Returns: [{'fname', 'account_id', 'account_name', 'ban_reason', 'is_banned'}]
+        """
+        async with self.async_session() as session:
+            stmt = (
+                select(Forum.fname, Forum.account_id, Account.name, Forum.ban_reason, Forum.is_banned)
+                .join(Account, Forum.account_id == Account.id)
+                .where(Forum.is_banned == True)
+                .order_by(Forum.fname)
+            )
+            result = await session.execute(stmt)
+            return [
+                {
+                    "fname": row.fname,
+                    "account_id": row.account_id,
+                    "account_name": row.name,
+                    "ban_reason": row.ban_reason or "未记录",
+                    "is_banned": row.is_banned,
+                }
+                for row in result.all()
+            ]
 
     async def upsert_target_pools(self, fnames: list[str], post_group: str = "") -> int:
         """将若干吧名批量加入 TargetPool (已存在则保留原分组)。返回新增的数量。"""
