@@ -1779,11 +1779,9 @@ class BatchPostPage:
                     if keyword and keyword.lower() not in fn.lower(): continue
                     label_text = f"🛡️ {fn} [安全]" if is_safe else fn
                     item_color = "green" if is_safe else "onSurface"
-                    # 之前锁定过（在 local_selected 中）→ 选中；未锁定过 → 按本地作战状态默认（安全→选，不安全→不选）
-                    if fn in local_selected:
-                        is_checked = True
-                    else:
-                        is_checked = is_safe
+                    # 默认选中规则：有[安全]标识的默认选中，没有的不选中
+                    # （local_selected 仅用于记录用户手动勾选的状态，不影响默认值）
+                    is_checked = is_safe
                     local_container.controls.append(
                         ft.Checkbox(
                             label=label_text, value=is_checked, data=fn, on_change=on_local_item_check,
