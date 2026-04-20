@@ -1056,15 +1056,18 @@ class AccountsPage:
         self.page.open(dialog)
 
     async def _bulk_matrix_clear_target(self):
-        """从靶场池中移除选中的贴吧（不取消关注）"""
+        """从靶场池中移除选中的贴吧（不取消关注），同时清理Forum表残留"""
         if not self._matrix_selected_fnames: return
         fnames = list(self._matrix_selected_fnames)
 
         async def do_clear(e):
             try:
                 self.page.close(dialog)
+                # 1. 从靶场池移除
                 removed = await self.db.delete_target_pool_by_fnames(fnames)
-                self._show_snackbar(f"✅ 已从靶场移除 {removed} 个贴吧", "success")
+                # 2. 清理 Forum 表中残留的关注记录（0账号部署的贴吧）
+                forum_removed = await self.db.delete_forum_memberships_globally(fnames)
+                self._show_snackbar(f"✅ 已从靶场移除 {removed} 条，清理关注记录 {forum_removed} 条", "success")
             except Exception as ex:
                 self._show_snackbar(f"❌ 清理靶场失败: {str(ex)}", "error")
             self._matrix_selected_fnames.clear()
