@@ -845,20 +845,27 @@ class AccountsPage:
             fname: 贴吧名称
             is_currently_target: 当前是否已是火力打击目标（True=已在靶场，False=不在靶场）
         """
+        print(f"[DEBUG] _on_toggle_target 被调用: fname={fname}, is_currently_target={is_currently_target}")
         try:
             if is_currently_target:
                 # 已在靶场中，点击要移除
-                await self.db.delete_target_pool_by_fnames([fname])
+                print(f"[DEBUG] 正在从靶场移除: {fname}")
+                removed = await self.db.delete_target_pool_by_fnames([fname])
+                print(f"[DEBUG] 已移除 {removed} 条记录")
                 self._show_snackbar(f"🏳️ 已从打击名单中移除 '{fname}'", "info")
             else:
                 # 不在靶场中，点击要添加
+                print(f"[DEBUG] 正在添加到靶场: {fname}")
                 await self.db.upsert_target_pools([fname], "未分类")
+                print(f"[DEBUG] 添加完成")
                 self._show_snackbar(f"🎯 已将 '{fname}' 锁定为火力打击目标", "success")
             
             # 重新加载数据
+            print(f"[DEBUG] 正在刷新数据...")
             await self._refresh_matrix_stats()
             self.refresh_ui()
             self.page.update()
+            print(f"[DEBUG] 刷新完成")
         except Exception as e:
             import traceback
             traceback.print_exc()
