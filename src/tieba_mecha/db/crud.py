@@ -1347,7 +1347,14 @@ class Database:
                 await session.commit()
 
     async def update_material_survival_status(self, material_id: int, status: str, death_reason: str = "") -> None:
-        """更新并持久化物料的存活探测状态，并联动标记删帖贴吧"""
+        """更新物料的存活探测状态，并联动更新 Forum 封禁标记。
+        
+        联动规则：
+        - 帖子阵亡 (dead) + 被删原因 (banned_by_mod/deleted_by_system/deleted_by_mod)
+          → 标记该账号在该贴吧 Forum.is_banned=True, is_post_target=False
+        - 仅更新 Forum，不更新 TargetPool（TargetPool 的 fail_count 仅由发帖环节维护，
+          避免发帖失败 + 存活检测重复计数）
+        """
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
             if m:
@@ -1356,8 +1363,6 @@ class Database:
                 m.last_checked_at = datetime.now()
 
                 # 联动标记：帖子被删除时，标记该账号在该贴吧为封禁/风控状态
-                # banned_by_mod: 吧务手动删除 → 标记封禁
-                # deleted_by_system: 系统风控删除 → 标记风控（同样影响本土作战许可）
                 ban_reason_map = {
                     "banned_by_mod": "存活探测：帖子被吧务删除",
                     "deleted_by_system": "存活探测：帖子被系统风控删除",
@@ -1501,11 +1506,16 @@ class Database:
             return updated
 
     async def backfill_success_count(self) -> int:
-        """回填 TargetPool.success_count：根据 BatchPostLog 历史成功记录统计每个贴吧的击穿数。
-        仅在 success_count=0 的记录上回填，避免覆盖已有数据。Returns: 更新的记录数"""
+        """从 BatchPostLog 实时统计击穿数，同步到 TargetPool.success_count。
+        
+        设计原则：success_count 的唯一数据来源，每次调用都从日志重新统计，
+        确保 success_count 与 BatchPostLog 始终一致，避免手动递增导致的计数问题。
+        
+        Returns: 更新的记录数
+        """
         from sqlalchemy import func
         async with self.async_session() as session:
-            # 统计每个 fname 的成功发帖次数
+            # 1. 统计每个 fname 的成功发帖次数
             success_stmt = (
                 select(BatchPostLog.fname, func.count(BatchPostLog.id).label("cnt"))
                 .where(BatchPostLog.status == "success")
@@ -1514,30 +1524,24 @@ class Database:
             result = await session.execute(success_stmt)
             success_map = {row.fname: row.cnt for row in result.all()}
 
-            logger.info(f"[回填] BatchPostLog 中有 {len(success_map)} 个吧存在成功记录: {list(success_map.keys())[:10]}")
+            logger.info(f"[击穿同步] BatchPostLog 中有 {len(success_map)} 个吧存在成功记录")
 
-            if not success_map:
-                return 0
-
-            # 查看 target_pool 中有多少记录
+            # 2. 获取当前 target_pool 状态
             pool_stmt = select(TargetPool.fname, TargetPool.success_count)
             pool_result = await session.execute(pool_stmt)
             pool_map = {row.fname: row.success_count for row in pool_result.all()}
-            logger.info(f"[回填] target_pool 中有 {len(pool_map)} 个吧，其中 success_count=0 的有 {sum(1 for v in pool_map.values() if v == 0)} 个")
 
             updated = 0
+
+            # 3. 更新已有记录的 success_count（以日志统计值为准）
             for fname, cnt in success_map.items():
                 if fname not in pool_map:
-                    # 自动补全缺失的 TargetPool 记录 (Upsert 逻辑)
-                    logger.info(f"[回填] fname='{fname}' 不在 target_pool 中，正在自动创建并回填击穿数")
-                    new_pool = TargetPool(fname=fname, success_count=cnt)
-                    session.add(new_pool)
+                    # 自动补全缺失的 TargetPool 记录
+                    logger.info(f"[击穿同步] fname='{fname}' 不在 target_pool 中，自动创建")
+                    session.add(TargetPool(fname=fname, success_count=cnt))
                     updated += 1
-                    continue
-                
-                # 即使 success_count 不为 0，如果日志中的统计值更大，也进行同步
-                current_cnt = pool_map.get(fname, 0)
-                if cnt > current_cnt:
+                elif cnt != pool_map.get(fname, 0):
+                    # 日志统计值与当前值不一致时同步
                     r = await session.execute(
                         update(TargetPool)
                         .where(TargetPool.fname == fname)
@@ -1547,7 +1551,7 @@ class Database:
 
             if updated > 0:
                 await session.commit()
-            logger.info(f"[回填] 实际同步/回填了 {updated} 条靶场统计记录")
+            logger.info(f"[击穿同步] 同步了 {updated} 条靶场击穿数记录")
             return updated
 
     async def get_native_post_targets(self, account_id: int | None = None) -> list[str]:
@@ -1839,29 +1843,34 @@ class Database:
             return result.scalars().all()
 
     async def update_target_pool_status(self, fname: str, is_success: bool, error_reason: str = "") -> None:
-        """记录靶场投递结果并发动熔断。
-        如果 fname 不在 target_pool 中，自动创建一条记录（懒初始化）。"""
+        """记录靶场投递结果：仅维护 fail_count 和熔断逻辑。
+        
+        设计原则：
+        - success_count: 由 backfill_success_count() 从 BatchPostLog 实时统计，不在此手动递增
+        - fail_count: 记录连续失败次数，成功时清零，≥3 次触发熔断 (is_active=False)
+        - 懒初始化：fname 不在 target_pool 中时自动创建记录
+        
+        调用场景：
+        - 发帖成功 → is_success=True, fail_count 归零
+        - 发帖失败 → is_success=False, fail_count 递增
+        - 发射检测到吧封 → is_success=False
+        """
         async with self.async_session() as session:
             result = await session.execute(select(TargetPool).where(TargetPool.fname == fname))
             pool = result.scalar()
             if not pool:
-                # 懒初始化：如果发帖的贴吧不在靶场池中，自动创建
-                logger.info(f"[击穿数] fname='{fname}' 不在 target_pool 中，自动创建")
+                logger.info(f"[靶场] fname='{fname}' 不在 target_pool 中，自动创建")
                 pool = TargetPool(fname=fname)
                 session.add(pool)
-                await session.flush()  # 获取 pool.id
+                await session.flush()
 
             if is_success:
-                # 使用 SQL 表达式递增，避免 ORM 过期问题
-                new_count = pool.success_count + 1
-                pool.success_count = new_count
-                pool.fail_count = 0  # 恢复生命值
-                logger.info(f"[击穿数] {fname}: {new_count - 1} → {new_count}")
+                pool.fail_count = 0  # 成功 → 清零连续失败
+                logger.info(f"[靶场] {fname}: 发帖成功, fail_count 归零")
             else:
                 pool.fail_count = (pool.fail_count or 0) + 1
                 pool.last_fail_reason = error_reason
-                logger.info(f"[击穿数] {fname}: fail_count={pool.fail_count}, reason={error_reason}")
-                # 连续被封禁阈值，触发熔断
+                logger.info(f"[靶场] {fname}: fail_count={pool.fail_count}, reason={error_reason}")
                 if pool.fail_count >= 3:
                     pool.is_active = False
 
