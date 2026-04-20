@@ -893,28 +893,22 @@ class BatchPostPage:
         self._survival_cache[tid] = "checking"
         await self.load_data()
         
-        # 2. 执行网络探测
-        is_alive = False
+        # 2. 执行网络探测（使用精细化的 check_post_survival）
+        from ...core.post import check_post_survival
         try:
-            import aiotieba
-            async with aiotieba.Client() as client:
-                res = await client.get_posts(tid)
-                # 存活特征：返回了有效的 fid
-                if res and res.forum and res.forum.fid > 0:
-                    is_alive = True
-        except Exception as ex:
-            pass # 请求抛出异常一样判定为不存活
+            final_status, death_reason = await check_post_survival(tid)
+        except Exception:
+            final_status, death_reason = "dead", "error"
             
         # 3. 结果写入缓存并持久化到数据库
-        final_status = "alive" if is_alive else "dead"
         self._survival_cache[tid] = final_status
         
         # 寻找对应的物料ID进行持久化
         mid = next((m.id for m in self._materials if m.posted_tid == tid), None)
         if mid:
-            await self.db.update_material_survival_status(mid, final_status)
+            await self.db.update_material_survival_status(mid, final_status, death_reason)
 
-        if is_alive:
+        is_alive = (final_status == "alive")
             self._show_snackbar("响应成功：贴子目前健康正常开放访问", "success")
         else:
             self._show_snackbar("探测失败：贴子异常或已被抽除", "error")
@@ -957,41 +951,14 @@ class BatchPostPage:
         captcha_detected = False
         
         async def check_single_material(m) -> tuple[str, str, str]:
-            """检测单个物料的存活状态"""
-            from ...db.models import MaterialPool
+            """检测单个物料的存活状态（复用精细化检测逻辑）"""
+            from ...core.post import check_post_survival
             async with semaphore:
                 tid = m.posted_tid
-                status = "dead"
-                reason = "error"
-                
                 try:
-                    import aiotieba
-                    async with aiotieba.Client() as client:
-                        res = await client.get_posts(tid)
-                        
-                        # 检测验证码拦截
-                        if res and hasattr(res, 'text') and '验证码' in str(res.text or ''):
-                            return tid, "dead", "captcha_required"
-                        
-                        if res and res.forum and res.forum.fid > 0:
-                            # 增强判断：检查帖子基本信息完整性
-                            if res.thread and res.thread.reply_num is not None:
-                                return tid, "alive", ""
-                            if res.thread and res.thread.title:
-                                return tid, "alive", ""
-                            return tid, "alive", ""
-                        else:
-                            return tid, "dead", "unknown_error"
-                except Exception as ex:
-                    error_msg = str(ex).lower()
-                    if "captcha" in error_msg or "验证码" in str(ex):
-                        return tid, "dead", "captcha_required"
-                    elif "deleted" in error_msg or "removed" in error_msg:
-                        return tid, "dead", "deleted_by_user"
-                    elif "banned" in error_msg or "blocked" in error_msg:
-                        return tid, "dead", "banned_by_mod"
-                    elif "not found" in error_msg or "404" in error_msg:
-                        return tid, "dead", "auto_removed"
+                    status, reason = await check_post_survival(tid)
+                    return tid, status, reason
+                except Exception:
                     return tid, "dead", "error"
                 finally:
                     # 限速：每次请求间隔0.5秒
@@ -1009,13 +976,13 @@ class BatchPostPage:
                     # 异常处理
                     tid = targets[i].posted_tid
                     self._survival_cache[tid] = "dead"
-                    await self.db.update_material_survival_status(targets[i].id, "dead")
+                    await self.db.update_material_survival_status(targets[i].id, "dead", "error")
                     dead_count += 1
                     self._add_log(f"⚠️ [错误] {targets[i].posted_fname} | TID:{tid} | {str(result)}", "error")
                 else:
                     tid, status, reason = result
                     self._survival_cache[tid] = status
-                    await self.db.update_material_survival_status(targets[i].id, status)
+                    await self.db.update_material_survival_status(targets[i].id, status, reason)
                     
                     if status == "alive":
                         alive_count += 1

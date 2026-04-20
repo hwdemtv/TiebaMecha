@@ -1134,6 +1134,7 @@ class BatchPostManager:
                 if "3250004" in err_str:
                     # 标记位熔断：不再删除记录，而是设为封禁并停止发帖许可
                     await self.db.mark_forum_banned(account_id, fname, reason="回帖触发吧务封禁 (3250004)")
+                    await self.db.update_target_pool_status(fname, is_success=False, error_reason="回帖触发吧务封禁")
                     try:
                         await client.unfollow_forum(fname)
                     except Exception as ue:

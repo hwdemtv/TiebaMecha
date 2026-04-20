@@ -203,6 +203,7 @@ async def sign_forum(db: Database, fname: str) -> SignResult:
                     err_code = result.err.code if hasattr(result, 'err') else 0
                     if err_code == 3250004:
                         await db.mark_forum_banned(account.id, fname, reason="智能签到检测到吧务封禁 (3250004)")
+                        await db.update_target_pool_status(fname, is_success=False, error_reason="签到检测吧务封禁")
                         await log_warn(f"[{fname}] 检测到吧务封禁，已转入熔断模式（仍保留在列表中）")
                     else:
                         await db.delete_forum(forum.id)
@@ -278,6 +279,7 @@ async def sign_all_forums(
                     
                     if err_code == 3250004:
                         await db.mark_forum_banned(account.id, forum.fname, reason="自动全扫检测到吧务封禁 (3250004)")
+                        await db.update_target_pool_status(forum.fname, is_success=False, error_reason="全扫检测吧务封禁")
                         await log_warn(f"[{forum.fname}] 检测到吧务封禁，已转入熔断模式")
                     else:
                         # 自动删除无效贴吧
@@ -443,6 +445,7 @@ async def sign_all_accounts(
                     
                     if err_code == 3250004:
                         await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
+                        await db.update_target_pool_status(forum.fname, is_success=False, error_reason="矩阵全扫检测吧务封禁")
                         message = f"贴吧已封禁 (3250004)"
                         await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
                     else:
