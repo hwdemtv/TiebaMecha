@@ -1297,6 +1297,90 @@ class Database:
             )
             return [row[0] for row in result.all()]
 
+    async def get_materials_by_ids(self, ids: list[int]) -> list[MaterialPool]:
+        """按 ID 列表批量查询物料"""
+        if not ids:
+            return []
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(MaterialPool).where(MaterialPool.id.in_(ids))
+            )
+            return list(result.scalars().all())
+
+    async def get_survival_cache_data(self) -> dict[int, str]:
+        """获取所有已发物料的 {tid: survival_status} 映射，用于初始化缓存（轻量查询）"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(MaterialPool.posted_tid, MaterialPool.survival_status)
+                .where(MaterialPool.status == "success")
+                .where(MaterialPool.posted_tid.isnot(None))
+                .where(MaterialPool.posted_tid != 0)
+                .where(MaterialPool.survival_status != "unknown")
+            )
+            return {row[0]: row[1] for row in result.all()}
+
+    async def get_materials_by_status_paginated(
+        self,
+        statuses: list[str] | None = None,
+        search_text: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[MaterialPool], int]:
+        """按状态列表分页查询物料，支持标题/内容模糊搜索，返回 (列表, 总数)"""
+        async with self.async_session() as session:
+            from sqlalchemy import func, select as sa_select, or_
+            base_where = []
+            if statuses:
+                base_where.append(MaterialPool.status.in_(statuses))
+            if search_text:
+                keyword = f"%{search_text}%"
+                base_where.append(or_(
+                    MaterialPool.title.ilike(keyword),
+                    MaterialPool.content.ilike(keyword),
+                    MaterialPool.posted_fname.ilike(keyword),
+                ))
+            # 总数
+            count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
+            total = (await session.execute(count_stmt)).scalar() or 0
+            # 分页数据
+            offset = (page - 1) * page_size
+            data_stmt = (
+                select(MaterialPool)
+                .where(*base_where)
+                .order_by(MaterialPool.id.desc())
+                .offset(offset)
+                .limit(page_size)
+            )
+            result = await session.execute(data_stmt)
+            return list(result.scalars().all()), total
+
+    async def get_materials_status_counts(self) -> dict[str, int]:
+        """获取各状态的物料数量统计"""
+        async with self.async_session() as session:
+            from sqlalchemy import func, select as sa_select
+            result = await session.execute(
+                sa_select(MaterialPool.status, func.count(MaterialPool.id))
+                .group_by(MaterialPool.status)
+            )
+            return {row[0]: row[1] for row in result.all()}
+
+    async def get_success_survival_counts(self) -> dict[str, int]:
+        """获取 success 状态物料的存活统计（基于数据库字段，非内存缓存）"""
+        async with self.async_session() as session:
+            from sqlalchemy import func, select as sa_select
+            result = await session.execute(
+                sa_select(MaterialPool.survival_status, func.count(MaterialPool.id))
+                .where(MaterialPool.status == "success")
+                .where(MaterialPool.posted_tid.isnot(None))
+                .where(MaterialPool.posted_tid != 0)
+                .group_by(MaterialPool.survival_status)
+            )
+            counts = {"alive": 0, "dead": 0, "unknown": 0}
+            for status, count in result.all():
+                if status in counts:
+                    counts[status] = count
+            return counts
+
     async def get_materials(self, status: str | None = None, limit: int | None = None) -> list[MaterialPool]:
         from sqlalchemy import text
         async with self.async_session() as session:
@@ -2236,6 +2320,11 @@ class Database:
         """清理旧流水点位，仅保留最近的 keep_count 条"""
         from sqlalchemy import delete
         async with self.async_session() as session:
+            if keep_count <= 0:
+                # 清除所有记录
+                res = await session.execute(delete(BatchPostLog))
+                await session.commit()
+                return res.rowcount or 0
             # 找到第 keep_count 条之后的 ID
             cutoff_stmt = select(BatchPostLog.id).order_by(BatchPostLog.created_at.desc()).offset(keep_count).limit(1)
             result = await session.execute(cutoff_stmt)

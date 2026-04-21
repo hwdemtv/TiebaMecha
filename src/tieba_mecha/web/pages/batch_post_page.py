@@ -21,7 +21,8 @@ class BatchPostPage:
         self._is_running = False
         self._tasks = []
         self._accounts = []
-        self._materials = [] # now mapped to DB MaterialPool
+        self._materials = [] # now mapped to DB MaterialPool (当前页数据)
+        self._archive_items = []  # 归档库当前页数据
         self._all_fnames = []
         
         # Link survival status cache: tid -> "checking", "alive", "dead"
@@ -39,6 +40,14 @@ class BatchPostPage:
         self._archive_search_text = ""
         self._selected_material_ids = set()
         self._selected_archive_ids = set()
+        
+        # 分页状态
+        self._material_page = 1
+        self._material_page_size = 50
+        self._material_total = 0
+        self._archive_page = 1
+        self._archive_page_size = 50
+        self._archive_total = 0
         
         # 矩阵配置持久化状态
         self._selected_account_ids = set()
@@ -65,13 +74,10 @@ class BatchPostPage:
             self._native_forums = await self.db.get_native_post_targets()
             self._target_groups = await self.db.get_target_pool_groups()
             
-            self._materials = await self.db.get_materials()
-            
-            # [持久化同步] 从数据库加载历史探测状态到内存缓存
-            for m in self._materials:
-                if m.status == "success" and m.posted_tid and m.survival_status != "unknown":
-                    # 只同步已探测过的有效状态，checking 状态不持久化以防卡死
-                    self._survival_cache[m.posted_tid] = m.survival_status
+            # [持久化同步] 从数据库加载历史探测状态到内存缓存（轻量查询，只取 tid+survival_status）
+            self._status_counts = await self.db.get_materials_status_counts()
+            cache_data = await self.db.get_survival_cache_data()
+            self._survival_cache.update(cache_data)
 
 # [自顶配置同步] 加载 max_bump_count 到内存缓存
             max_bump_raw = await self.db.get_setting("max_bump_count")
@@ -148,6 +154,7 @@ class BatchPostPage:
             # [持久化同步] 从数据库加载最近的流水记录
             logs = await self.db.get_batch_post_logs(limit=100)
             self.log_list.controls[:] = []  # 加载新数据前清空
+            self._log_raw_items.clear()
             for log in reversed(logs):
                 log_data = {
                     "status": log.status,
@@ -160,7 +167,7 @@ class BatchPostPage:
                     "account_id": log.account_id,
                     "progress": "-", "total": "-"
                 }
-                self._add_log(log_data, timestamp=log.created_at.strftime("%H:%M:%S"))
+                self._add_log(log_data, timestamp=self._format_log_timestamp(log.created_at))
             
         except Exception as e:
             from ...core.logger import log_error
@@ -571,10 +578,12 @@ class BatchPostPage:
 
     async def _on_material_search_change(self, e):
         self._material_search_text = e.control.value
+        self._material_page = 1  # 搜索时重置到第1页
         await self._refresh_material_table()
 
     async def _on_archive_search_change(self, e):
         self._archive_search_text = e.control.value
+        self._archive_page = 1  # 搜索时重置到第1页
         await self._refresh_material_table()
 
     async def _bulk_delete_materials(self, e):
@@ -585,7 +594,6 @@ class BatchPostPage:
             for mid in list(self._selected_material_ids):
                 await self.db.delete_material(mid)
             self._selected_material_ids.clear()
-            self._materials = await self.db.get_materials()
             await self._refresh_material_table()
             self._show_snackbar("批量删除成功", "success")
             self.page.close(dialog)
@@ -606,7 +614,6 @@ class BatchPostPage:
         for mid in list(self._selected_archive_ids):
             await self.db.update_material_status(mid, "pending")
         self._selected_archive_ids.clear()
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar("选中记录已回炉重造", "success")
 
@@ -617,40 +624,31 @@ class BatchPostPage:
         for mid in list(self._selected_material_ids):
             await self.db.update_material_status(mid, "pending")
         self._selected_material_ids.clear()
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar(f"已批量重置 {len(self._selected_material_ids)} 条物料到待发状态", "success")
 
     async def _refresh_material_table(self):
-        print(f"[DEBUG] _refresh_material_table 被调用，物料数: {len(self._materials)}")
-
+        """分页刷新物料表（排期池+归档库），服务端过滤+分页"""
         if not hasattr(self, "_material_table") or not hasattr(self, "_archive_table"):
-            print(f"[DEBUG] _material_table 或 _archive_table 未初始化，跳过刷新")
             return
 
-        pending_rows = []
-        archive_rows = []
+        # 获取状态计数（用于 Tab 标签和统计显示）
+        self._status_counts = await self.db.get_materials_status_counts()
+        pending = self._status_counts.get("pending", 0)
+        success = self._status_counts.get("success", 0)
+        failed = self._status_counts.get("failed", 0)
 
-        pending = sum(1 for m in self._materials if m.status == "pending")
-        success = sum(1 for m in self._materials if m.status == "success")
-        failed = sum(1 for m in self._materials if m.status == "failed")
-
-        print(f"[DEBUG] 状态统计 - 待发: {pending}, 成功: {success}, 失败: {failed}")
-        
         if hasattr(self, "_stats_text"):
             self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})"
 
-        # 归档存活统计逻辑
+        # 归档存活统计（使用数据库轻量查询代替全量加载）
         alive_count = 0
         dead_count = 0
-        for m in self._materials:
-            if m.status == "success" and m.posted_tid:
-                surv = self._survival_cache.get(m.posted_tid)
-                if surv == "alive":
-                    alive_count += 1
-                elif surv == "dead":
-                    dead_count += 1
-        
+        if self._archive_surv_filter != "all" or hasattr(self, "_archive_alive_count_text"):
+            surv_counts = await self.db.get_success_survival_counts()
+            alive_count = surv_counts.get("alive", 0)
+            dead_count = surv_counts.get("dead", 0)
+
         if hasattr(self, "_archive_all_count_text"):
             self._archive_all_count_text.value = f" ({success})"
             self._archive_all_count_text.color = "white" if self._archive_surv_filter == "all" else "onSurfaceVariant"
@@ -667,203 +665,264 @@ class BatchPostPage:
                     tab.text = f"物料排期池 ({pending + failed})"
                 elif tab.icon == "archive_rounded":
                     tab.text = f"已发归档库 ({success})"
-            
-        for m in self._materials:
+
+        # --- 排期池分页查询 ---
+        mat_search = self._material_search_text if self._material_search_text.strip() else None
+        mat_items, self._material_total = await self.db.get_materials_by_status_paginated(
+            statuses=["pending", "failed"],
+            search_text=mat_search,
+            page=self._material_page,
+            page_size=self._material_page_size,
+        )
+        self._materials = mat_items  # 保持兼容，其他方法可能引用
+        pending_rows = []
+        for m in mat_items:
             try:
-                # 搜索过滤逻辑
+                m_title = m.title or ""
+                m_content = m.content or ""
+                display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
+                display_c = m_content if len(m_content) <= 18 else m_content[:18] + "..."
+                ai_text = "✨独立改写" if m.ai_status == "rewritten" else "无处理"
+                ai_color = "primary" if m.ai_status == "rewritten" else "onSurfaceVariant"
+                status_color = "onSurfaceVariant" if m.status == "pending" else "error"
+                status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
+                status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
+                pending_rows.append(
+                    ft.DataRow(
+                        selected=m.id in self._selected_material_ids,
+                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
+                        cells=[
+                            ft.DataCell(ft.Text(str(m.id))),
+                            ft.DataCell(ft.Text(display_t, tooltip=display_t)),
+                            ft.DataCell(ft.Text(display_c, tooltip=display_c)),
+                            ft.DataCell(
+                                ft.Row([
+                                    ft.Icon(status_icon, color=status_color, size=14),
+                                    ft.Text(status_text, color=status_color, size=12),
+                                    ft.IconButton(
+                                        icons.INFO,
+                                        icon_size=14,
+                                        icon_color=status_color,
+                                        tooltip="点击查看拒稿原因详情",
+                                        data={
+                                            "error": m.last_error,
+                                            "account_id": m.posted_account_id,
+                                            "fname": m.posted_fname
+                                        },
+                                        on_click=self._show_rejection_detail,
+                                        visible=(m.status == "failed")
+                                    )
+                                ], spacing=4)
+                            ),
+                            ft.DataCell(ft.Row([
+                                ft.Text(ai_text, color=ai_color, size=12),
+                                ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
+                            ], spacing=2)),
+                            ft.DataCell(ft.Row([
+                                ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
+                                ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
+                                ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
+                            ], spacing=0)),
+                            ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8, tooltip="待发布成功后，系统将自动开始循环回帖流程")),
+                        ]
+                    )
+                )
+            except Exception as ex:
+                continue
+
+        # --- 归档库分页查询 ---
+        arch_search = self._archive_search_text if self._archive_search_text.strip() else None
+        # 存活状态过滤在客户端处理（需要 survival_cache）
+        arch_items, self._archive_total = await self.db.get_materials_by_status_paginated(
+            statuses=["success"],
+            search_text=arch_search,
+            page=self._archive_page,
+            page_size=self._archive_page_size,
+        )
+        self._archive_items = arch_items  # 保存引用供全选等操作使用
+        archive_rows = []
+        for m in arch_items:
+            try:
                 m_title = m.title or ""
                 m_content = m.content or ""
                 m_posted_fname = m.posted_fname or "未知吧"
-                
-                if m.status in ("pending", "failed"):
-                    if self._material_search_text and self._material_search_text.lower() not in m_title.lower() and self._material_search_text.lower() not in m_content.lower():
-                        continue
-                else:
-                    if self._archive_search_text and self._archive_search_text.lower() not in m_title.lower() and self._archive_search_text.lower() not in m_posted_fname.lower():
-                        continue
-                    
-                    # 存活状态过滤
-                    surv_status = self._survival_cache.get(m.posted_tid, "unknown")
-                    if self._archive_surv_filter == "alive" and surv_status != "alive":
-                        continue
-                    if self._archive_surv_filter == "dead" and surv_status != "dead":
-                        continue
+                # 存活状态过滤（客户端，因为依赖 survival_cache）
+                surv_status = self._survival_cache.get(m.posted_tid, "unknown")
+                if self._archive_surv_filter == "alive" and surv_status != "alive":
+                    continue
+                if self._archive_surv_filter == "dead" and surv_status != "dead":
+                    continue
 
                 display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
-                display_c = m_content if len(m_content) <= 18 else m_content[:18] + "..."
-                
-                ai_text = "✨独立改写" if m.ai_status == "rewritten" else "无处理"
-                ai_color = "primary" if m.ai_status == "rewritten" else "onSurfaceVariant"
-                
-                if m.status in ("pending", "failed"):
-                    status_color = "onSurfaceVariant" if m.status == "pending" else "error"
-                    status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
-                    status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
-                    
-                    pending_rows.append(
-                        ft.DataRow(
-                            selected=m.id in self._selected_material_ids,
-                            on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
-                            cells=[
-                                ft.DataCell(ft.Text(str(m.id))),
-                                ft.DataCell(ft.Text(display_t, tooltip=display_t)),
-                                ft.DataCell(ft.Text(display_c, tooltip=display_c)),
-                                ft.DataCell(
-                                    ft.Row([
-                                        ft.Icon(status_icon, color=status_color, size=14), 
-                                        ft.Text(status_text, color=status_color, size=12),
-                                        ft.IconButton(
-                                            icons.INFO,
-                                            icon_size=14,
-                                            icon_color=status_color,
-                                            tooltip="点击查看拒稿原因详情",
-                                            data={
-                                                "error": m.last_error,
-                                                "account_id": m.posted_account_id,
-                                                "fname": m.posted_fname
-                                            },
-                                            on_click=self._show_rejection_detail,
-                                            visible=(m.status == "failed")
-                                        )
-                                    ], spacing=4)
-                                ),
-                                ft.DataCell(ft.Row([
-                                    ft.Text(ai_text, color=ai_color, size=12),
-                                    ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
-                                ], spacing=2)),
-                                ft.DataCell(ft.Row([
-                                    ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
-                                    ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
-                                    ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
-                                ], spacing=0)),
-                                ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8, tooltip="待发布成功后，系统将自动开始循环回帖流程")),
-                            ]
-                        )
-                    )
-                else:
-                    # 自顶状态逻辑增强：根据模式区分显示
-                    bump_mode = getattr(m, 'bump_mode', 'once') or 'once'
-                    max_bump = getattr(self, "_max_bump_count", 20)
-                    
-                    # 判断是否达到上限（仅 once 模式有封顶概念）
-                    is_limit_reached = (bump_mode == "once" and m.bump_count >= max_bump)
-                    
-                    # 判断是否超过持续期
-                    is_expired = False
-                    if bump_mode in ("scheduled", "matrix_loop"):
-                        from datetime import date as date_type
-                        bump_start = getattr(m, 'bump_start_date', None)
-                        bump_duration = getattr(m, 'bump_duration_days', 0) or 0
-                        if bump_start and bump_duration > 0:
-                            from datetime import timedelta as td
-                            end_date = bump_start + td(days=bump_duration)
-                            if date_type.today() > end_date:
-                                is_expired = True
-                    
-                    bump_status_text = f"已顶{m.bump_count}"
+                # 自顶状态逻辑
+                bump_mode = getattr(m, 'bump_mode', 'once') or 'once'
+                max_bump = getattr(self, "_max_bump_count", 20)
+                is_limit_reached = (bump_mode == "once" and m.bump_count >= max_bump)
+                is_expired = False
+                if bump_mode in ("scheduled", "matrix_loop"):
+                    from datetime import date as date_type
+                    bump_start = getattr(m, 'bump_start_date', None)
+                    bump_duration = getattr(m, 'bump_duration_days', 0) or 0
+                    if bump_start and bump_duration > 0:
+                        from datetime import timedelta as td
+                        end_date = bump_start + td(days=bump_duration)
+                        if date_type.today() > end_date:
+                            is_expired = True
+                bump_status_text = f"已顶{m.bump_count}"
+                bump_color = "onSurfaceVariant"
+                bump_tooltip = f"当前已累计自顶 {m.bump_count} 次"
+                if is_limit_reached:
+                    bump_status_text = f"封顶({m.bump_count})"
+                    bump_color = "orange"
+                    bump_tooltip = f"已达到 {max_bump} 次安全上限，系统已自动停止\n点击🔄可重置计数继续自顶"
+                elif is_expired:
+                    bump_status_text = f"到期({m.bump_count})"
+                    bump_color = "orange"
+                    bump_tooltip = f"已超过设定的持续天数，自顶已自动停止\n点击🔄可延长周期继续自顶"
+                elif not m.is_auto_bump and m.bump_count > 0:
+                    bump_status_text = f"暂停({m.bump_count})"
                     bump_color = "onSurfaceVariant"
-                    bump_tooltip = f"当前已累计自顶 {m.bump_count} 次"
-                    
-                    if is_limit_reached:
-                        bump_status_text = f"封顶({m.bump_count})"
-                        bump_color = "orange"
-                        bump_tooltip = f"已达到 {max_bump} 次安全上限，系统已自动停止\n点击🔄可重置计数继续自顶"
-                    elif is_expired:
-                        bump_status_text = f"到期({m.bump_count})"
-                        bump_color = "orange"
-                        bump_tooltip = f"已超过设定的持续天数，自顶已自动停止\n点击🔄可延长周期继续自顶"
-                    elif not m.is_auto_bump and m.bump_count > 0:
-                        bump_status_text = f"暂停({m.bump_count})"
-                        bump_color = "onSurfaceVariant"
-                        bump_tooltip = "自顶功能当前处于手动关闭状态"
+                    bump_tooltip = "自顶功能当前处于手动关闭状态"
 
-                    
-                    # 存活探测状态判定
-                    surv_status = self._survival_cache.get(m.posted_tid, "unknown")
-                    surv_icon = icons.HEALTH_AND_SAFETY
-                    surv_color = "grey"
-                    surv_tooltip = "探测链接存活状态"
-                    if surv_status == "checking":
-                        surv_icon = icons.HOURGLASS_EMPTY
-                        surv_color = "blue"
-                        surv_tooltip = "探测中..."
-                    elif surv_status == "alive":
-                        surv_icon = icons.CHECK_CIRCLE
-                        surv_color = "green"
-                        surv_tooltip = "探测完毕：该外链健康存活"
-                    elif surv_status == "dead":
-                        surv_icon = icons.REMOVE_CIRCLE
-                        surv_color = "error"
-                        surv_tooltip = "已被抽除或无法访问"
+                surv_icon = icons.HEALTH_AND_SAFETY
+                surv_color = "grey"
+                surv_tooltip = "探测链接存活状态"
+                if surv_status == "checking":
+                    surv_icon = icons.HOURGLASS_EMPTY
+                    surv_color = "blue"
+                    surv_tooltip = "探测中..."
+                elif surv_status == "alive":
+                    surv_icon = icons.CHECK_CIRCLE
+                    surv_color = "green"
+                    surv_tooltip = "探测完毕：该外链健康存活"
+                elif surv_status == "dead":
+                    surv_icon = icons.REMOVE_CIRCLE
+                    surv_color = "error"
+                    surv_tooltip = "已被抽除或无法访问"
 
-                    # 获取自顶模式信息
-                    bump_mode = getattr(m, 'bump_mode', 'once') or 'once'
-                    mode_icons = {"once": "🔢", "scheduled": "⏰", "matrix_loop": "🔄"}
-                    mode_icon = mode_icons.get(bump_mode, "🔢")
-                    mode_labels = {"once": "次数", "scheduled": "周期", "matrix_loop": "轮换"}
-                    
-                    # 获取当前轮换账号信息
-                    loop_info = ""
-                    if bump_mode == "matrix_loop":
-                        try:
-                            account_ids = json.loads(getattr(m, 'bump_account_ids', '[]') or '[]')
-                            if account_ids:
-                                current_idx = getattr(m, 'bump_account_index', 0) or 0
-                                current_acc_id = account_ids[current_idx % len(account_ids)]
-                                current_acc = next((a for a in self._accounts if a.id == current_acc_id), None)
-                                acc_name = current_acc.name if current_acc else f"账号{current_acc_id}"
-                                loop_info = f"\n🔄{acc_name}轮换中({current_idx + 1}/{len(account_ids)})"
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    
-                    bump_status_text = f"{mode_icon}{bump_status_text}"
-                    bump_tooltip = f"模式: {mode_labels.get(bump_mode, '次数')}{loop_info}\n{bump_tooltip}"
+                mode_icons = {"once": "🔢", "scheduled": "⏰", "matrix_loop": "🔄"}
+                mode_icon = mode_icons.get(bump_mode, "🔢")
+                mode_labels = {"once": "次数", "scheduled": "周期", "matrix_loop": "轮换"}
+                loop_info = ""
+                if bump_mode == "matrix_loop":
+                    try:
+                        account_ids = json.loads(getattr(m, 'bump_account_ids', '[]') or '[]')
+                        if account_ids:
+                            current_idx = getattr(m, 'bump_account_index', 0) or 0
+                            current_acc_id = account_ids[current_idx % len(account_ids)]
+                            current_acc = next((a for a in self._accounts if a.id == current_acc_id), None)
+                            acc_name = current_acc.name if current_acc else f"账号{current_acc_id}"
+                            loop_info = f"\n🔄{acc_name}轮换中({current_idx + 1}/{len(account_ids)})"
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                bump_status_text = f"{mode_icon}{bump_status_text}"
+                bump_tooltip = f"模式: {mode_labels.get(bump_mode, '次数')}{loop_info}\n{bump_tooltip}"
 
-                    archive_rows.append(
-                        ft.DataRow(
-                            selected=m.id in self._selected_archive_ids,
-                            on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
-                            cells=[
-                                ft.DataCell(ft.Text(str(m.id))),
-                                ft.DataCell(ft.Text(display_t, tooltip=display_t)),
-                                ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
-                                ft.DataCell(ft.Text(
-                                    next((a.name for a in self._accounts if a.id == m.posted_account_id), str(m.posted_account_id) if m.posted_account_id else "-"),
-                                    weight=ft.FontWeight.BOLD, color="primary")),
-                                ft.DataCell(ft.Text(m.posted_time.strftime("%y-%m-%d %H:%M") if m.posted_time else "-")),
-                                ft.DataCell(ft.Row([
-                                    ft.IconButton(
-                                        icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
-                                        on_click=lambda e, tid=m.posted_tid: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}") if tid else self._show_snackbar("该贴被系统吞没或未传回TID", "warning")
-                                    ),
-                                    ft.IconButton(
-                                        surv_icon, icon_color=surv_color, tooltip=surv_tooltip,
-                                        data={"tid": m.posted_tid},
-                                        on_click=self._on_check_link_survival
-                                    ),
-                                    ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="被屏蔽了？重置为待发状态"),
-                                    ft.IconButton(icons.REFRESH, icon_color="teal", data=m.id, on_click=self._reset_bump_count, tooltip="归零自顶计数，重新开始"),
-                                ], spacing=0)),
-                                ft.DataCell(ft.Row([
-                                    ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
-                                    ft.Text(bump_status_text, size=11, color=bump_color, tooltip=bump_tooltip)
-                                ], spacing=2)),
-                            ]
-                        )
+                archive_rows.append(
+                    ft.DataRow(
+                        selected=m.id in self._selected_archive_ids,
+                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
+                        cells=[
+                            ft.DataCell(ft.Text(str(m.id))),
+                            ft.DataCell(ft.Text(display_t, tooltip=display_t)),
+                            ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
+                            ft.DataCell(ft.Text(
+                                next((a.name for a in self._accounts if a.id == m.posted_account_id), str(m.posted_account_id) if m.posted_account_id else "-"),
+                                weight=ft.FontWeight.BOLD, color="primary")),
+                            ft.DataCell(ft.Text(m.posted_time.strftime("%y-%m-%d %H:%M") if m.posted_time else "-")),
+                            ft.DataCell(ft.Row([
+                                ft.IconButton(
+                                    icons.OPEN_IN_NEW, icon_color="primary", tooltip="在外部浏览器查看原贴",
+                                    on_click=lambda e, tid=m.posted_tid: self.page.launch_url(f"https://tieba.baidu.com/p/{tid}") if tid else self._show_snackbar("该贴被系统吞没或未传回TID", "warning")
+                                ),
+                                ft.IconButton(
+                                    surv_icon, icon_color=surv_color, tooltip=surv_tooltip,
+                                    data={"tid": m.posted_tid},
+                                    on_click=self._on_check_link_survival
+                                ),
+                                ft.IconButton(icons.RESTORE, icon_color="orange", data=m.id, on_click=self._reset_material_row, tooltip="被屏蔽了？重置为待发状态"),
+                                ft.IconButton(icons.REFRESH, icon_color="teal", data=m.id, on_click=self._reset_bump_count, tooltip="归零自顶计数，重新开始"),
+                            ], spacing=0)),
+                            ft.DataCell(ft.Row([
+                                ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.7),
+                                ft.Text(bump_status_text, size=11, color=bump_color, tooltip=bump_tooltip)
+                            ], spacing=2)),
+                        ]
                     )
+                )
             except Exception as ex:
-                print(f"[ERROR] 渲染物料行 ID:{m.id} 失败: {str(ex)}")
                 continue
-                
+
         self._material_table.rows = pending_rows
         self._archive_table.rows = archive_rows
+
+        # 更新分页控件
+        self._update_material_pagination()
+        self._update_archive_pagination()
 
         # 同步更新批量操作栏
         self._update_bulk_visibility()
 
-        # 直接更新整个页面，确保所有嵌套控件都能刷新
+        # 精确更新而非全页面刷新
         try:
-            self.page.update()
+            if hasattr(self, "_material_table"):
+                self._material_table.update()
+            if hasattr(self, "_archive_table"):
+                self._archive_table.update()
+            if hasattr(self, "bottom_tabs"):
+                self.bottom_tabs.update()
+        except Exception:
+            pass
+
+    # ========== 分页导航方法 ==========
+
+    async def _on_material_prev_page(self, e):
+        if self._material_page > 1:
+            self._material_page -= 1
+            await self._refresh_material_table()
+
+    async def _on_material_next_page(self, e):
+        total_pages = max(1, (self._material_total + self._material_page_size - 1) // self._material_page_size)
+        if self._material_page < total_pages:
+            self._material_page += 1
+            await self._refresh_material_table()
+
+    async def _on_archive_prev_page(self, e):
+        if self._archive_page > 1:
+            self._archive_page -= 1
+            await self._refresh_material_table()
+
+    async def _on_archive_next_page(self, e):
+        total_pages = max(1, (self._archive_total + self._archive_page_size - 1) // self._archive_page_size)
+        if self._archive_page < total_pages:
+            self._archive_page += 1
+            await self._refresh_material_table()
+
+    def _update_material_pagination(self):
+        if not hasattr(self, "_mat_page_info"):
+            return
+        total_pages = max(1, (self._material_total + self._material_page_size - 1) // self._material_page_size)
+        self._mat_page_info.value = f"{self._material_page}/{total_pages} 页 (共{self._material_total}条)"
+        self._mat_prev_btn.disabled = self._material_page <= 1
+        self._mat_next_btn.disabled = self._material_page >= total_pages
+        try:
+            self._mat_page_info.update()
+            self._mat_prev_btn.update()
+            self._mat_next_btn.update()
+        except Exception:
+            pass
+
+    def _update_archive_pagination(self):
+        if not hasattr(self, "_arch_page_info"):
+            return
+        total_pages = max(1, (self._archive_total + self._archive_page_size - 1) // self._archive_page_size)
+        self._arch_page_info.value = f"{self._archive_page}/{total_pages} 页 (共{self._archive_total}条)"
+        self._arch_prev_btn.disabled = self._archive_page <= 1
+        self._arch_next_btn.disabled = self._archive_page >= total_pages
+        try:
+            self._arch_page_info.update()
+            self._arch_prev_btn.update()
+            self._arch_next_btn.update()
         except Exception:
             pass
 
@@ -903,8 +962,10 @@ class BatchPostPage:
         # 3. 结果写入缓存并持久化到数据库
         self._survival_cache[tid] = final_status
         
-        # 寻找对应的物料ID进行持久化
-        mid = next((m.id for m in self._materials if m.posted_tid == tid), None)
+        # 寻找对应的物料ID进行持久化（优先从归档数据查找，找不到则查库）
+        mid = next((m.id for m in getattr(self, "_archive_items", []) if m.posted_tid == tid), None)
+        if not mid:
+            mid = next((m.id for m in self._materials if m.posted_tid == tid), None)
         if mid:
             await self.db.update_material_survival_status(mid, final_status, death_reason)
 
@@ -922,10 +983,13 @@ class BatchPostPage:
             self._show_snackbar("请先在列表中勾选想要探测的归档条目", "warning")
             return
             
-        # 提取目标 TIDs
+        # 提取目标 TIDs（按选中ID从数据库查询，支持跨页选中）
         targets = []
-        for m in self._materials:
-            if m.id in self._selected_archive_ids and m.status == "success" and m.posted_tid:
+        selected_materials = await self.db.get_materials_by_ids(list(self._selected_archive_ids))
+        for m in selected_materials:
+            if m.status == "success" and m.posted_tid:
+                targets.append(m)
+                self._survival_cache[m.posted_tid] = "checking"
                 targets.append(m)
                 self._survival_cache[m.posted_tid] = "checking"
                 
@@ -1000,7 +1064,8 @@ class BatchPostPage:
                 self.archive_progress_bar.value = (i + 1) / total
                 self.archive_status_text.value = f"正在探测 ({i+1}/{total})..."
                 if (i + 1) % 5 == 0:
-                    self.page.update()
+                    self.archive_progress_bar.update()
+                    self.archive_status_text.update()
             
             # 验证码提示
             if captcha_detected:
@@ -1025,20 +1090,17 @@ class BatchPostPage:
         await self.db.add_materials_bulk([(t, c)])
         self._quick_title.value = ""
         self._quick_content.value = ""
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar("成功添加一条物料录入", "success")
 
     async def _delete_material_row(self, e):
         idx = e.control.data
         if await self.db.delete_material(idx):
-            self._materials = await self.db.get_materials()
             await self._refresh_material_table()
 
     async def _reset_material_row(self, e):
         idx = e.control.data
         await self.db.update_material_status(idx, "pending")
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar("状态已回滚到排期池", "info")
 
@@ -1058,7 +1120,6 @@ class BatchPostPage:
                     m.bump_start_date = date.today()
                     m.bump_last_date = None
                 await session.commit()
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar(f"物料 [{mid}] 自顶计数已归零，可继续执行", "success")
 
@@ -1075,7 +1136,6 @@ class BatchPostPage:
                 self._show_snackbar("标题与内容不能同时为空", "error")
                 return
             await self.db.update_material_content(m.id, edit_title.value, edit_content.value)
-            self._materials = await self.db.get_materials()
             await self._refresh_material_table()
             self._show_snackbar("文案手动修改已被硬编码记录", "success")
             self.page.close(dialog)
@@ -1097,7 +1157,8 @@ class BatchPostPage:
 
     async def _clear_all_materials(self, e=None):
         await self.db.clear_materials()
-        self._materials = []
+        self._material_page = 1
+        self._archive_page = 1
         await self._refresh_material_table()
         if e: self._show_snackbar("物料池已全库排空", "success")
 
@@ -1145,7 +1206,6 @@ class BatchPostPage:
                 return
 
             added_count = await self.db.add_materials_bulk(pairs)
-            self._materials = await self.db.get_materials()
             await self._refresh_material_table()
             self.page.close(dialog)
             self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")
@@ -1163,14 +1223,15 @@ class BatchPostPage:
 
     async def _reset_all_materials(self, e=None):
         await self.db.reset_materials_status()
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         if e: self._show_snackbar("所有已发送的物料状态和锁已强行卸除", "success")
 
     async def _export_materials(self, e):
         import csv, os
         from datetime import datetime
-        if not self._materials:
+        # 导出全部物料（不受分页限制）
+        all_materials = await self.db.get_materials(limit=None)
+        if not all_materials:
             self._show_snackbar("无可导出的物料", "warning")
             return
         
@@ -1179,28 +1240,14 @@ class BatchPostPage:
             with open(filename, "w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["ID", "Title", "Content", "Status", "AI_Status"])
-                for m in self._materials:
+                for m in all_materials:
                     writer.writerow([m.id, m.title, m.content, m.status, m.ai_status])
         except Exception:
             pass
 
-    async def _on_material_search_change(self, e):
-        self._material_search_text = e.control.value
-        await self._refresh_material_table()
-
-    async def _on_archive_search_change(self, e):
-        self._archive_search_text = e.control.value
-        await self._refresh_material_table()
-
     async def _on_material_select_all(self, e):
-        # 仅选择当前过滤后的可见项 (所见即所得)
-        visible_ids = []
-        for m in self._materials:
-            if m.status in ("pending", "failed"):
-                if not self._material_search_text or self._material_search_text.lower() in m.title.lower() or self._material_search_text.lower() in m.content.lower():
-                    visible_ids.append(m.id)
-
-        # e.data 是字符串 "true"/"false"，需要转换
+        # 分页后 self._materials 就是当前页数据，搜索已在服务端过滤
+        visible_ids = [m.id for m in self._materials if m.status in ("pending", "failed")]
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
         if is_select:
             self._selected_material_ids.update(visible_ids)
@@ -1210,13 +1257,8 @@ class BatchPostPage:
         await self._refresh_material_table()
 
     async def _on_archive_select_all(self, e):
-        visible_ids = []
-        for m in self._materials:
-            if m.status == "success":
-                if not self._archive_search_text or self._archive_search_text.lower() in m.title.lower() or self._archive_search_text.lower() in (m.posted_fname or "").lower():
-                    visible_ids.append(m.id)
-
-        # e.data 是字符串 "true"/"false"，需要转换
+        # 分页后归档数据在 _archive_items 中
+        visible_ids = [m.id for m in getattr(self, "_archive_items", []) if m.status == "success"]
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
         if is_select:
             self._selected_archive_ids.update(visible_ids)
@@ -1253,7 +1295,6 @@ class BatchPostPage:
         count = len(target_ids)
         self._selected_material_ids.clear()
         self._selected_archive_ids.clear()
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar(f"已批量{'开启' if target_val else '关闭'} {count} 项自动回帖", "success")
 
@@ -1278,7 +1319,6 @@ class BatchPostPage:
         
         self._selected_material_ids.clear()
         self._selected_archive_ids.clear()
-        self._materials = await self.db.get_materials()
         await self._refresh_material_table()
         self._show_snackbar(f"已归零 {count} 项自顶计数，可重新开始", "success")
 
@@ -1325,12 +1365,15 @@ class BatchPostPage:
     async def _on_batch_ai_rewrite_click(self, e):
         """触发选中物料或所有待发物料的批量 AI 改写"""
         if self._selected_material_ids:
-            pending_m = [m for m in self._materials if m.id in self._selected_material_ids and m.status == "pending"]
+            # 从数据库按ID查询，支持跨页选中
+            selected_mats = await self.db.get_materials_by_ids(list(self._selected_material_ids))
+            pending_m = [m for m in selected_mats if m.status == "pending"]
             if not pending_m:
                 self._show_snackbar("选中的物料中没有处于 [待发] 状态的项，或者它们已经是成功/失败状态，无法改写", "warning")
                 return
         else:
-            pending_m = [m for m in self._materials if m.status == "pending"]
+            # 获取全部待发物料
+            pending_m = await self.db.get_materials(status="pending", limit=None)
             if not pending_m:
                 self._show_snackbar("没有发现处于 [待发] 状态的物料，无法改写", "warning")
                 return
@@ -1379,7 +1422,6 @@ class BatchPostPage:
                 self.page.update()
             
             self.page.close(dialog)
-            self._materials = await self.db.get_materials()
             await self._refresh_material_table()
             self._show_snackbar(f"AI 批量改写完成！成功优化 {success_count}/{total} 条文案", "success" if success_count > 0 else "error")
 
@@ -1401,7 +1443,6 @@ class BatchPostPage:
         
         if success:
             await self.db.update_material_ai(mid, opt_title, opt_content)
-            self._materials = await self.db.get_materials()
             await self._refresh_material_table()
             self._show_snackbar("该条文案 AI 优化已就绪", "success")
         else:
@@ -1424,7 +1465,6 @@ class BatchPostPage:
                         db_m.ai_status = "none"
                         await session.commit()
                 self.page.close(preview_dialog)
-                self._materials = await self.db.get_materials()
                 await self._refresh_material_table()
                 self._show_snackbar("已还原至初始文案", "info")
             self.page.run_task(_do)
@@ -1565,8 +1605,6 @@ class BatchPostPage:
                     self._show_snackbar("选中的短链均已存在，无需重复注入", "info")
                 else:
                     self._show_snackbar(f"✅ 成功注入 {added_count} 条短链物料", "success")
-                
-                self._materials = await self.db.get_materials()
                 await self._refresh_material_table()
                 self.page.close(self.link_dialog)
 
@@ -2175,6 +2213,12 @@ class BatchPostPage:
                     border_radius=12,
                     padding=5,
                 ),
+                # 分页控件
+                ft.Row([
+                    ft.IconButton(icons.NAVIGATE_BEFORE, icon_size=16, on_click=lambda e: self.page.run_task(self._on_material_prev_page, e), data="mat_prev"),
+                    self._mat_page_info,
+                    ft.IconButton(icons.NAVIGATE_NEXT, icon_size=16, on_click=lambda e: self.page.run_task(self._on_material_next_page, e), data="mat_next"),
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
             ], expand=True, spacing=10),
             expand=True,
             padding=ft.padding.only(top=10)
@@ -2250,6 +2294,12 @@ class BatchPostPage:
                     border_radius=12,
                     padding=5,
                 ),
+                # 分页控件
+                ft.Row([
+                    ft.IconButton(icons.NAVIGATE_BEFORE, icon_size=16, on_click=lambda e: self.page.run_task(self._on_archive_prev_page, e), data="arch_prev"),
+                    self._arch_page_info,
+                    ft.IconButton(icons.NAVIGATE_NEXT, icon_size=16, on_click=lambda e: self.page.run_task(self._on_archive_next_page, e), data="arch_next"),
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
             ], expand=True, spacing=10),
             expand=True,
             padding=ft.padding.only(top=10)
@@ -2257,6 +2307,16 @@ class BatchPostPage:
 
     def _init_controls(self):
         """预初始化页面所有持久化控件，防止 build 时被重置"""
+        # 0. 分页控件
+        self._mat_page_info = ft.Text("1/1 页 (共0条)", size=11, color="onSurfaceVariant")
+        self._mat_prev_btn = ft.IconButton(icons.NAVIGATE_BEFORE, icon_size=16, disabled=True)
+        self._mat_next_btn = ft.IconButton(icons.NAVIGATE_NEXT, icon_size=16, disabled=True)
+        self._arch_page_info = ft.Text("1/1 页 (共0条)", size=11, color="onSurfaceVariant")
+        self._arch_prev_btn = ft.IconButton(icons.NAVIGATE_BEFORE, icon_size=16, disabled=True)
+        self._arch_next_btn = ft.IconButton(icons.NAVIGATE_NEXT, icon_size=16, disabled=True)
+        # 状态计数缓存
+        self._status_counts = {}
+
         # 1. 贴吧选择
         self.forum_pool_column = ft.Column(spacing=2, height=120, scroll=ft.ScrollMode.ADAPTIVE)
         self.forum_select_btn = ft.OutlinedButton(
@@ -2535,6 +2595,24 @@ class BatchPostPage:
         self.progress_bar = ft.ProgressBar(value=0, visible=False, color="primary")
         self.log_list = ft.ListView(expand=True, spacing=5, padding=10)
         
+        # 5.5 流水工具栏控件
+        self._log_filter_dropdown = ft.Dropdown(
+            width=120, height=40, text_size=12,
+            options=[
+                ft.dropdown.Option("all", "全部"),
+                ft.dropdown.Option("success", "✅ 成功"),
+                ft.dropdown.Option("error", "❌ 失败"),
+                ft.dropdown.Option("skipped", "⏭ 跳过"),
+            ],
+            value="all",
+            on_change=self._on_log_filter_change,
+        )
+        self._log_stats_text = ft.Text("✅0  ❌0  ⏭0", size=11, color="onSurfaceVariant", weight=ft.FontWeight.W_500)
+        self._log_clear_btn = ft.OutlinedButton("清除流水", icon=icons.DELETE_SWEEP, on_click=self._on_clear_logs, style=ft.ButtonStyle(color="error"))
+        self._log_refresh_btn = ft.IconButton(icons.REFRESH, icon_size=18, tooltip="刷新流水", on_click=lambda e: self.page.run_task(self._refresh_logs))
+        # 内存中流水数据的原始缓存（不受筛选影响）
+        self._log_raw_items = []  # list of (log_item_control, status_str)
+        
         # 6. 整合 Tabs
         self.bottom_tabs = ft.Tabs(
             selected_index=0,
@@ -2665,6 +2743,15 @@ class BatchPostPage:
         # expand=True 使日志视图能填满 Tab 分配的高度
         return ft.Container(
             content=ft.Column([
+                # 工具栏：筛选 + 统计 + 刷新 + 清除
+                ft.Row([
+                    ft.Text("流水筛选:", size=11, color="onSurfaceVariant", weight=ft.FontWeight.W_500),
+                    self._log_filter_dropdown,
+                    self._log_stats_text,
+                    ft.Container(expand=True),
+                    self._log_refresh_btn,
+                    self._log_clear_btn,
+                ], alignment=ft.MainAxisAlignment.START, spacing=10),
                 self.progress_bar,
                 ft.Container(
                     content=self.log_list, expand=True,
@@ -2888,9 +2975,6 @@ class BatchPostPage:
             added_count = await self.db.add_materials_bulk(pairs)
             print(f"[DEBUG] 写入数据库: {added_count} 条")
 
-            self._materials = await self.db.get_materials()
-            print(f"[DEBUG] 刷新缓存: {len(self._materials)} 条物料")
-
             await self._refresh_material_table()
             self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")
         except Exception as ex:
@@ -2916,8 +3000,8 @@ class BatchPostPage:
         # 合并本地自留区 + 全域轰炸组 (两组独立锁定，仅合并已锁定的)
         fnames = list(set(self._temp_local_fnames + self._temp_global_fnames))
 
-        # Validation
-        pending_m = [m for m in self._materials if m.status == "pending"]
+        # Validation（从数据库获取全部待发物料，不受分页限制）
+        pending_m = await self.db.get_materials(status="pending", limit=None)
         
         if not fnames or not pending_m:
             error_details = []
@@ -2999,9 +3083,10 @@ class BatchPostPage:
                 elif update["status"] == "error":
                     self._add_log(update, "error")
                 elif update["status"] == "skipped":
-                    self._add_log(update.get('msg'), "error")
+                    self._add_log(update)
                 
-                self.page.update()
+                self.log_list.update()
+                self.progress_bar.update()
         except asyncio.CancelledError:
             self._add_log("！任务已被系统强制回收")
         except Exception as ex:
@@ -3012,7 +3097,17 @@ class BatchPostPage:
             self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
             self.start_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
             self.progress_bar.visible = False
-            self.page.update()
+            self.start_btn.update()
+            self.progress_bar.update()
+
+    def _format_log_timestamp(self, dt_or_str):
+        """格式化流水时间戳：当天显示 HH:MM:SS，跨天显示 MM-DD HH:MM"""
+        if isinstance(dt_or_str, str):
+            return dt_or_str
+        now = datetime.now()
+        if dt_or_str.date() == now.date():
+            return dt_or_str.strftime("%H:%M:%S")
+        return dt_or_str.strftime("%m-%d %H:%M")
 
     def _add_log(self, data, type="info", timestamp=None):
         """
@@ -3021,8 +3116,11 @@ class BatchPostPage:
         """
         now = timestamp if timestamp else datetime.now().strftime("%H:%M:%S")
         
+        status_str = "info"  # 用于筛选的 status 标识
+        
         if isinstance(data, dict):
             status = data.get("status", "info")
+            status_str = status
             if status == "success":
                 # 构建结构化成功卡片
                 acc_name = data.get("account_name", "?")
@@ -3061,6 +3159,22 @@ class BatchPostPage:
                     border_radius=ft.border_radius.only(top_right=8, bottom_right=8),
                     margin=ft.padding.only(bottom=5)
                 )
+            elif status == "skipped":
+                # 构建结构化跳过卡片 (琥珀色)
+                fname = data.get("fname", "未知")
+                msg = data.get("msg", data.get("message", "已跳过"))
+                log_item = ft.Container(
+                    content=ft.Row([
+                        ft.Text(f"[{now}]", size=10, color="onSurfaceVariant"),
+                        ft.Icon(icons.SKIP_NEXT, color="amber", size=14),
+                        ft.Text(f"跳过 [{fname}]: {msg}", size=11, color="amber", weight=ft.FontWeight.W_500),
+                    ], spacing=10),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                    bgcolor=with_opacity(0.05, "amber"),
+                    border=ft.border.only(left=ft.border.BorderSide(3, "amber")),
+                    border_radius=ft.border_radius.only(top_right=8, bottom_right=8),
+                    margin=ft.padding.only(bottom=5)
+                )
             else:
                 # 构建结构化错误卡片
                 fname = data.get("fname", "未知")
@@ -3087,6 +3201,7 @@ class BatchPostPage:
             # 兼容模式：纯文本输出
             color = "onSurfaceVariant" if type == "info" else "error"
             icon = icons.INFO_OUTLINED if type == "info" else icons.WARNING_AMBER
+            status_str = type  # "info" 或 "error"
             
             log_item = ft.Container(
                 content=ft.Row([
@@ -3098,9 +3213,79 @@ class BatchPostPage:
                 margin=ft.padding.only(bottom=2)
             )
 
-        self.log_list.controls.insert(0, log_item)
-        if len(self.log_list.controls) > 100:
-            self.log_list.controls.pop()
+        # 存入原始缓存
+        self._log_raw_items.insert(0, (log_item, status_str))
+        if len(self._log_raw_items) > 100:
+            self._log_raw_items.pop()
+        
+        # 根据当前筛选决定是否插入可见列表
+        current_filter = self._log_filter_dropdown.value
+        if current_filter == "all" or status_str == current_filter or (current_filter == "error" and status_str not in ("success", "skipped")):
+            self.log_list.controls.insert(0, log_item)
+            if len(self.log_list.controls) > 100:
+                self.log_list.controls.pop()
+        
+        # 更新统计文本
+        self._update_log_stats()
+
+    def _update_log_stats(self):
+        """更新流水统计文本"""
+        success_count = sum(1 for _, s in self._log_raw_items if s == "success")
+        error_count = sum(1 for _, s in self._log_raw_items if s == "error")
+        skipped_count = sum(1 for _, s in self._log_raw_items if s == "skipped")
+        self._log_stats_text.value = f"✅{success_count}  ❌{error_count}  ⏭{skipped_count}"
+        try:
+            self._log_stats_text.update()
+        except Exception:
+            pass
+
+    async def _on_log_filter_change(self, e):
+        """流水筛选下拉框变更"""
+        filter_val = e.control.value
+        self.log_list.controls.clear()
+        for log_item, status in reversed(self._log_raw_items):
+            if filter_val == "all" or status == filter_val or (filter_val == "error" and status not in ("success", "skipped")):
+                self.log_list.controls.insert(0, log_item)
+        self.log_list.update()
+
+    async def _on_clear_logs(self, e):
+        """清除流水记录"""
+        self.log_list.controls.clear()
+        self._log_raw_items.clear()
+        self._update_log_stats()
+        try:
+            deleted = await self.db.clear_old_batch_post_logs(keep_count=0)
+            self._show_snackbar(f"已清除 {deleted} 条流水记录", "info")
+        except Exception as ex:
+            self._show_snackbar(f"清除失败: {ex}", "error")
+
+    async def _refresh_logs(self, e=None):
+        """刷新流水记录（重新从数据库加载）"""
+        if not self.db:
+            return
+        try:
+            logs = await self.db.get_batch_post_logs(limit=100)
+            self.log_list.controls.clear()
+            self._log_raw_items.clear()
+            for log in reversed(logs):
+                log_data = {
+                    "status": log.status,
+                    "account_name": log.account_name,
+                    "fname": log.fname,
+                    "title": log.title,
+                    "tid": log.tid,
+                    "msg": log.message,
+                    "error": log.message,
+                    "account_id": log.account_id,
+                    "progress": "-", "total": "-"
+                }
+                self._add_log(log_data, timestamp=self._format_log_timestamp(log.created_at))
+            self.log_list.update()
+            self._show_snackbar("流水已刷新", "info")
+        except Exception as ex:
+            self._show_snackbar(f"刷新失败: {ex}", "error")
+
+
 
     def _show_rejection_detail(self, e):
         """显示拒稿的具体原因弹窗 (增强版：附带战术建议 + 账号/贴吧详情)"""
