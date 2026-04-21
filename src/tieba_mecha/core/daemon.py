@@ -108,9 +108,13 @@ async def do_batch_post_tasks():
         await db.update_batch_task(task.id, status="running")
         
         try:
-            # 执行任务（内部会更新物料状态）
-            async for _ in manager.execute_task(core_task):
-                pass
+            # 执行任务（内部会更新物料状态），同步进度到数据库
+            async for update in manager.execute_task(core_task):
+                await db.update_batch_task(
+                    task.id,
+                    progress=update.get("progress", 0),
+                    status="running"
+                )
             
             # 执行完毕后处理：如果是循环任务，更新下一次执行时间；否则标记完成
             if task.interval_hours > 0:
