@@ -3204,8 +3204,8 @@ class BatchPostPage:
                         ft.Text(f"拦截于 [{fname}]: {msg}", size=11, color="error", weight=ft.FontWeight.W_500),
                         ft.Container(expand=True),
                         ft.TextButton(
-                            "查看情报", 
-                            style=ft.ButtonStyle(color="error", text_style=ft.TextStyle(size=10)),
+                            ft.Text("查看情报", size=10),
+                            style=ft.ButtonStyle(color="error"),
                             on_click=lambda e: self._show_rejection_detail(data)
                         )
                     ], spacing=10),
