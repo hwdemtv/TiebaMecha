@@ -1173,7 +1173,7 @@ class Database:
             return {row[0]: row[1] for row in result.all() if row[0]}
 
     async def get_survival_stats(self) -> dict:
-        """获取存活统计概览"""
+        """获取存活统计概览（仅统计已发帖成功的物料）"""
         async with self.async_session() as session:
             from sqlalchemy import func
             result = await session.execute(
@@ -1181,7 +1181,9 @@ class Database:
                     MaterialPool.survival_status,
                     func.count(MaterialPool.id)
                 )
-                .where(MaterialPool.survival_status.isnot(None))
+                .where(MaterialPool.status == "success")
+                .where(MaterialPool.posted_tid.isnot(None))
+                .where(MaterialPool.posted_tid != 0)
                 .group_by(MaterialPool.survival_status)
             )
             stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
