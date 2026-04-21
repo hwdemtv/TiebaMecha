@@ -108,6 +108,11 @@ class BatchPostPage:
             if matrix_raw is not None:
                 self.bump_matrix_switch.value = matrix_raw == "1"
             
+            # [自顶配置同步] 恢复 AI自顶内容开关
+            bump_ai_raw = await self.db.get_setting("bump_ai_content")
+            if bump_ai_raw is not None:
+                self.bump_ai_content_switch.value = bump_ai_raw == "1"
+            
             # [自顶配置同步] 恢复自顶模式
             bump_mode_raw = await self.db.get_setting("bump_mode")
             if bump_mode_raw is not None and hasattr(self, "bump_mode_group"):
@@ -229,12 +234,16 @@ class BatchPostPage:
             ai_enabled = "1" if self.use_ai_switch.value else "0"
             schedule_enabled = "1" if self.use_schedule.value else "0"
             
+            # AI自顶内容开关
+            bump_ai_content = "1" if self.bump_ai_content_switch.value else "0"
+            
             # 写入数据库
             await self.db.set_setting("max_bump_count", str(max_count))
             await self.db.set_setting("bump_cooldown_minutes", str(cooldown))
             await self.db.set_setting("bump_matrix_enabled", matrix_enabled)
             await self.db.set_setting("use_ai_rewrite", ai_enabled)
             await self.db.set_setting("use_schedule", schedule_enabled)
+            await self.db.set_setting("bump_ai_content", bump_ai_content)
             
             # 保存自顶模式配置
             bump_mode = self.bump_mode_group.value if hasattr(self, "bump_mode_group") else "once"
@@ -2453,7 +2462,7 @@ class BatchPostPage:
                 ft.dropdown.Option("casual", "随缘路人 (口语/自然)"),
                 ft.dropdown.Option("newbie", "好奇萌新 (求助/互动)"),
             ],
-            on_change=self._save_bump_config
+            on_change=lambda e: self.page.run_task(self._save_ai_persona, e.control.value)
         )
         self.use_schedule = ft.Switch(
             label="定时计划",
@@ -2502,8 +2511,13 @@ class BatchPostPage:
             dense=True,
         )
         self.bump_matrix_switch = ft.Switch(
-            label="矩阵协同模式",
+            label="矩阵协同",
             value=False,
+        )
+        self.bump_ai_content_switch = ft.Switch(
+            label="AI自顶",
+            value=True,
+            tooltip="开启后使用AI生成差异化的自顶回复，关闭则使用固定模板",
         )
         
         # 自顶模式选择
@@ -2597,7 +2611,7 @@ class BatchPostPage:
         
         # 5.5 流水工具栏控件
         self._log_filter_dropdown = ft.Dropdown(
-            width=120, height=40, text_size=12,
+            width=120, height=48, text_size=13,
             options=[
                 ft.dropdown.Option("all", "全部"),
                 ft.dropdown.Option("success", "✅ 成功"),
@@ -2649,7 +2663,7 @@ class BatchPostPage:
                             ft.Divider(height=5, color="transparent"),
                             ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
                                 ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
-                                self.bump_matrix_switch,
+                                ft.Row([self.bump_matrix_switch, self.bump_ai_content_switch], spacing=5),
                                 ft.Divider(height=5, color="transparent"),
                                 ft.Text("自顶模式选择", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
                                 self.bump_mode_group,
@@ -2843,6 +2857,10 @@ class BatchPostPage:
     async def _auto_save_switch(self, key: str, value: bool):
         """自动保存开关状态"""
         await self.db.set_setting(key, "1" if value else "0")
+
+    async def _save_ai_persona(self, persona: str):
+        """保存AI人格化设定"""
+        await self.db.set_setting("ai_persona", persona)
 
     def _toggle_schedule(self, e):
         self.schedule_time.visible = e.control.value
@@ -3187,7 +3205,7 @@ class BatchPostPage:
                         ft.Container(expand=True),
                         ft.TextButton(
                             "查看情报", 
-                            style=ft.ButtonStyle(color="error", size=10),
+                            style=ft.ButtonStyle(color="error", text_style=ft.TextStyle(size=10)),
                             on_click=lambda e: self._show_rejection_detail(data)
                         )
                     ], spacing=10),

@@ -143,6 +143,72 @@ class AIOptimizer:
         except Exception as e:
             return False, title, content, f"优化异常: {str(e)}"
 
+    @require_pro
+    async def generate_bump_content(self, title: str, persona: str = "normal") -> Tuple[bool, str, str]:
+        """
+        生成自顶回复内容（简短拟人化）
+        返回: (是否成功, 回复内容, 错误信息)
+        """
+        config = await self._get_config()
+        if not config["api_key"]:
+            return False, "", "请先在设置中配置 AI API Key"
+
+        # 获取人格配置
+        p_config = self.PERSONA_PROMPTS.get(persona, self.PERSONA_PROMPTS["normal"])
+
+        system_prompt = (
+            f"{p_config['system']}\n\n"
+            "【自顶回复准则】\n"
+            "1. 回复必须控制在 5-25 字之间，口语化、去AI痕迹。\n"
+            "2. 严禁使用套话：综上所述、不得不说、首先其次总之、值得注意的是。\n"
+            "3. 严禁营销腔：亲爱的小伙伴、赶紧收藏点赞、评论区见。\n"
+            "4. 语气自然随意，像真实用户在浏览帖子后的随手评论。\n"
+            "5. 可以偶尔带一点emoji，但最多1个。\n\n"
+            "【风格示例】\n"
+            f"{p_config['examples']}"
+        )
+
+        user_prompt = (
+            f"请根据人格（{p_config['name']}）为以下帖子生成一条简短的回帖评论：\n\n"
+            f"帖子标题：{title}\n\n"
+            "要求：\n"
+            "1. 5-25字，口语化，像真实用户随手评论。\n"
+            "2. 不要暴露资源或营销意图。\n"
+            "3. 直接返回评论文本，不需要JSON。\n\n"
+            "示例回复：路过、看了、顶、收藏了、写得不错👍、mark一下"
+        )
+
+        url = f"{config['base_url'].rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {config['api_key']}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": config["model"],
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.9,
+            "max_tokens": 50
+        }
+
+        try:
+            import re
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=20) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        return False, "", f"API 请求失败 ({resp.status})"
+
+                    result = await resp.json()
+                    content = result['choices'][0]['message']['content'].strip()
+                    # 清理可能的引号包裹
+                    content = re.sub(r'^["\'"]|["\'"]$', '', content)
+                    return True, content, ""
+        except Exception as e:
+            return False, "", f"生成异常: {str(e)}"
+
     async def test_connection(self, api_key: str = "", base_url: str = "", model: str = "") -> Tuple[bool, str]:
         """
         测试 AI 接口连通性
