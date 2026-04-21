@@ -914,6 +914,7 @@ class BatchPostManager:
             tried_accounts = set()
             max_account_retries = min(3, len(available_account_ids))
             success_for_this_material = False
+            forum_permission_denied = False  # 贴吧级权限不足标志
             
             for attempt_idx in range(max_account_retries):
                 # 选取账号：传入 material_ptr+attempt_idx 以保证 Failover 时的轮转顺序
@@ -1084,24 +1085,49 @@ class BatchPostManager:
                                     else:
                                         await self.db.update_account_status(account_id, "banned")
                                 
-                                await log_warn(f"账号 {account_id} 发射遭拦截: {err_msg}，准备换号重试...")
+                                # 权限不足识别：贴吧级限制 → 换贴吧而非换号
+                                elif "没有权限" in err_msg or "权限不足" in err_msg or "无权" in err_msg:
+                                    await self.db.mark_forum_banned(account_id, current_target_fname, reason="用户没有权限")
+                                    await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="用户没有权限")
+                                    await log_warn(f"贴吧 [{current_target_fname}] 权限不足，标记靶场并换贴吧继续...")
+                                    forum_permission_denied = True
+                                    break  # 退出账号重试循环，让外层换贴吧/物料
+                                elif "等级" in err_msg or "级别" in err_msg:
+                                    await self.db.mark_forum_banned(account_id, current_target_fname, reason=f"等级限制: {err_msg}")
+                                    await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason=f"等级限制: {err_msg}")
+                                    await log_warn(f"贴吧 [{current_target_fname}] 存在等级限制，标记靶场并换贴吧继续...")
+                                    forum_permission_denied = True
+                                    break  # 退出账号重试循环，让外层换贴吧/物料
+                                else:
+                                    await log_warn(f"账号 {account_id} 发射遭拦截: {err_msg}，准备换号重试...")
                 except Exception as ex:
                     await log_error(f"执行链异常 ({account_id} @ {current_target_fname}): {str(ex)}")
                     await failure_breaker.record_failure(account_id)
             
             if not success_for_this_material:
-                # --- 集成：失败流水持久化 ---
-                await self.db.add_batch_post_log(
-                    task_id=str(task.id),
-                    fname=base_target_fname,
-                    status="error",
-                    message="物料已由多个账号尝试均告失败，可能触发内容风控",
-                    title=current_material.title
-                )
-                await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败")
-                # 记录靶场拦截
-                await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason="多账号尝试均失败")
-                yield {"status": "error", "msg": "物料已由多个账号尝试均告失败，可能内容已变味", "progress": task.progress, "total": task.total}
+                if forum_permission_denied:
+                    # 贴吧权限不足：不标记物料失败，尝试下一个贴吧/物料
+                    await self.db.add_batch_post_log(
+                        task_id=str(task.id),
+                        fname=current_target_fname,
+                        status="skip",
+                        message=f"贴吧权限不足，跳过: {current_target_fname}",
+                        title=current_material.title
+                    )
+                    yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] 权限不足，跳过换吧", "progress": task.progress, "total": task.total}
+                else:
+                    # --- 集成：失败流水持久化 ---
+                    await self.db.add_batch_post_log(
+                        task_id=str(task.id),
+                        fname=base_target_fname,
+                        status="error",
+                        message="物料已由多个账号尝试均告失败，可能触发内容风控",
+                        title=current_material.title
+                    )
+                    await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败")
+                    # 记录靶场拦截
+                    await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason="多账号尝试均失败")
+                    yield {"status": "error", "msg": "物料已由多个账号尝试均告失败，可能内容已变味", "progress": task.progress, "total": task.total}
 
             material_ptr += 1
 
@@ -1446,8 +1472,9 @@ class AutoBumpManager:
             _max_bump_count = int(await self.db.get_setting("max_bump_count", "20"))
             bump_cooldown_minutes = int(await self.db.get_setting("bump_cooldown_minutes", "45"))
             bump_matrix_enabled = (await self.db.get_setting("bump_matrix_enabled", "0")) == "1"
+            bump_ai_content_enabled = (await self.db.get_setting("bump_ai_content", "1")) == "1"
         except Exception:
-            _max_bump_count, bump_cooldown_minutes, bump_matrix_enabled = 20, 60, False  # 保守值
+            _max_bump_count, bump_cooldown_minutes, bump_matrix_enabled, bump_ai_content_enabled = 20, 60, False, True  # 保守值
             
         # 2. 获取开启了自动回帖、发帖成功、且满足冷却时间的物料
         async with self.db.async_session() as session:
@@ -1496,6 +1523,11 @@ class AutoBumpManager:
             if not matrix_pool:
                 matrix_pool = [default_acc] if default_acc else []
 
+            # 预加载 AI 人格化设定和优化器
+            ai_persona = await self.db.get_setting("ai_persona", "normal")
+            from .ai_optimizer import AIOptimizer
+            optimizer = AIOptimizer(self.db)
+
             for material in candidates:
                 bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
                 
@@ -1523,27 +1555,59 @@ class AutoBumpManager:
                 if (target_account_id, material.posted_fname) in banned_pairs:
                     continue
 
-                # --- 拟人化随机文案引擎 ---
-                BUMP_TEMPLATES = [
-                    "路过", "看了", "点赞", "顶", "收藏",
-                    "不错的", "可以", "好贴", "来了", "路过~",
-                    "看了下，还行", "写的挺好的", "收藏了", "支持楼主",
-                    "内容不错，赞", "有意思", "帮顶一下", "可以可以",
-                    "这个确实可以", "路过支持", "mark一下", "看看再说",
-                    "内容挺充实的", "感谢分享", "不错的帖子",
-                    "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
-                    "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
-                    "👍", "✨👍", "好帖", "顶", "已阅", "mark",
-                ]
-                RANDOM_EMOJIS = ["[赞]", "✨", "👍", "👍👍", ""]
+                # --- 自顶内容生成 ---
+                if bump_ai_content_enabled:
+                    # AI 生成模式
+                    try:
+                        ai_success, ai_content, ai_err = await optimizer.generate_bump_content(
+                            material.title or "", ai_persona
+                        )
+                        if ai_success and ai_content:
+                            bump_content = ai_content
+                            await log_info(f"物料 [{material.id}] AI生成自顶内容: {bump_content}")
+                        else:
+                            # AI生成失败时使用兜底模板
+                            templates = [
+                                "路过", "看了", "点赞", "顶", "收藏",
+                                "不错的", "可以", "好贴", "来了", "路过~",
+                                "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
+                                "内容不错，赞", "有意思", "帮顶一下", "可以可以",
+                                "这个确实可以", "路过支持", "mark一下", "看看再说",
+                                "内容挺充实的", "感谢分享", "不错的帖子",
+                                "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
+                                "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
+                                "👍", "✨👍", "好帖", "顶", "已阅", "mark",
+                            ]
+                            emojis = ["[赞]", "✨", "👍", "👍👍", ""]
+                            base_text = random.choice(templates)
+                            if random.random() < 0.2:
+                                keyword = (material.title or "")[:8]
+                                base_text = f"{keyword} 还行，{base_text}"
+                            bump_content = f"{base_text} {random.choice(emojis)}"
+                            await log_warn(f"物料 [{material.id}] AI生成失败，使用模板: {ai_err}")
+                    except Exception as gen_err:
+                        await log_error(f"自顶内容生成异常: {gen_err}")
+                        bump_content = "路过，看了下挺好的"
+                else:
+                    # 固定模板模式
+                    templates = [
+                        "路过", "看了", "点赞", "顶", "收藏",
+                        "不错的", "可以", "好贴", "来了", "路过~",
+                        "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
+                        "内容不错，赞", "有意思", "帮顶一下", "可以可以",
+                        "这个确实可以", "路过支持", "mark一下", "看看再说",
+                        "内容挺充实的", "感谢分享", "不错的帖子",
+                        "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
+                        "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
+                        "👍", "✨👍", "好帖", "顶", "已阅", "mark",
+                    ]
+                    emojis = ["[赞]", "✨", "👍", "👍👍", ""]
+                    base_text = random.choice(templates)
+                    if random.random() < 0.2:
+                        keyword = (material.title or "")[:8]
+                        base_text = f"{keyword} 还行，{base_text}"
+                    bump_content = f"{base_text} {random.choice(emojis)}"
 
-                base_text = random.choice(BUMP_TEMPLATES)
-                if random.random() < 0.2:
-                    keyword = (material.title or "")[:8]
-                    base_text = f"{keyword} 还行，{base_text}"
-
-                bump_content = f"{base_text} {random.choice(RANDOM_EMOJIS)}"
-                    
                 success = await self.post_manager.reply_to_thread(
                     target_account_id, 
                     material.posted_fname, 
