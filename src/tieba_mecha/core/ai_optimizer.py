@@ -11,19 +11,6 @@ class AIOptimizer:
 
     def __init__(self, db: Database):
         self.db = db
-        self._session: aiohttp.ClientSession | None = None
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """获取或创建持久化的 aiohttp.ClientSession，复用连接池"""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
-    async def close(self):
-        """关闭持久化 Session，释放连接池资源"""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     async def _get_config(self) -> dict:
         """获取 AI 配置"""
@@ -118,8 +105,8 @@ class AIOptimizer:
 
         try:
             import re
-            session = await self._get_session()
-            async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         return False, title, content, f"API 请求失败 ({resp.status}): {error_text}"
@@ -199,8 +186,8 @@ class AIOptimizer:
 
         try:
             import re
-            session = await self._get_session()
-            async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         return False, "", f"API 请求失败 ({resp.status})"
@@ -246,8 +233,8 @@ class AIOptimizer:
         
         start_time = time.time()
         try:
-            session = await self._get_session()
-            async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     latency = int((time.time() - start_time) * 1000)
                     if resp.status == 200:
                         return True, f"连接成功 (延迟: {latency}ms)"

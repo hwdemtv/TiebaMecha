@@ -1234,7 +1234,7 @@ class Database:
             data_stmt = (
                 select(MaterialPool)
                 .where(*base_where)
-                .order_by(MaterialPool.id.desc())
+                .order_by(MaterialPool.id.asc())
                 .offset(offset)
                 .limit(page_size)
             )
@@ -1315,7 +1315,7 @@ class Database:
             data_stmt = (
                 select(MaterialPool)
                 .where(*base_where)
-                .order_by(MaterialPool.id.desc())
+                .order_by(MaterialPool.id.asc())
                 .offset(offset)
                 .limit(page_size)
             )
