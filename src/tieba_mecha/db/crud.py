@@ -1382,8 +1382,9 @@ class Database:
             )
             counts = {"alive": 0, "dead": 0, "unknown": 0}
             for status, count in result.all():
-                if status in counts:
-                    counts[status] = count
+                # NULL 或空字符串视为 unknown
+                key = status if status in counts else "unknown"
+                counts[key] = counts.get(key, 0) + count
             return counts
 
     async def get_materials(self, status: str | None = None, limit: int | None = None) -> list[MaterialPool]:
