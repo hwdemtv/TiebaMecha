@@ -1341,6 +1341,7 @@ class Database:
         self,
         statuses: list[str] | None = None,
         search_text: str | None = None,
+        survival_status: str | None = None,
     ) -> list[int]:
         """按状态查询物料 ID 列表（不加载完整对象，用于跨页全选）"""
         async with self.async_session() as session:
@@ -1355,6 +1356,12 @@ class Database:
                     MaterialPool.content.ilike(keyword),
                     MaterialPool.posted_fname.ilike(keyword),
                 ))
+            if survival_status:
+                base_where.append(MaterialPool.survival_status == survival_status)
+            # 归档库全选仅选中 posted_tid 有效的记录，与分页查询保持一致
+            if "success" in (statuses or []):
+                base_where.append(MaterialPool.posted_tid.isnot(None))
+                base_where.append(MaterialPool.posted_tid != 0)
             stmt = sa_select(MaterialPool.id).where(*base_where)
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]

@@ -1281,9 +1281,12 @@ class BatchPostPage:
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
         if is_select:
             arch_search = self._archive_search_text if self._archive_search_text.strip() else None
+            # 传入当前存活筛选状态，确保全选只选中当前筛选条件下的记录
+            arch_surv = self._archive_surv_filter if self._archive_surv_filter != "all" else None
             all_ids = await self.db.get_material_ids_by_status(
                 statuses=["success"],
                 search_text=arch_search,
+                survival_status=arch_surv,
             )
             self._selected_archive_ids = set(all_ids)
         else:

@@ -941,6 +941,12 @@ class AccountsPage:
                 fname = stat['fname']
                 if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
                     continue
+                # 封禁筛选：仅选中被封禁的贴吧
+                if self._matrix_banned_filter and not stat.get('is_banned', False):
+                    continue
+                # 被删筛选：仅选中有删帖记录的贴吧
+                if self._matrix_deleted_filter and stat.get('deleted_count', 0) == 0:
+                    continue
                 self._matrix_selected_fnames.add(fname)
         else:
             self._matrix_selected_fnames.clear()
