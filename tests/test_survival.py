@@ -701,3 +701,51 @@ class TestMaterialsPaginated:
         mat, total = await db.get_materials_paginated(survival_status="alive", account_id=acc.id)
         assert total == 1
         assert mat[0].title == "活"
+
+
+@pytest.mark.asyncio
+class TestGetMaterialIdsByStatus:
+    """Tests for get_material_ids_by_status (cross-page select all)."""
+
+    async def test_empty(self, db):
+        """Test with no data returns empty list."""
+        ids = await db.get_material_ids_by_status(statuses=["pending"])
+        assert ids == []
+
+    async def test_returns_ids_only(self, db):
+        """Test returns list of ints, not full objects."""
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            for i in range(5):
+                session.add(MaterialPool(title=f"标题{i}", content=f"内容{i}", status="pending"))
+            await session.commit()
+
+        ids = await db.get_material_ids_by_status(statuses=["pending"])
+        assert len(ids) == 5
+        assert all(isinstance(i, int) for i in ids)
+
+    async def test_filter_by_status(self, db):
+        """Test filtering by multiple statuses."""
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            session.add(MaterialPool(title="待发", content="c", status="pending"))
+            session.add(MaterialPool(title="失败", content="c", status="failed"))
+            session.add(MaterialPool(title="成功", content="c", status="success"))
+            await session.commit()
+
+        pending_ids = await db.get_material_ids_by_status(statuses=["pending", "failed"])
+        assert len(pending_ids) == 2
+
+        success_ids = await db.get_material_ids_by_status(statuses=["success"])
+        assert len(success_ids) == 1
+
+    async def test_search_text(self, db):
+        """Test search_text filtering."""
+        async with db.async_session() as session:
+            from tieba_mecha.db.models import MaterialPool
+            session.add(MaterialPool(title="特殊关键词", content="c", status="pending"))
+            session.add(MaterialPool(title="普通标题", content="c", status="pending"))
+            await session.commit()
+
+        ids = await db.get_material_ids_by_status(statuses=["pending"], search_text="特殊")
+        assert len(ids) == 1

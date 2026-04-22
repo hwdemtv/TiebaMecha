@@ -1328,6 +1328,28 @@ class Database:
             result = await session.execute(data_stmt)
             return list(result.scalars().all()), total
 
+    async def get_material_ids_by_status(
+        self,
+        statuses: list[str] | None = None,
+        search_text: str | None = None,
+    ) -> list[int]:
+        """按状态查询物料 ID 列表（不加载完整对象，用于跨页全选）"""
+        async with self.async_session() as session:
+            from sqlalchemy import select as sa_select, or_
+            base_where = []
+            if statuses:
+                base_where.append(MaterialPool.status.in_(statuses))
+            if search_text:
+                keyword = f"%{search_text}%"
+                base_where.append(or_(
+                    MaterialPool.title.ilike(keyword),
+                    MaterialPool.content.ilike(keyword),
+                    MaterialPool.posted_fname.ilike(keyword),
+                ))
+            stmt = sa_select(MaterialPool.id).where(*base_where)
+            result = await session.execute(stmt)
+            return [row[0] for row in result.all()]
+
     async def get_materials_status_counts(self) -> dict[str, int]:
         """获取各状态的物料数量统计"""
         async with self.async_session() as session:
