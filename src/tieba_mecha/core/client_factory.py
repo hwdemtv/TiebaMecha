@@ -45,7 +45,11 @@ class MechaClient(aiotieba.Client):
                     )
                     # 替换
                     container.session = new_session
-                    # 我们不在这里关闭 old_session，通常交给 aiotieba 的退出逻辑或让它自动释放
+                    # 关闭旧 session 释放连接池，防止 "Unclosed client session" 警告
+                    try:
+                        await old_session.close()
+                    except Exception:
+                        pass
                     
         return self
 
