@@ -1295,11 +1295,13 @@ class Database:
         page: int = 1,
         page_size: int = 50,
         order_desc: bool = False,
+        survival_status: str | None = None,
     ) -> tuple[list[MaterialPool], int]:
         """按状态列表分页查询物料，支持标题/内容模糊搜索，返回 (列表, 总数)
 
         Args:
             order_desc: 是否按 ID 降序排列（大的在前），默认升序（小的在前）
+            survival_status: 存活状态过滤 (alive/dead/unknown)，None 表示不过滤
         """
         async with self.async_session() as session:
             from sqlalchemy import func, select as sa_select, or_
@@ -1313,6 +1315,8 @@ class Database:
                     MaterialPool.content.ilike(keyword),
                     MaterialPool.posted_fname.ilike(keyword),
                 ))
+            if survival_status:
+                base_where.append(MaterialPool.survival_status == survival_status)
             # 总数
             count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
             total = (await session.execute(count_stmt)).scalar() or 0
