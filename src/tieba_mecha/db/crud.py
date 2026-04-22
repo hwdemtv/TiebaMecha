@@ -1317,6 +1317,10 @@ class Database:
                 ))
             if survival_status:
                 base_where.append(MaterialPool.survival_status == survival_status)
+            # 归档库仅展示有 posted_tid 的记录
+            if "success" in (statuses or []):
+                base_where.append(MaterialPool.posted_tid.isnot(None))
+                base_where.append(MaterialPool.posted_tid != 0)
             # 总数
             count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
             total = (await session.execute(count_stmt)).scalar() or 0

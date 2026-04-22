@@ -681,7 +681,7 @@ class BatchPostPage:
                 if tab.icon == "list_alt_rounded":
                     tab.text = f"物料排期池 ({pending + failed})"
                 elif tab.icon == "archive_rounded":
-                    tab.text = f"已发归档库 ({success})"
+                    tab.text = f"已发归档库 ({archive_total_count})"
 
         # --- 排期池分页查询 ---
         mat_search = self._material_search_text if self._material_search_text.strip() else None
