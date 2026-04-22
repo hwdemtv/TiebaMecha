@@ -14,7 +14,7 @@ services:
       # 如果需要指定自定义端口，可以启用下方设置
       # - PORT=9006
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9006"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9006')"]
       interval: 30s
       timeout: 10s
       retries: 3

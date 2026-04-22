@@ -1,5 +1,6 @@
 """AI SEO Optimizer for TiebaMecha"""
 import json
+import logging
 import aiohttp
 from typing import Tuple, Optional
 from ..db.crud import Database
@@ -10,6 +11,19 @@ class AIOptimizer:
 
     def __init__(self, db: Database):
         self.db = db
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建持久化的 aiohttp.ClientSession，复用连接池"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close(self):
+        """关闭持久化 Session，释放连接池资源"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     async def _get_config(self) -> dict:
         """获取 AI 配置"""
@@ -22,16 +36,6 @@ class AIOptimizer:
             "base_url": base_url,
             "model": model
         }
-
-    @require_pro
-    async def optimize_post(self, title: str, content: str) -> Tuple[bool, str, str, str]:
-        """
-        优化帖子内容
-        返回: (是否成功, 优化后的标题, 优化后的内容, 错误信息)
-        """
-        config = await self._get_config()
-        if not config["api_key"]:
-            return False, title, content, "请先在设置中配置 AI API Key"
 
     # 预设人格配置库
     PERSONA_PROMPTS = {
@@ -80,7 +84,7 @@ class AIOptimizer:
             "1. 标题必须在 5-31 字之间，核心关键词前置。\n"
             "2. 严禁出现以下 AI 常用虚词：综上所述、不得不说、毫无疑问、总之、总的来说、不仅如此、另一方面、此外、因此。\n"
             "3. 绝对禁止营销腔：亲爱的小伙伴们、你还在等什么、赶紧收藏、评论区见、建议收藏、点赞关注。\n"
-            "4. 完整保留所有链接和关键数据，格式严禁修改。\n"
+            "4. 完整保留所有链接和关键数据，格式严禁修改。原文中的公众号名称、频道ID、群号等引流标识一律视为关键数据完整保留，不得删除或改写。\n"
             "5. 内容中最多使用 1 个 emoji，严禁使用分点符号（如📌、🎯、✅）。\n\n"
             "【风格示例】\n"
             f"{p_config['examples']}"
@@ -114,8 +118,8 @@ class AIOptimizer:
 
         try:
             import re
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+            session = await self._get_session()
+            async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         return False, title, content, f"API 请求失败 ({resp.status}): {error_text}"
@@ -195,8 +199,8 @@ class AIOptimizer:
 
         try:
             import re
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=20) as resp:
+            session = await self._get_session()
+            async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         return False, "", f"API 请求失败 ({resp.status})"
@@ -242,8 +246,8 @@ class AIOptimizer:
         
         start_time = time.time()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=15) as resp:
+            session = await self._get_session()
+            async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     latency = int((time.time() - start_time) * 1000)
                     if resp.status == 200:
                         return True, f"连接成功 (延迟: {latency}ms)"

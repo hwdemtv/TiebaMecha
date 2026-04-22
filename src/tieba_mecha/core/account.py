@@ -173,8 +173,7 @@ async def get_account_credentials(db: Database, account_id: int | None = None) -
         (id, BDUSS, STOKEN, proxy_id, cuid, user_agent) 或 None
     """
     if account_id:
-        accounts = await db.get_accounts()
-        account = next((a for a in accounts if a.id == account_id), None)
+        account = await db.get_account_by_id(account_id)
     else:
         account = await db.get_active_account()
 
@@ -283,8 +282,7 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
         AccountInfo: 更新后的账号信息，账号不存在返回 None
     """
     # 获取账号
-    accounts = await db.get_accounts()
-    account = next((a for a in accounts if a.id == account_id), None)
+    account = await db.get_account_by_id(account_id)
     if not account:
         return None
 

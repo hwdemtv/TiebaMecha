@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 logger = logging.getLogger(__name__)
@@ -62,143 +62,93 @@ class Database:
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False)
 
+    async def _get_existing_columns(self, conn, table_name: str) -> set[str]:
+        """使用 PRAGMA table_info 检查表中已有的列名，避免盲目 ALTER TABLE"""
+        result = await conn.execute(text(f"PRAGMA table_info({table_name})"))
+        return {row[1] for row in result}
+
+    async def _safe_add_column(self, conn, table_name: str, column_name: str, column_def: str, existing: set[str] | None = None):
+        """安全地添加列，仅在列不存在时执行 ALTER TABLE"""
+        if existing is None:
+            existing = await self._get_existing_columns(conn, table_name)
+        if column_name not in existing:
+            await conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"))
+            logger.debug(f"Added column '{column_name}' to {table_name}")
+
     async def init_db(self) -> None:
         """初始化数据库表并执行轻量级迁移"""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            
-        # 简单模式：尝试添加缺失的列 (SQLite 不支持一次添加多个)
-        from sqlalchemy import text
-        columns = [
-            ("status", "VARCHAR(20) DEFAULT 'unknown'"), 
-            ("last_verified", "DATETIME"),
-            ("cuid", "VARCHAR(100) DEFAULT ''"),
-            ("user_agent", "VARCHAR(255) DEFAULT ''"),
-            ("created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
-            ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
-            ("proxy_id", "INTEGER"),
-            ("post_weight", "INTEGER DEFAULT 5"),
-            ("suspended_reason", "VARCHAR(200) DEFAULT ''"),
-        ]
-        for column, col_type in columns:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(f"ALTER TABLE accounts ADD COLUMN {column} {col_type}"))
-            except Exception as e:
-                if "duplicate column" in str(e).lower():
-                    logger.debug(f"Column '{column}' already exists in accounts table")
-                else:
-                    logger.warning(f"Failed to add column '{column}' to accounts: {e}")
 
-        # BatchPostTask 新字段迎移
-        batch_columns = [
-            ("batch_post_tasks", "fnames_json", "TEXT DEFAULT '[]'"),
-            ("batch_post_tasks", "strategy", "VARCHAR(20) DEFAULT 'round_robin'"),
-            ("batch_post_tasks", "ai_persona", "VARCHAR(50) DEFAULT 'normal'"),
-        ]
-        for table, column, col_type in batch_columns:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-            except Exception as e:
-                if "duplicate column" in str(e).lower():
-                    logger.debug(f"Column '{column}' already exists in {table} table")
-                else:
-                    logger.warning(f"Failed to add column '{column}' to {table}: {e}")
-        # MaterialPool 新字段迁移
-        material_columns = [
-            ("material_pool", "survival_status", "VARCHAR(20) DEFAULT 'unknown'"),
-            ("material_pool", "death_reason", "VARCHAR(100) DEFAULT ''"),
-            ("material_pool", "last_checked_at", "DATETIME DEFAULT NULL"),
-        ]
-        for table, column, col_type in material_columns:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-            except Exception as e:
-                if "duplicate column" in str(e).lower():
-                    logger.debug(f"Column '{column}' already exists in {table} table")
-                else:
-                    logger.warning(f"Failed to add column '{column}' to {table}: {e}")
+            # 预查询各表已有列，避免重复 ALTER TABLE 尝试
+            accounts_cols = await self._get_existing_columns(conn, "accounts")
+            forums_cols = await self._get_existing_columns(conn, "forums")
+            material_cols = await self._get_existing_columns(conn, "material_pool")
+            batch_cols = await self._get_existing_columns(conn, "batch_post_tasks")
 
-        # 贴吧字段迁移
-        for new_col in [
-            "last_sign_status VARCHAR(20) DEFAULT 'pending'",
-            "history_total INTEGER DEFAULT 0",
-            "history_success INTEGER DEFAULT 0",
-            "history_failed INTEGER DEFAULT 0",
-            "level INTEGER DEFAULT 0"
-        ]:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(f"ALTER TABLE forums ADD COLUMN {new_col}"))
-            except Exception as e:
-                if "duplicate column" in str(e).lower():
-                    logger.debug(f"Forums column already exists: {new_col.split()[0]}")
-                else:
-                    logger.warning(f"Failed to add forums column: {e}")
+            # Accounts 字段迁移
+            accounts_migrations = [
+                ("status", "VARCHAR(20) DEFAULT 'unknown'"),
+                ("last_verified", "DATETIME"),
+                ("cuid", "VARCHAR(100) DEFAULT ''"),
+                ("user_agent", "VARCHAR(255) DEFAULT ''"),
+                ("created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+                ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+                ("proxy_id", "INTEGER"),
+                ("post_weight", "INTEGER DEFAULT 5"),
+                ("suspended_reason", "VARCHAR(200) DEFAULT ''"),
+                ("is_maint_enabled", "BOOLEAN DEFAULT 0"),
+                ("last_maint_at", "DATETIME DEFAULT NULL"),
+            ]
+            for col_name, col_type in accounts_migrations:
+                await self._safe_add_column(conn, "accounts", col_name, col_type, accounts_cols)
 
-        # MaterialPool 新字段迁移
-        for col_sql in [
-            "ALTER TABLE material_pool ADD COLUMN posted_fname VARCHAR(100) DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN posted_tid BIGINT DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN posted_account_id INTEGER DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN is_auto_bump BOOLEAN DEFAULT 0",
-            "ALTER TABLE material_pool ADD COLUMN bump_count INTEGER DEFAULT 0",
-            "ALTER TABLE material_pool ADD COLUMN last_bumped_at DATETIME DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN posted_time DATETIME DEFAULT NULL",
-            # 自顶模式扩展字段
-            "ALTER TABLE material_pool ADD COLUMN bump_mode VARCHAR(20) DEFAULT 'once'",
-            "ALTER TABLE material_pool ADD COLUMN bump_hour INTEGER DEFAULT 10",
-            "ALTER TABLE material_pool ADD COLUMN bump_duration_days INTEGER DEFAULT 0",
-            "ALTER TABLE material_pool ADD COLUMN bump_start_date DATE DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN bump_account_ids TEXT DEFAULT NULL",
-            "ALTER TABLE material_pool ADD COLUMN bump_account_index INTEGER DEFAULT 0",
-            "ALTER TABLE material_pool ADD COLUMN bump_last_date DATE DEFAULT NULL",
-        ]:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(col_sql))
-            except Exception as e:
-                if "duplicate column" in str(e).lower():
-                    logger.debug(f"MaterialPool column already exists")
-                else:
-                    logger.warning(f"Failed to add MaterialPool column: {e}")
+            # BatchPostTask 新字段迁移
+            batch_migrations = [
+                ("fnames_json", "TEXT DEFAULT '[]'"),
+                ("strategy", "VARCHAR(20) DEFAULT 'round_robin'"),
+                ("ai_persona", "VARCHAR(50) DEFAULT 'normal'"),
+            ]
+            for col_name, col_type in batch_migrations:
+                await self._safe_add_column(conn, "batch_post_tasks", col_name, col_type, batch_cols)
 
-        # Forums 表新字段迁移 (作为本号发帖目标)
-        try:
-            async with self.engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE forums ADD COLUMN is_post_target BOOLEAN DEFAULT 0"))
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.warning(f"Failed to add is_post_target to forums: {e}")
+            # MaterialPool 字段迁移
+            material_migrations = [
+                ("survival_status", "VARCHAR(20) DEFAULT 'unknown'"),
+                ("death_reason", "VARCHAR(100) DEFAULT ''"),
+                ("last_checked_at", "DATETIME DEFAULT NULL"),
+                ("posted_fname", "VARCHAR(100) DEFAULT NULL"),
+                ("posted_tid", "BIGINT DEFAULT NULL"),
+                ("posted_account_id", "INTEGER DEFAULT NULL"),
+                ("is_auto_bump", "BOOLEAN DEFAULT 0"),
+                ("bump_count", "INTEGER DEFAULT 0"),
+                ("last_bumped_at", "DATETIME DEFAULT NULL"),
+                ("posted_time", "DATETIME DEFAULT NULL"),
+                ("bump_mode", "VARCHAR(20) DEFAULT 'once'"),
+                ("bump_hour", "INTEGER DEFAULT 10"),
+                ("bump_duration_days", "INTEGER DEFAULT 0"),
+                ("bump_start_date", "DATE DEFAULT NULL"),
+                ("bump_account_ids", "TEXT DEFAULT NULL"),
+                ("bump_account_index", "INTEGER DEFAULT 0"),
+                ("bump_last_date", "DATE DEFAULT NULL"),
+            ]
+            for col_name, col_type in material_migrations:
+                await self._safe_add_column(conn, "material_pool", col_name, col_type, material_cols)
 
-        # Forums 表新字段迁移 (隐藏贴吧与封禁状态)
-        for col_sql in [
-            "ALTER TABLE forums ADD COLUMN is_hidden BOOLEAN DEFAULT 0",
-            "ALTER TABLE forums ADD COLUMN is_banned BOOLEAN DEFAULT 0",
-            "ALTER TABLE forums ADD COLUMN ban_reason VARCHAR(200) DEFAULT NULL",
-        ]:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(col_sql))
-            except Exception as e:
-                if "duplicate column" not in str(e).lower():
-                    logger.warning(f"Failed to add forums tracking column: {e}")
-
-        # Accounts 表新字段迁移 (BioWarming 养号支持)
-        for col_sql in [
-            "ALTER TABLE accounts ADD COLUMN is_maint_enabled BOOLEAN DEFAULT 0",
-            "ALTER TABLE accounts ADD COLUMN last_maint_at DATETIME DEFAULT NULL",
-        ]:
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.execute(text(col_sql))
-            except Exception as e:
-                if "duplicate column" in str(e).lower():
-                    logger.debug(f"Accounts BioWarming column already exists")
-                else:
-                    logger.warning(f"Failed to add Accounts BioWarming column: {e}")
+            # Forums 字段迁移
+            forums_migrations = [
+                ("last_sign_status", "VARCHAR(20) DEFAULT 'pending'"),
+                ("history_total", "INTEGER DEFAULT 0"),
+                ("history_success", "INTEGER DEFAULT 0"),
+                ("history_failed", "INTEGER DEFAULT 0"),
+                ("level", "INTEGER DEFAULT 0"),
+                ("is_post_target", "BOOLEAN DEFAULT 0"),
+                ("is_hidden", "BOOLEAN DEFAULT 0"),
+                ("is_banned", "BOOLEAN DEFAULT 0"),
+                ("ban_reason", "VARCHAR(200) DEFAULT NULL"),
+            ]
+            for col_name, col_type in forums_migrations:
+                await self._safe_add_column(conn, "forums", col_name, col_type, forums_cols)
 
         # 数据自愈：确保所有账号的 post_weight 都有默认值 5
         try:
@@ -206,13 +156,6 @@ class Database:
                 await session.execute(text("UPDATE accounts SET post_weight = 5 WHERE post_weight IS NULL"))
         except Exception as e:
             logger.warning(f"Failed to heal post_weight data: {e}")
-
-        # BatchPostLog 表创建 (如果不存在则创建，SQLAlchemy create_all 已经涵盖，但此处显式检查迁移)
-        try:
-            async with self.engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-        except Exception as e:
-            logger.warning(f"Failed to ensure batch_post_logs table exists: {e}")
 
 
     async def close(self) -> None:
@@ -342,17 +285,29 @@ class Database:
             account = await session.get(Account, account_id)
             if account:
                 account.status = status
-                account.last_verified = __import__("datetime").datetime.now()
+                account.last_verified = datetime.now()
                 await session.commit()
 
+    # update_account 允许修改的字段白名单
+    _ACCOUNT_UPDATABLE_FIELDS = frozenset({
+        "name", "bduss", "stoken", "user_id", "user_name",
+        "proxy_id", "cuid", "user_agent", "post_weight",
+        "is_active", "status", "last_verified", "suspended_reason",
+        "is_maint_enabled", "last_maint_at",
+    })
+
+    async def get_account_by_id(self, account_id: int) -> Account | None:
+        """根据 ID 获取单个账号（直接查询，避免全表扫描）"""
+        async with self.async_session() as session:
+            return await session.get(Account, account_id)
+
     async def update_account(self, account_id: int, **kwargs) -> Account | None:
-        """更新账号信息"""
+        """更新账号信息（仅允许白名单中的字段）"""
         async with self.async_session() as session:
             account = await session.get(Account, account_id)
             if account:
                 for key, value in kwargs.items():
-                    # SQLAlchemy 映射属性检测优化
-                    if hasattr(Account, key):
+                    if key in self._ACCOUNT_UPDATABLE_FIELDS:
                         setattr(account, key, value)
                 await session.commit()
                 await session.refresh(account)
@@ -390,7 +345,7 @@ class Database:
         async with self.async_session() as session:
             account = await session.get(Account, account_id)
             if account:
-                account.last_maint_at = __import__("datetime").datetime.now()
+                account.last_maint_at = datetime.now()
                 await session.commit()
 
     async def suspend_accounts_for_proxy(self, proxy_id: int, reason: str = "代理失效自动隔离") -> list[Account]:
@@ -460,13 +415,24 @@ class Database:
         return {"updated": updated, "failed": failed}
 
     async def get_accounts_with_forums(self) -> list[tuple[Account, list[Forum]]]:
-        """获取所有账号及其关联的贴吧列表"""
-        accounts = await self.get_accounts()
-        result = []
-        for acc in accounts:
-            forums = await self.get_forums(acc.id)
-            result.append((acc, forums))
-        return result
+        """获取所有账号及其关联的贴吧列表（批量查询避免 N+1 问题）"""
+        async with self.async_session() as session:
+            # 一次性获取所有账号
+            acc_stmt = select(Account).order_by(Account.id)
+            acc_result = await session.execute(acc_stmt)
+            accounts = list(acc_result.scalars().all())
+
+            # 一次性获取所有贴吧，按 account_id 分组
+            forum_stmt = select(Forum).order_by(Forum.account_id)
+            forum_result = await session.execute(forum_stmt)
+            all_forums = list(forum_result.scalars().all())
+
+            # 构建 account_id → forums 映射
+            forums_by_account: dict[int, list[Forum]] = {}
+            for f in all_forums:
+                forums_by_account.setdefault(f.account_id, []).append(f)
+
+            return [(acc, forums_by_account.get(acc.id, [])) for acc in accounts]
 
     async def get_accounts_not_following_forum(self, fname: str) -> list[Account]:
         """
@@ -571,7 +537,7 @@ class Database:
                 
                 # 强制平衡：总数始终等于 成功 + 失败 (按天计费)
                 forum.history_total = forum.history_success + forum.history_failed
-                forum.last_sign_date = __import__("datetime").datetime.now()
+                forum.last_sign_date = datetime.now()
                 await session.commit()
 
     async def recalculate_all_forum_stats(self) -> dict:
@@ -779,7 +745,7 @@ class Database:
                 if total_count is not None:
                     task.total_count = total_count
                 if status == "completed":
-                    task.completed_at = __import__("datetime").datetime.now()
+                    task.completed_at = datetime.now()
                 await session.commit()
                 await session.refresh(task)
                 return task
@@ -896,7 +862,7 @@ class Database:
     async def clear_post_cache(self) -> None:
         """清空帖子缓存"""
         async with self.async_session() as session:
-            await session.execute(__import__("sqlalchemy").delete(PostCache))
+            await session.execute(delete(PostCache))
             await session.commit()
 
     # ========== Settings CRUD ==========
@@ -1090,7 +1056,7 @@ class Database:
                     if hasattr(task, k):
                         setattr(task, k, v)
                 if kwargs.get("status") == "completed":
-                    task.completed_at = __import__("datetime").datetime.now()
+                    task.completed_at = datetime.now()
                 await session.commit()
 
     async def get_all_batch_tasks(self, limit: int = 50) -> list[BatchPostTask]:
@@ -1384,7 +1350,6 @@ class Database:
             return counts
 
     async def get_materials(self, status: str | None = None, limit: int | None = None) -> list[MaterialPool]:
-        from sqlalchemy import text
         async with self.async_session() as session:
             stmt = select(MaterialPool).order_by(MaterialPool.id)
             if status:

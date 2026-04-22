@@ -1,7 +1,8 @@
 """Global Daemon for Scheduled Tasks"""
 import asyncio
 import json
-from datetime import datetime
+import random
+from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .sign import sign_all_forums, sign_all_accounts
@@ -9,6 +10,7 @@ from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
 from .auth import get_auth_manager
+from .account import get_account_credentials
 from ..db.crud import get_db
 
 async def do_sign_task():
@@ -124,7 +126,7 @@ async def do_batch_post_tasks():
                 if task.interval_hours < MIN_INTERVAL_HOURS:
                     print(f"[DAEMON] ⚠️ 循环间隔过短 ({task.interval_hours}h)，已自动调整为 {actual_interval}h")
                 
-                next_time = datetime.now() + __import__("datetime").timedelta(hours=actual_interval)
+                next_time = datetime.now() + timedelta(hours=actual_interval)
                 await db.update_batch_task(task.id, status="pending", schedule_time=next_time, progress=0)
                 print(f"[DAEMON] 循环任务 ID={task.id} 已完成本轮，下次执行: {next_time}")
             else:
@@ -156,13 +158,13 @@ async def do_maintenance_task():
         try:
             await manager.run_maint_cycle(acc.id)
             # 账号间增加长随机延迟，防止 IP 行为重合
-            await asyncio.sleep(__import__("random").uniform(300, 900)) 
+            await asyncio.sleep(random.uniform(300, 900)) 
         except Exception as e:
             print(f"[DAEMON] 账号 {acc.name} 维护异常: {e}")
 
 async def do_auth_check_task():
     """执行在线授权静默探测的内部包裹"""
-    am = get_auth_manager()
+    am = await get_auth_manager()
     print(f"[{datetime.now()}] [DAEMON] 启动后台授权校准与多节点探活...")
     success = await am.verify_online()
     if success:

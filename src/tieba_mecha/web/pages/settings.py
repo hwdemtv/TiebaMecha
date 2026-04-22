@@ -53,7 +53,7 @@ class SettingsPage:
         self._settings["license_server_url"] = await self.db.get_setting("license_server_url", "https://license.hubinwei.top")
         
         # 获取硬件指纹
-        am = get_auth_manager()
+        am = await get_auth_manager()
         self._settings["hwid"] = await am.get_hwid()
         
         self.refresh_ui()
@@ -77,7 +77,7 @@ class SettingsPage:
             self.license_key_field.value = self._settings.get("license_key", "")
             
             # 更新授权状态标签
-            am = get_auth_manager()
+            am = await get_auth_manager()
             if am.status == AuthStatus.PRO:
                 self.auth_info_label.value = "✔️ 已激活 Pro 特权"
                 self.auth_info_label.color = COLORS.GREEN

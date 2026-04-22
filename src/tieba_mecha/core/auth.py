@@ -154,7 +154,7 @@ class LicenseManager:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         
-        connector = aiohttp.TCPConnector(ssl=False)
+        connector = aiohttp.TCPConnector()
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             for server in servers:
                 try:
@@ -201,7 +201,7 @@ def require_pro(f):
     """Pro 权限功能拦截装饰器"""
     @wraps(f)
     async def wrapper(*args, **kwargs):
-        lm = get_auth_manager()
+        lm = await get_auth_manager()
         # 如果当前状态不是 PRO，尝试读取本地缓存
         if lm.status != AuthStatus.PRO:
             await lm.check_local_status()
@@ -223,10 +223,13 @@ def require_pro(f):
         return await f(*args, **kwargs)
     return wrapper
 
-_manager = None
+_manager: LicenseManager | None = None
+_manager_lock = asyncio.Lock()
 
-def get_auth_manager(db=None) -> LicenseManager:
+async def get_auth_manager(db=None) -> LicenseManager:
     global _manager
-    if not _manager:
-        _manager = LicenseManager(db=db)
+    if _manager is None:
+        async with _manager_lock:
+            if _manager is None:
+                _manager = LicenseManager(db=db)
     return _manager
