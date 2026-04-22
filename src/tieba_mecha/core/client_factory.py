@@ -63,17 +63,22 @@ async def create_client(db: Database, bduss: str, stoken: str = "", proxy_id: in
     if proxy_id:
         proxy = await get_best_proxy_config(db, proxy_id=proxy_id)
         if proxy:
-            # 这里的 proxy 是 ProxyConfig 对象
-            # ⚠️ 统一使用 ProxyConnector：实测 HTTP/HTTPS 代理直接传 proxy 参数会触发
+            # 统一使用 ProxyConnector：实测 HTTP/HTTPS 代理直接传 proxy 参数会触发
             # "Can not write request body" 错误，改用 connector 模式可解决
             from aiohttp_socks import ProxyConnector
-            # 如果是 socks 协议，从 proxy.url 获取；否则直接构造 HTTP 代理 URL
-            if str(proxy.url).startswith("socks"):
-                client_kwargs["connector"] = ProxyConnector.from_url(str(proxy.url))
-            else:
-                # HTTP/HTTPS 代理使用 ProxyConnector 构造器（from_url 可处理 http:// 协议）
-                # 注意：aiohttp_socks 从 0.8+ 版本开始支持 http:// 协议
-                client_kwargs["connector"] = ProxyConnector.from_url(str(proxy.url))
+            
+            proxy_url = str(proxy.url)
+            # 如果 proxy.auth 存在（HTTP/HTTPS 代理带认证），将认证信息拼入 URL
+            # 否则 ProxyConnector.from_url 会以无认证模式连接，导致
+            # "NO ACCEPTABLE METHODS" 错误
+            if proxy.auth and not ("@" in proxy_url):
+                import urllib.parse
+                u = urllib.parse.quote(proxy.auth.login, safe="")
+                p = urllib.parse.quote(proxy.auth.password, safe="")
+                # 在 :// 后面插入 user:pass@
+                proxy_url = proxy_url.replace("://", f"://{u}:{p}@", 1)
+            
+            client_kwargs["connector"] = ProxyConnector.from_url(proxy_url, rdns=False)
             
     # 提前构造 Account 对象并注入 cuid，确保独立指纹
     account = Account(BDUSS=bduss, STOKEN=stoken)
