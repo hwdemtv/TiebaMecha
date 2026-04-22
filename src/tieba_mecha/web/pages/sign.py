@@ -403,7 +403,7 @@ class SignPage:
                         icon_size=18,
                         icon_color="error",
                         tooltip="取消关注",
-                        on_click=lambda e, fid=f.id, fname=f.fname: self.page.run_task(self._on_unfollow_forum, fid, fname)
+                        on_click=lambda e, fname=f.fname: self.page.run_task(self._on_unfollow_forum, fname)
                     ),
                     ft.IconButton(
                         icon=HISTORY_ROUNDED,
@@ -692,7 +692,7 @@ class SignPage:
         elif type == "success": color = COLORS.GREEN
         self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
 
-    async def _on_unfollow_forum(self, forum_id: int, fname: str):
+    async def _on_unfollow_forum(self, fname: str):
         """取消关注单个贴吧"""
         async def do_unfollow(e):
             try:

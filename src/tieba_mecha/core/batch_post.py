@@ -1207,6 +1207,7 @@ class BatchPostManager:
 
         total_actions = len(account_ids) * len(fnames)
         current_action = 0
+        failed_count = 0
         
         for acc_id in account_ids:
             creds = await get_account_credentials(self.db, acc_id)
@@ -1228,6 +1229,7 @@ class BatchPostManager:
                             _ = await client.unfollow_forum(fname)
                             await log_info(f"账号 {acc_id} 已成功取消关注 [{fname}]")
                         except Exception as e:
+                            failed_count += 1
                             await log_error(f"账号 {acc_id} 取消关注 [{fname}] 失败: {str(e)}")
                         
                         current_action += 1
@@ -1237,13 +1239,17 @@ class BatchPostManager:
                         # 批量操作期间的小休眠，防止触发高频拦截
                         await asyncio.sleep(random.uniform(0.5, 1.5))
             except Exception as e:
+                failed_count += len(fnames)
                 await log_error(f"创建客户端执行取关任务失败(ID:{acc_id}): {e}")
 
         # 2. 清理数据库记录
         del_membership_count = await self.db.delete_forum_memberships_globally(fnames)
         del_target_count = await self.db.delete_target_pool_by_fnames(fnames)
         
-        await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")
+        if failed_count > 0:
+            await log_warn(f"全局阵地清理完成（有 {failed_count} 次取关失败）：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。注意：部分取关失败的贴吧线上仍处于关注状态。")
+        else:
+            await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")
         return True
 
     async def follow_forums_bulk(self, fnames: list[str], account_ids: list[int] | None = None, progress_callback: Any = None) -> dict[str, Any]:
