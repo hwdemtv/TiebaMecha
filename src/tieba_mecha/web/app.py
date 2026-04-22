@@ -49,6 +49,9 @@ class TiebaMechaApp:
         self.page.theme = get_dark_theme()
         self.page.dark_theme = get_dark_theme()
 
+        # Web 刷新时清除残留对话框（on_connect 在浏览器重新连接时触发）
+        self.page.on_connect = self._on_web_reconnect
+
         # 窗口设置
         self.page.window.width = 1100
         self.page.window.height = 750
@@ -519,6 +522,20 @@ class TiebaMechaApp:
                 await asyncio.sleep(3600)
 
 
+    def _on_web_reconnect(self, e):
+        """浏览器刷新/重连时清除残留的对话框"""
+        try:
+            overlay_to_keep = []
+            for ctrl in self.page.overlay:
+                # 仅保留 FilePicker 等非对话框控件
+                if isinstance(ctrl, ft.FilePicker):
+                    overlay_to_keep.append(ctrl)
+            self.page.overlay.clear()
+            self.page.overlay.extend(overlay_to_keep)
+            self.page.update()
+        except Exception:
+            pass
+
     def _on_nav_change(self, e):
         """处理导航切换"""
         dest_map = {
@@ -541,6 +558,15 @@ class TiebaMechaApp:
         """页面路由跳转核心逻辑"""
         try:
             self.current_page = page_name
+
+            # 清除残留的对话框（Web 刷新后 page.overlay 中可能残留之前打开的 AlertDialog/BottomSheet）
+            overlay_to_keep = []
+            for ctrl in self.page.overlay:
+                # 保留 FilePicker 等非对话框控件
+                if isinstance(ctrl, ft.FilePicker):
+                    overlay_to_keep.append(ctrl)
+            self.page.overlay.clear()
+            self.page.overlay.extend(overlay_to_keep)
 
             # 尝试从缓存获取页面对象
             if page_name in self._pages_cache:
