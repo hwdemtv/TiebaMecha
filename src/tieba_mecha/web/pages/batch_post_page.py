@@ -658,13 +658,16 @@ class BatchPostPage:
         # 归档存活统计（使用数据库轻量查询代替全量加载）
         alive_count = 0
         dead_count = 0
+        unknown_count = 0
         if self._archive_surv_filter != "all" or hasattr(self, "_archive_alive_count_text"):
             surv_counts = await self.db.get_success_survival_counts()
             alive_count = surv_counts.get("alive", 0)
             dead_count = surv_counts.get("dead", 0)
+            unknown_count = surv_counts.get("unknown", 0)
 
+        archive_total_count = alive_count + dead_count + unknown_count
         if hasattr(self, "_archive_all_count_text"):
-            self._archive_all_count_text.value = f" ({success})"
+            self._archive_all_count_text.value = f" ({archive_total_count})"
             self._archive_all_count_text.color = "white" if self._archive_surv_filter == "all" else "onSurfaceVariant"
         if hasattr(self, "_archive_alive_count_text"):
             self._archive_alive_count_text.value = f" ({alive_count})"
@@ -746,13 +749,15 @@ class BatchPostPage:
 
         # --- 归档库分页查询 ---
         arch_search = self._archive_search_text if self._archive_search_text.strip() else None
-        # 存活状态过滤在客户端处理（需要 survival_cache）
+        # 存活状态过滤在服务端处理，确保分页数据量正确
+        arch_surv = self._archive_surv_filter if self._archive_surv_filter != "all" else None
         arch_items, self._archive_total = await self.db.get_materials_by_status_paginated(
             statuses=["success"],
             search_text=arch_search,
             page=self._archive_page,
             page_size=self._archive_page_size,
             order_desc=True,
+            survival_status=arch_surv,
         )
         self._archive_items = arch_items  # 保存引用供全选等操作使用
         archive_rows = []
@@ -761,12 +766,6 @@ class BatchPostPage:
                 m_title = m.title or ""
                 m_content = m.content or ""
                 m_posted_fname = m.posted_fname or "未知吧"
-                # 存活状态过滤（客户端，因为依赖 survival_cache）
-                surv_status = self._survival_cache.get(m.posted_tid, "unknown")
-                if self._archive_surv_filter == "alive" and surv_status != "alive":
-                    continue
-                if self._archive_surv_filter == "dead" and surv_status != "dead":
-                    continue
 
                 display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
                 # 自顶状态逻辑
@@ -799,18 +798,22 @@ class BatchPostPage:
                     bump_color = "onSurfaceVariant"
                     bump_tooltip = "自顶功能当前处于手动关闭状态"
 
+                # 存活图标：探测中用缓存 checking 状态，否则用数据库字段
+                surv_display = self._survival_cache.get(m.posted_tid) if m.posted_tid else None
+                if surv_display != "checking":
+                    surv_display = surv_status
                 surv_icon = icons.HEALTH_AND_SAFETY
                 surv_color = "grey"
                 surv_tooltip = "探测链接存活状态"
-                if surv_status == "checking":
+                if surv_display == "checking":
                     surv_icon = icons.HOURGLASS_EMPTY
                     surv_color = "blue"
                     surv_tooltip = "探测中..."
-                elif surv_status == "alive":
+                elif surv_display == "alive":
                     surv_icon = icons.CHECK_CIRCLE
                     surv_color = "green"
                     surv_tooltip = "探测完毕：该外链健康存活"
-                elif surv_status == "dead":
+                elif surv_display == "dead":
                     surv_icon = icons.REMOVE_CIRCLE
                     surv_color = "error"
                     surv_tooltip = "已被抽除或无法访问"
@@ -868,10 +871,6 @@ class BatchPostPage:
             except Exception as ex:
                 continue
 
-        # 存活过滤时修正实际可见总数（客户端过滤导致服务端总数偏大）
-        visible_archive_count = len(archive_rows)
-        if self._archive_surv_filter != "all":
-            self._archive_total = visible_archive_count
 
         self._material_table.rows = pending_rows
         self._archive_table.rows = archive_rows
@@ -1010,8 +1009,6 @@ class BatchPostPage:
         selected_materials = await self.db.get_materials_by_ids(list(self._selected_archive_ids))
         for m in selected_materials:
             if m.status == "success" and m.posted_tid:
-                targets.append(m)
-                self._survival_cache[m.posted_tid] = "checking"
                 targets.append(m)
                 self._survival_cache[m.posted_tid] = "checking"
                 
