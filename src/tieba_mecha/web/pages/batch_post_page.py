@@ -656,16 +656,12 @@ class BatchPostPage:
             self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})"
 
         # 归档存活统计（使用数据库轻量查询代替全量加载）
-        alive_count = 0
-        dead_count = 0
-        unknown_count = 0
-        if self._archive_surv_filter != "all" or hasattr(self, "_archive_alive_count_text"):
-            surv_counts = await self.db.get_success_survival_counts()
-            alive_count = surv_counts.get("alive", 0)
-            dead_count = surv_counts.get("dead", 0)
-            unknown_count = surv_counts.get("unknown", 0)
-
+        surv_counts = await self.db.get_success_survival_counts()
+        alive_count = surv_counts.get("alive", 0)
+        dead_count = surv_counts.get("dead", 0)
+        unknown_count = surv_counts.get("unknown", 0)
         archive_total_count = alive_count + dead_count + unknown_count
+
         if hasattr(self, "_archive_all_count_text"):
             self._archive_all_count_text.value = f" ({archive_total_count})"
             self._archive_all_count_text.color = "white" if self._archive_surv_filter == "all" else "onSurfaceVariant"
