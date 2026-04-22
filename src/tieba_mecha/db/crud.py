@@ -1087,11 +1087,12 @@ class Database:
             return list(result.scalars().all())
 
     async def get_all_unique_forums(self) -> list[dict]:
-        """获取所有不重复的贴吧基本信息和权限状态"""
+        """获取所有不重复的贴吧基本信息和权限状态（排除已隐藏的贴吧）"""
         from sqlalchemy import func
         async with self.async_session() as session:
             result = await session.execute(
                 select(Forum.fid, Forum.fname, func.max(Forum.is_post_target), func.max(Forum.is_banned))
+                .where(Forum.is_hidden == False)
                 .group_by(Forum.fname)
                 .order_by(Forum.fname)
             )

@@ -330,7 +330,8 @@ class BatchPostPage:
                 elif is_expired: status_icon = "🔘 失效"
                 elif acc.status == "error": status_icon = "🟡 异常"
                 
-                weight_dots = "●" * (acc.post_weight // 2) + "○" * (5 - acc.post_weight // 2)
+                weight = max(1, min(10, acc.post_weight or 5))
+                weight_dots = "●" * (weight // 2) + "○" * (5 - weight // 2)
                 
                 # 获取显示名称，增加针对空名称的容错回退
                 display_name = acc.name or acc.user_name or f"账号-{acc.id}"
@@ -866,6 +867,11 @@ class BatchPostPage:
                 )
             except Exception as ex:
                 continue
+
+        # 存活过滤时修正实际可见总数（客户端过滤导致服务端总数偏大）
+        visible_archive_count = len(archive_rows)
+        if self._archive_surv_filter != "all":
+            self._archive_total = visible_archive_count
 
         self._material_table.rows = pending_rows
         self._archive_table.rows = archive_rows
@@ -1799,7 +1805,11 @@ class BatchPostPage:
         target_groups = await self.db.get_target_pool_groups()
         
         # ===== 两个独立的选中集合 =====
-        local_selected = set(self._temp_local_fnames)   # 本地自留区选中
+        # 本地自留区选中：若上次有持久化选择则沿用，否则默认选中所有安全吧
+        if self._temp_local_fnames:
+            local_selected = set(self._temp_local_fnames)
+        else:
+            local_selected = {f['fname'] for f in local_forums if f['is_post_target']}
         global_selected = set(self._temp_global_fnames)  # 全域轰炸组选中
         
         # ===== 本地自留区 UI =====
@@ -1841,9 +1851,9 @@ class BatchPostPage:
                     if keyword and keyword.lower() not in fn.lower(): continue
                     label_text = f"🛡️ {fn} [安全]" if is_safe else fn
                     item_color = "green" if is_safe else "onSurface"
-                    # 默认选中规则：有[安全]标识的默认选中，没有的不选中
-                    # （local_selected 仅用于记录用户手动勾选的状态，不影响默认值）
-                    is_checked = is_safe
+                    # 选中状态以 local_selected 为准（唯一状态源）
+                    # 首次打开时 local_selected 来自上次持久化或 is_safe 默认值
+                    is_checked = fn in local_selected
                     local_container.controls.append(
                         ft.Checkbox(
                             label=label_text, value=is_checked, data=fn, on_change=on_local_item_check,
