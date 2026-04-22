@@ -799,6 +799,7 @@ class BatchPostPage:
                     bump_tooltip = "自顶功能当前处于手动关闭状态"
 
                 # 存活图标：探测中用缓存 checking 状态，否则用数据库字段
+                surv_status = m.survival_status or "unknown"
                 surv_display = self._survival_cache.get(m.posted_tid) if m.posted_tid else None
                 if surv_display != "checking":
                     surv_display = surv_status
