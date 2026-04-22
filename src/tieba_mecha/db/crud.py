@@ -1793,32 +1793,7 @@ class Database:
             await session.commit()
         return added
 
-    async def delete_target_pool_by_fnames(self, fnames: list[str]) -> int:
-        """从 TargetPool 中删除指定的贴吧列表。返回删除的数量。"""
-        from sqlalchemy import delete as sql_delete
-        deleted = 0
-        async with self.async_session() as session:
-            for fname in fnames:
-                result = await session.execute(
-                    sql_delete(TargetPool).where(TargetPool.fname == fname)
-                )
-                deleted += result.rowcount
-            await session.commit()
-        return deleted
 
-    async def bulk_update_target_group(self, fnames: list[str], post_group: str) -> None:
-        """批量更新 TargetPool 中指定贴吧的分组/标签。若该贴吧不在池中则先插入。"""
-        async with self.async_session() as session:
-            for fname in fnames:
-                existing = await session.execute(
-                    select(TargetPool).where(TargetPool.fname == fname)
-                )
-                pool = existing.scalar_one_or_none()
-                if pool:
-                    pool.post_group = post_group
-                else:
-                    session.add(TargetPool(fname=fname, post_group=post_group))
-            await session.commit()
 
     async def get_target_pool_groups(self) -> list[str]:
         """获取靶场池所有存在的分组名"""
