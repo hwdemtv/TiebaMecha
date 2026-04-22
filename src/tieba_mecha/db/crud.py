@@ -1293,8 +1293,13 @@ class Database:
         search_text: str | None = None,
         page: int = 1,
         page_size: int = 50,
+        order_desc: bool = False,
     ) -> tuple[list[MaterialPool], int]:
-        """按状态列表分页查询物料，支持标题/内容模糊搜索，返回 (列表, 总数)"""
+        """按状态列表分页查询物料，支持标题/内容模糊搜索，返回 (列表, 总数)
+
+        Args:
+            order_desc: 是否按 ID 降序排列（大的在前），默认升序（小的在前）
+        """
         async with self.async_session() as session:
             from sqlalchemy import func, select as sa_select, or_
             base_where = []
@@ -1312,10 +1317,11 @@ class Database:
             total = (await session.execute(count_stmt)).scalar() or 0
             # 分页数据
             offset = (page - 1) * page_size
+            order_col = MaterialPool.id.desc() if order_desc else MaterialPool.id.asc()
             data_stmt = (
                 select(MaterialPool)
                 .where(*base_where)
-                .order_by(MaterialPool.id.asc())
+                .order_by(order_col)
                 .offset(offset)
                 .limit(page_size)
             )

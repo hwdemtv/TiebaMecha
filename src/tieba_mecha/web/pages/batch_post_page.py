@@ -747,6 +747,7 @@ class BatchPostPage:
             search_text=arch_search,
             page=self._archive_page,
             page_size=self._archive_page_size,
+            order_desc=True,
         )
         self._archive_items = arch_items  # 保存引用供全选等操作使用
         archive_rows = []
