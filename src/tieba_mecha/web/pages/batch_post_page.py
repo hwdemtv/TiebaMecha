@@ -578,11 +578,15 @@ class BatchPostPage:
         """统一同步批量操作栏的可见性与计数"""
         if hasattr(self, "_material_bulk_actions"):
             self._material_bulk_actions.visible = bool(self._selected_material_ids)
-            self._material_selected_count_text.value = f"已选 {len(self._selected_material_ids)} 项"
+            sel_count = len(self._selected_material_ids)
+            total_count = self._material_total
+            self._material_selected_count_text.value = f"已选 {sel_count}/{total_count} 项"
 
         if hasattr(self, "_archive_bulk_actions"):
             self._archive_bulk_actions.visible = bool(self._selected_archive_ids)
-            self._archive_selected_count_text.value = f"已选 {len(self._selected_archive_ids)} 项"
+            sel_count = len(self._selected_archive_ids)
+            total_count = self._archive_total
+            self._archive_selected_count_text.value = f"已选 {sel_count}/{total_count} 项"
 
 
     async def _on_material_search_change(self, e):
@@ -912,7 +916,8 @@ class BatchPostPage:
         if not hasattr(self, "_mat_page_info"):
             return
         total_pages = max(1, (self._material_total + self._material_page_size - 1) // self._material_page_size)
-        self._mat_page_info.value = f"{self._material_page}/{total_pages} 页 (共{self._material_total}条)"
+        sel_info = f" | 已选{len(self._selected_material_ids)}" if self._selected_material_ids else ""
+        self._mat_page_info.value = f"{self._material_page}/{total_pages} 页 (共{self._material_total}条{sel_info})"
         self._mat_prev_btn.disabled = self._material_page <= 1
         self._mat_next_btn.disabled = self._material_page >= total_pages
         try:
@@ -926,7 +931,8 @@ class BatchPostPage:
         if not hasattr(self, "_arch_page_info"):
             return
         total_pages = max(1, (self._archive_total + self._archive_page_size - 1) // self._archive_page_size)
-        self._arch_page_info.value = f"{self._archive_page}/{total_pages} 页 (共{self._archive_total}条)"
+        sel_info = f" | 已选{len(self._selected_archive_ids)}" if self._selected_archive_ids else ""
+        self._arch_page_info.value = f"{self._archive_page}/{total_pages} 页 (共{self._archive_total}条{sel_info})"
         self._arch_prev_btn.disabled = self._archive_page <= 1
         self._arch_next_btn.disabled = self._archive_page >= total_pages
         try:
@@ -1256,25 +1262,33 @@ class BatchPostPage:
             pass
 
     async def _on_material_select_all(self, e):
-        # 分页后 self._materials 就是当前页数据，搜索已在服务端过滤
-        visible_ids = [m.id for m in self._materials if m.status in ("pending", "failed")]
+        # 跨页全选：从数据库查询所有符合条件的 ID
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
         if is_select:
-            self._selected_material_ids.update(visible_ids)
+            mat_search = self._material_search_text if self._material_search_text.strip() else None
+            all_ids = await self.db.get_material_ids_by_status(
+                statuses=["pending", "failed"],
+                search_text=mat_search,
+            )
+            self._selected_material_ids = set(all_ids)
         else:
-            for vid in visible_ids:
-                self._selected_material_ids.discard(vid)
+            self._selected_material_ids.clear()
+        self._update_bulk_visibility()
         await self._refresh_material_table()
 
     async def _on_archive_select_all(self, e):
-        # 分页后归档数据在 _archive_items 中
-        visible_ids = [m.id for m in getattr(self, "_archive_items", []) if m.status == "success"]
+        # 跨页全选：从数据库查询所有符合条件的 ID
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
         if is_select:
-            self._selected_archive_ids.update(visible_ids)
+            arch_search = self._archive_search_text if self._archive_search_text.strip() else None
+            all_ids = await self.db.get_material_ids_by_status(
+                statuses=["success"],
+                search_text=arch_search,
+            )
+            self._selected_archive_ids = set(all_ids)
         else:
-            for vid in visible_ids:
-                self._selected_archive_ids.discard(vid)
+            self._selected_archive_ids.clear()
+        self._update_bulk_visibility()
         await self._refresh_material_table()
 
     async def _bulk_toggle_auto_bump(self, e):
