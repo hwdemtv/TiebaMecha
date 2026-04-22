@@ -2187,6 +2187,8 @@ class BatchPostPage:
     async def _on_archive_surv_filter_click(self, mode):
         """存活状态筛选切换 (自定义 UI 回调)"""
         self._archive_surv_filter = mode
+        # 筛选切换时清空选中集合，防止不可见项残留导致批量操作栏一直显示
+        self._selected_archive_ids.clear()
         # 重新加载 Tab 的内容布局（因为自定义按钮需要刷新颜色）
         self.bottom_tabs.tabs[2].content = self._build_archive_view()
         await self.load_data()

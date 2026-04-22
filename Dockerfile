@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir .
 COPY . .
 
 # 创建数据存储目录并设置权限
-RUN mkdir -p /app/data && chmod 777 /app/data
+RUN mkdir -p /app/data && chmod 750 /app/data
 
 # 暴露 Flet 默认端口
 EXPOSE 9006

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import random
 import time
 import urllib.parse
@@ -10,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from aiotieba.exception import TiebaServerError
+# aiotieba exceptions available via aiotieba.exception if needed
 
 from ..db.crud import Database
 from ..db.models import Account, Forum
@@ -534,6 +535,8 @@ class BionicDelay:
     """拟人化随机延迟驱动器 (基于高斯分布与生物钟权重)"""
     @staticmethod
     def get_delay(min_sec: float, max_sec: float) -> float:
+        min_sec = max(1, min_sec)
+        max_sec = max(min_sec, max_sec)
         # 1. 基础高斯采样
         mean = (min_sec + max_sec) / 2
         sigma = (max_sec - min_sec) / 6
@@ -790,7 +793,7 @@ class BatchPostManager:
             )
 
         # --- 授权门控与配额限制 ---
-        am = get_auth_manager()
+        am = await get_auth_manager()
         # 强制在任务启动前刷新一次本地状态，避免异步加载延迟导致的权限误判 (修复 AI 开启无效问题)
         _ = await am.check_local_status()
         is_pro = (am.status == AuthStatus.PRO)
@@ -915,6 +918,7 @@ class BatchPostManager:
             max_account_retries = min(3, len(available_account_ids))
             success_for_this_material = False
             forum_permission_denied = False  # 贴吧级权限不足标志
+            current_target_fname = base_target_fname  # 初始化，避免循环内未绑定
             
             for attempt_idx in range(max_account_retries):
                 # 选取账号：传入 material_ptr+attempt_idx 以保证 Failover 时的轮转顺序
@@ -999,11 +1003,16 @@ class BatchPostManager:
                         # 代理处理
                         proxy_model = await self.db.get_proxy(proxy_id) if proxy_id else None
                         proxy_url = None
+                        proxy_auth = None
                         if proxy_model:
                             from .account import decrypt_value
                             p_user = decrypt_value(proxy_model.username) if proxy_model.username else ""
                             p_pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
-                            proxy_url = f"{proxy_model.protocol}://{p_user}:{p_pwd}@{proxy_model.host}:{proxy_model.port}" if p_user else f"{proxy_model.protocol}://{proxy_model.host}:{proxy_model.port}"
+                            if p_user:
+                                proxy_auth = (p_user, p_pwd)
+                                proxy_url = f"{proxy_model.protocol}://{proxy_model.host}:{proxy_model.port}"
+                            else:
+                                proxy_url = f"{proxy_model.protocol}://{proxy_model.host}:{proxy_model.port}"
 
                         headers = {
                             "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
@@ -1013,13 +1022,18 @@ class BatchPostManager:
                             "Accept-Language": f"zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
                             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                         }
+                        # 安全提示：headers 中包含敏感凭证(BDUSS/STOKEN)，禁止在日志中打印此对象
                         
-                        async with httpx.AsyncClient(proxy=proxy_url) as http_client:
+                        if proxy_auth:
+                            _http_client_ctx = httpx.AsyncClient(proxy=proxy_url, auth=httpx.BasicAuth(proxy_auth[0], proxy_auth[1]))
+                        else:
+                            _http_client_ctx = httpx.AsyncClient(proxy=proxy_url)
+                        async with _http_client_ctx as http_client:
                             # 预热延迟
                             try:
                                 await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
                                 await asyncio.sleep(random.uniform(1.2, 3.5))
-                            except Exception: pass  # 预热非关键，失败不影响主流程
+                            except Exception as _e: logging.debug(f"预热浏览非关键失败: {_e}")
                                 
                             forum_info = await client.get_forum(current_target_fname)
                             data = {
@@ -1375,9 +1389,24 @@ class AutoBumpManager:
         返回: (should_bump, reason)
         """
         from datetime import date, datetime, timedelta
-        
+
         bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
         today = date.today()
+
+        def _ensure_date(val):
+            """确保 bump_start_date 是 date 类型，兼容 str/None"""
+            if val is None:
+                return None
+            if isinstance(val, date) and not isinstance(val, datetime):
+                return val
+            if isinstance(val, datetime):
+                return val.date()
+            if isinstance(val, str):
+                try:
+                    return date.fromisoformat(val)
+                except (ValueError, TypeError):
+                    return None
+            return None
         
         if bump_mode == "once":
             # 模式1: 次数上限模式 (原有逻辑)
@@ -1387,31 +1416,31 @@ class AutoBumpManager:
             # 模式2: 定时周期模式 - 每天指定时间执行一次
             bump_hour = getattr(material, 'bump_hour', 10) or 10
             bump_duration = getattr(material, 'bump_duration_days', 0) or 0
-            bump_start = getattr(material, 'bump_start_date', None)
-            
+            bump_start = _ensure_date(getattr(material, 'bump_start_date', None))
+
             # 检查是否在有效期内
             if bump_start and bump_duration > 0:
                 end_date = bump_start + timedelta(days=bump_duration)
                 if today > end_date:
                     return False, f"已超过持续期({bump_duration}天)"
-            
+
             # 检查今日是否已执行
             last_date = getattr(material, 'bump_last_date', None)
             if last_date == today:
                 return False, "今日已执行"
-            
+
             # 检查当前时间是否到达设定时间
             current_hour = datetime.now().hour
             if current_hour < bump_hour:
                 return False, f"未到执行时间({bump_hour}点)"
-            
+
             return True, "scheduled"
-            
+
         elif bump_mode == "matrix_loop":
             # 模式3: 矩阵轮换循环模式 - 每日一次，账号轮换，不设上限
             bump_duration = getattr(material, 'bump_duration_days', 0) or 0
-            bump_start = getattr(material, 'bump_start_date', None)
-            
+            bump_start = _ensure_date(getattr(material, 'bump_start_date', None))
+
             # 检查是否在有效期内 (0=永久)
             if bump_start and bump_duration > 0:
                 end_date = bump_start + timedelta(days=bump_duration)

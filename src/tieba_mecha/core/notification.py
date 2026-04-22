@@ -234,7 +234,7 @@ class NotificationManager:
         # 如果没有 device_id，尝试获取本地 HWID
         if not device_id:
             from .auth import get_auth_manager
-            am = get_auth_manager()
+            am = await get_auth_manager()
             device_id = await am.get_hwid()
 
         # 添加浏览器风格请求头以通过 Cloudflare 边缘防护
