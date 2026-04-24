@@ -120,15 +120,20 @@ class BatchPostPage:
                 self.bump_loop_container.visible = (bump_mode_raw == "matrix_loop")
             
             # [持久化同步] 恢复上次选中的贴吧 (分本地/全域两组独立)
+            # [修复] 校验持久化贴吧是否仍然有效（排除已隐藏/已封禁/已删除的贴吧）
+            all_valid_forums = await self.db.get_all_unique_forums()
+            valid_fnames = {f['fname'] for f in all_valid_forums if not f['is_banned']}
             last_local_raw = await self.db.get_setting("last_selected_local_forums")
             if last_local_raw:
                 try:
-                    self._temp_local_fnames = json.loads(last_local_raw)
+                    restored = json.loads(last_local_raw)
+                    self._temp_local_fnames = [fn for fn in restored if fn in valid_fnames]
                 except: pass
             last_global_raw = await self.db.get_setting("last_selected_global_forums")
             if last_global_raw:
                 try:
-                    self._temp_global_fnames = json.loads(last_global_raw)
+                    restored = json.loads(last_global_raw)
+                    self._temp_global_fnames = [fn for fn in restored if fn in valid_fnames]
                 except: pass
             self._update_forum_select_btn()
 
@@ -1803,10 +1808,23 @@ class BatchPostPage:
         
         # ===== 两个独立的选中集合 =====
         # 本地自留区选中：若上次有持久化选择则沿用，否则默认选中所有安全吧
+        # [修复] 清除已封禁的贴吧；对 is_post_target 状态变化发出警告
         if self._temp_local_fnames:
             local_selected = set(self._temp_local_fnames)
+            # 过滤掉已不存在或已封禁的贴吧
+            current_fname_set = {f['fname'] for f in local_forums}
+            banned_fnames = {f['fname'] for f in local_forums if f['is_banned']}
+            stale_fnames = local_selected - current_fname_set
+            banned_selected = local_selected & banned_fnames
+            if stale_fnames:
+                local_selected -= stale_fnames
+            if banned_selected:
+                local_selected -= banned_selected
+            # 汇总警告（延迟到 UI 渲染后显示）
+            _local_warn_count = len(stale_fnames) + len(banned_selected)
         else:
             local_selected = {f['fname'] for f in local_forums if f['is_post_target']}
+            _local_warn_count = 0
         global_selected = set(self._temp_global_fnames)  # 全域轰炸组选中
         
         # ===== 本地自留区 UI =====
@@ -1817,7 +1835,7 @@ class BatchPostPage:
             text_size=12,
             expand=True
         )
-        local_select_all_cb = ft.Checkbox(label="全选", value=False, scale=0.8)
+        local_select_all_cb = ft.Checkbox(label="全选安全", value=False, scale=0.8, fill_color="green")
         local_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
         local_count_text = ft.Text(f"已选: {len(local_selected)} 个目标", size=12, color="primary", weight=ft.FontWeight.BOLD)
         
@@ -1846,15 +1864,21 @@ class BatchPostPage:
                     fn = f['fname']
                     is_safe = f['is_post_target']
                     if keyword and keyword.lower() not in fn.lower(): continue
-                    label_text = f"🛡️ {fn} [安全]" if is_safe else fn
-                    item_color = "green" if is_safe else "onSurface"
-                    # 选中状态以 local_selected 为准（唯一状态源）
-                    # 首次打开时 local_selected 来自上次持久化或 is_safe 默认值
                     is_checked = fn in local_selected
+                    # [修复] 被选中但非安全的贴吧添加⚠️警告标识，提醒用户状态变化
+                    if is_checked and not is_safe:
+                        label_text = f"⚠️ {fn} [非安全]"
+                        item_color = "orange"
+                    elif is_safe:
+                        label_text = f"🛡️ {fn} [安全]"
+                        item_color = "green"
+                    else:
+                        label_text = fn
+                        item_color = "onSurface"
                     local_container.controls.append(
                         ft.Checkbox(
                             label=label_text, value=is_checked, data=fn, on_change=on_local_item_check,
-                            fill_color="green" if is_safe else None,
+                            fill_color="green" if is_safe else ("orange" if is_checked else None),
                             label_style=ft.TextStyle(color=item_color, size=11, weight=ft.FontWeight.W_500 if is_safe else None)
                         )
                     )
@@ -1865,12 +1889,19 @@ class BatchPostPage:
         
         def on_local_select_all(e):
             select_all = e.control.value
+            # 构建安全贴吧名集合，用于快速判定
+            safe_fnames = {f['fname'] for f in local_forums if f['is_post_target']}
             for cb in local_container.controls:
                 if isinstance(cb, ft.Checkbox):
-                    cb.value = select_all
                     fn = cb.data
-                    if select_all: local_selected.add(fn)
-                    else: local_selected.discard(fn)
+                    if select_all:
+                        # 全选时仅勾选安全贴吧，跳过不安全的
+                        is_safe = fn in safe_fnames
+                        cb.value = is_safe
+                        if is_safe: local_selected.add(fn)
+                    else:
+                        cb.value = False
+                        local_selected.discard(fn)
             update_local_count()
             try: local_container.update()
             except: pass
@@ -1878,6 +1909,11 @@ class BatchPostPage:
         local_select_all_cb.on_change = on_local_select_all
         
         async def on_local_lock(_):
+            # [修复] 检测并警告非安全贴吧
+            safe_fnames = {f['fname'] for f in local_forums if f['is_post_target']}
+            unsafe_selected = local_selected - safe_fnames
+            if unsafe_selected:
+                self._show_snackbar(f"⚠️ 包含 {len(unsafe_selected)} 个非安全贴吧(未标记发布目标)，发帖时可能被拦截", "warning")
             self._temp_local_fnames = list(local_selected)
             if self.db:
                 self.page.run_task(self.db.set_setting, "last_selected_local_forums", json.dumps(self._temp_local_fnames))
@@ -2041,6 +2077,12 @@ class BatchPostPage:
             if global_manual_input.value:
                 manual_fnames = [f.strip() for f in global_manual_input.value.split(",") if f.strip()]
                 for fn in manual_fnames: global_selected.add(fn)
+            # [修复] 校验全域轰炸组中的贴吧是否在数据库中有效
+            current_local_fnames = {f['fname'] for f in local_forums}
+            invalid_global = global_selected - current_local_fnames
+            if invalid_global:
+                # 手动输入的贴吧可能不在本地库中，不强制移除但给出警告
+                self._show_snackbar(f"⚠️ {len(invalid_global)} 个贴吧不在本地吧库中，可能为外部空降目标", "warning")
             self._temp_global_fnames = list(global_selected)
             if self.db:
                 self.page.run_task(self.db.set_setting, "last_selected_global_forums", json.dumps(self._temp_global_fnames))
@@ -2131,6 +2173,12 @@ class BatchPostPage:
         self.page.open(fire_dialog)
         render_local_list()
         self.page.run_task(render_groups)
+        # [修复] 延迟显示过滤警告，确保 UI 已挂载后再调用 snackbar
+        if _local_warn_count > 0:
+            async def _delayed_warn():
+                await asyncio.sleep(0.5)
+                self._show_snackbar(f"已自动移除 {_local_warn_count} 个已封禁/失效贴吧", "warning")
+            self.page.run_task(_delayed_warn)
     async def _on_shortlink_search_change(self, e):
         self._search_keyword = e.control.value.lower()
         await self._render_filtered_links()
@@ -3074,6 +3122,21 @@ class BatchPostPage:
 
         # 合并本地自留区 + 全域轰炸组 (两组独立锁定，仅合并已锁定的)
         fnames = list(set(self._temp_local_fnames + self._temp_global_fnames))
+
+        # [修复] 最终防线：校验 fnames 有效性，移除已封禁/已失效的贴吧
+        all_valid_forums = await self.db.get_all_unique_forums()
+        valid_fnames = {f['fname'] for f in all_valid_forums if not f['is_banned']}
+        safe_fnames = {f['fname'] for f in all_valid_forums if f['is_post_target']}
+        # 过滤掉已封禁/已失效的贴吧
+        filtered_fnames = [fn for fn in fnames if fn in valid_fnames]
+        removed_count = len(fnames) - len(filtered_fnames)
+        if removed_count > 0:
+            self._show_snackbar(f"已自动移除 {removed_count} 个已封禁/失效贴吧", "warning")
+            fnames = filtered_fnames
+        # 检测非安全贴吧并警告
+        unsafe_in_task = [fn for fn in fnames if fn not in safe_fnames]
+        if unsafe_in_task:
+            self._show_snackbar(f"⚠️ 含 {len(unsafe_in_task)} 个非安全贴吧，可能被拦截", "warning")
 
         # Validation（从数据库获取全部待发物料，不受分页限制）
         pending_m = await self.db.get_materials(status="pending", limit=None)

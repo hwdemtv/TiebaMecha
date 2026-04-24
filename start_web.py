@@ -11,6 +11,10 @@ import logging
 # └─────────────────────────────────────────────────────────────────────┘
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"
+# [修复] 中文工作目录下 .pth 文件 GBK 解码崩溃：改用 PYTHONPATH 替代
+_src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+if _src_dir not in os.environ.get("PYTHONPATH", ""):
+    os.environ["PYTHONPATH"] = _src_dir + os.pathsep + os.environ.get("PYTHONPATH", "")
 
 # 提前注入 Flet Web 上传所需的密钥
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
