@@ -54,11 +54,11 @@ class SurvivalPage:
             self._stats = await self.db.get_survival_stats()
             accounts = await self.db.get_accounts()
             self._account_options = [
-                ft.dropdown.Option(str(a.id), a.name or f"账号{a.id}")
+                ft.dropdown.Option(str(a.id), a.name or f"账号-{a.id}")
                 for a in accounts
             ]
             # 构建账号 ID -> 名称映射
-            self._account_name_map = {a.id: a.name or f"账号{a.id}" for a in accounts}
+            self._account_name_map = {a.id: a.name or f"账号-{a.id}" for a in accounts}
             # 获取贴吧名列表
             fnames = await self.db.get_distinct_fnames()
             self._fname_options = [ft.dropdown.Option(f, f) for f in fnames]
@@ -300,7 +300,7 @@ class SurvivalPage:
         icon, label, color = status_map.get(m.survival_status, (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"))
 
         # 账号名
-        account_name = self._account_name_map.get(m.posted_account_id, str(m.posted_account_id or "-"))
+        account_name = self._account_name_map.get(m.posted_account_id, f"账号-{m.posted_account_id}" if m.posted_account_id else "-")
 
         # 标题（优先 title，其次 content 截取）
         title = m.title or ""
@@ -373,7 +373,7 @@ class SurvivalPage:
             "unknown": (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"),
         }
         icon, label, color = status_map.get(m.survival_status, (REMOVE_CIRCLE_OUTLINED, "未知", "onSurfaceVariant"))
-        account_name = self._account_name_map.get(m.posted_account_id, str(m.posted_account_id or "-"))
+        account_name = self._account_name_map.get(m.posted_account_id, f"账号-{m.posted_account_id}" if m.posted_account_id else "-")
 
         # 帖子链接
         tid_row = ft.Row([])

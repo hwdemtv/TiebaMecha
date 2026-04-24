@@ -831,7 +831,7 @@ class BatchPostPage:
                             current_idx = getattr(m, 'bump_account_index', 0) or 0
                             current_acc_id = account_ids[current_idx % len(account_ids)]
                             current_acc = next((a for a in self._accounts if a.id == current_acc_id), None)
-                            acc_name = current_acc.name if current_acc else f"账号{current_acc_id}"
+                            acc_name = current_acc.name if current_acc else f"账号-{current_acc_id}"
                             loop_info = f"\n🔄{acc_name}轮换中({current_idx + 1}/{len(account_ids)})"
                     except (json.JSONDecodeError, TypeError):
                         pass
@@ -847,7 +847,7 @@ class BatchPostPage:
                             ft.DataCell(ft.Text(display_t, tooltip=display_t)),
                             ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
                             ft.DataCell(ft.Text(
-                                next((a.name for a in self._accounts if a.id == m.posted_account_id), str(m.posted_account_id) if m.posted_account_id else "-"),
+                                next((a.name for a in self._accounts if a.id == m.posted_account_id), f"账号-{m.posted_account_id}" if m.posted_account_id else "-"),
                                 weight=ft.FontWeight.BOLD, color="primary")),
                             ft.DataCell(ft.Text(m.posted_time.strftime("%y-%m-%d %H:%M") if m.posted_time else "-")),
                             ft.DataCell(ft.Row([
@@ -3442,6 +3442,13 @@ class BatchPostPage:
             account_id = "未知"
             fname = "未知吧"
         
+        # 将 account_id 解析为可读账号名
+        if isinstance(account_id, int) or (isinstance(account_id, str) and account_id.isdigit()):
+            acc_id_int = int(account_id)
+            account_display = next((a.name or a.user_name or f"账号-{a.id}" for a in self._accounts if a.id == acc_id_int), f"账号-{acc_id_int}")
+        else:
+            account_display = str(account_id)
+        
         # 获取战术建议
         from ...core.batch_post import BatchPostManager
         advice = BatchPostManager.get_tactical_advice(error_msg)
@@ -3458,7 +3465,7 @@ class BatchPostPage:
                             border_radius=4
                         ),
                         ft.Container(
-                            content=ft.Row([ft.Icon(icons.PERSON, size=12, color="orange"), ft.Text(f"账号ID: {account_id}", size=11, weight=ft.FontWeight.W_500)], spacing=5),
+                            content=ft.Row([ft.Icon(icons.PERSON, size=12, color="orange"), ft.Text(f"账号: {account_display}", size=11, weight=ft.FontWeight.W_500)], spacing=5),
                             padding=ft.padding.symmetric(horizontal=8, vertical=4),
                             bgcolor=with_opacity(0.1, "orange"),
                             border_radius=4

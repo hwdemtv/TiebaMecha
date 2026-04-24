@@ -31,6 +31,27 @@ def _patched_configure_logging(self):
     return _orig_configure_logging(self)
 _uvc.Config.configure_logging = _patched_configure_logging
 
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  修复 Flet 0.23.2 pubsub_hub "dictionary changed size during       │
+# │  iteration" RuntimeError                                            │
+# │  根本原因：PubSubHub.unsubscribe_all() 中直接迭代                    │
+# │  self.__subscriber_topics[session_id].keys()，而迭代中的             │
+# │  self.__unsubscribe_topic() 会删除同一个字典的键，导致 RuntimeError。│
+# │  解法：用 list() 复制键再迭代。此补丁必须在 import flet 之后执行。   │
+# └─────────────────────────────────────────────────────────────────────┘
+import flet_core.pubsub.pubsub_hub as _psh
+_orig_unsubscribe_all = _psh.PubSubHub.unsubscribe_all
+def _patched_unsubscribe_all(self, session_id: str):
+    """修复：先复制键列表再迭代，避免迭代中字典被修改"""
+    import logging as _log
+    _log.getLogger(__name__).debug(f"pubsub.unsubscribe_all({session_id})")
+    with self._PubSubHub__lock:
+        self._PubSubHub__unsubscribe(session_id)
+        if session_id in self._PubSubHub__subscriber_topics:
+            for topic in list(self._PubSubHub__subscriber_topics[session_id].keys()):
+                self._PubSubHub__unsubscribe_topic(session_id, topic)
+_psh.PubSubHub.unsubscribe_all = _patched_unsubscribe_all
+
 # 智能路径检测：兼容开发版(src/)与便携版(root)
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(ROOT_DIR, "src")
