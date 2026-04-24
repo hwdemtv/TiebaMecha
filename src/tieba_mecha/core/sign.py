@@ -43,6 +43,15 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
         return []
 
     _, bduss, stoken, proxy_id, cuid, ua = creds
+    
+    # 优化显示：获取实际账号名称
+    if account_id:
+        acc = await db.get_account_by_id(account_id)
+        account_display = acc.user_name or acc.name if acc else f"ID:{account_id}"
+    else:
+        acc = await db.get_active_account()
+        account_display = acc.user_name or acc.name if acc else "当前账号"
+
     forums = []
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
@@ -60,7 +69,7 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
                 await asyncio.sleep(wait)
 
         if not user_info:
-            await log_error(f"无法获取用户信息 (账户ID: {account_id})，流程终止")
+            await log_error(f"无法获取用户信息 (账户: {account_display})，流程终止")
             return []
 
         pn = 1
@@ -77,7 +86,7 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
                     await asyncio.sleep(wait)
 
             if not result or result.err:
-                await log_warn(f"获取关注列表失败 (账户ID: {account_id}, 第 {pn} 页): {result.err if result else '未知错误'}")
+                await log_warn(f"获取关注列表失败 (账户: {account_display}, 第 {pn} 页): {result.err if result else '未知错误'}")
                 break
 
             for forum in result.objs:

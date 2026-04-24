@@ -314,7 +314,8 @@ class BatchPostPage:
                 self.bump_duration_field.disabled = False
                 self.bump_duration_field.value = "7"
                 self.bump_duration_field.tooltip = None
-            self.bump_duration_field.update()
+            try: self.bump_duration_field.update()
+            except: pass
 
     def _refresh_account_pool(self):
         """刷新账号池选择器 UI - 支持过滤与独立展示"""
@@ -418,7 +419,10 @@ class BatchPostPage:
         for cb in container.controls:
             if isinstance(cb, ft.Checkbox):
                 cb.visible = text.lower() in cb.label.lower()
-        container.update()
+        try:
+            container.update()
+        except:
+            pass
 
     def _toggle_select_all(self, container: ft.Column, value: bool):
         """批量全选/取消"""
@@ -435,7 +439,10 @@ class BatchPostPage:
                 elif hasattr(self, "global_group_column") and container == self.global_group_column:
                     if value: self._selected_group_names.add(cb.data)
                     else: self._selected_group_names.discard(cb.data)
-        container.update()
+        try:
+            container.update()
+        except:
+            pass
         if container == self.account_pool_column:
             self._save_account_selection()
 
@@ -447,7 +454,8 @@ class BatchPostPage:
         if hasattr(self, "account_pool_title"):
             count = len(self._selected_account_ids)
             self.account_pool_title.value = f"参与账号池 ({count}/{len(self._accounts)})"
-            self.account_pool_title.update()
+            try: self.account_pool_title.update()
+            except: pass
         self._save_account_selection()
 
     def _save_account_selection(self):
@@ -506,8 +514,11 @@ class BatchPostPage:
         def on_search(e):
             forum_list_container.controls = build_items(e.control.value)
             try:
-                forum_list_container.update()
-                summary_text.update()
+                try:
+                    forum_list_container.update()
+                    summary_text.update()
+                except:
+                    pass
             except:
                 pass
 
@@ -936,9 +947,12 @@ class BatchPostPage:
         self._mat_prev_btn.disabled = self._material_page <= 1
         self._mat_next_btn.disabled = self._material_page >= total_pages
         try:
-            self._mat_page_info.update()
-            self._mat_prev_btn.update()
-            self._mat_next_btn.update()
+            try:
+                self._mat_page_info.update()
+                self._mat_prev_btn.update()
+                self._mat_next_btn.update()
+            except:
+                pass
         except Exception:
             pass
 
@@ -2954,15 +2968,24 @@ class BatchPostPage:
                         icon_color="error", 
                         icon_size=18,
                         tooltip="删除任务",
-                        on_click=lambda _: self.page.run_task(self._on_delete_task, t.id)
+                        on_click=lambda _: self.page.run_task(self._on_delete_task, t)
                     ),
                 ], spacing=0)
             ),
         ])
 
-    async def _on_delete_task(self, task_id: int):
+    async def _on_delete_task(self, task):
+        task_id = task.id
+        # 尝试获取任务描述
+        import json
+        try:
+            fnames = json.loads(task.fnames_json) if hasattr(task, "fnames_json") and task.fnames_json else []
+            task_desc = fnames[0] if fnames else (task.fname or str(task_id))
+        except:
+            task_desc = task.fname or str(task_id)
+
         if await self.db.delete_batch_task(task_id):
-            self._show_snackbar(f"任务 ID:{task_id} 已删除", "success")
+            self._show_snackbar(f"矩阵任务 [{task_desc}] 已从队列中移除", "success")
             await self.load_data()
         else:
             self._show_snackbar("删除失败", "error")
@@ -3231,8 +3254,11 @@ class BatchPostPage:
                 elif update["status"] == "skipped":
                     self._add_log(update)
                 
-                self.log_list.update()
-                self.progress_bar.update()
+                try:
+                    self.log_list.update()
+                    self.progress_bar.update()
+                except:
+                    pass
         except asyncio.CancelledError:
             self._add_log("！任务已被系统强制回收")
         except Exception as ex:
@@ -3522,6 +3548,18 @@ class BatchPostPage:
         if self.on_navigate: self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
+        if not self.page: return
         color = "primary" if type != "error" else "error"
         if type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        try:
+            self.page.show_snack_bar(
+                ft.SnackBar(
+                    content=ft.Text(message), 
+                    bgcolor=with_opacity(0.8, color), 
+                    behavior=ft.SnackBarBehavior.FLOATING,
+                    duration=3000
+                )
+            )
+            self.page.update()
+        except:
+            pass

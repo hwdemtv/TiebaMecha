@@ -1069,14 +1069,14 @@ class BatchPostManager:
                                 await self.db.add_batch_post_log(
                                     task_id=str(task.id),
                                     account_id=account_id,
-                                    account_name=acc.name if acc else f"ID:{account_id}",
+                                    account_name=acc.user_name or acc.name if acc else f"账号(ID:{account_id})",
                                     fname=current_target_fname,
                                     title=title,
                                     tid=tid,
                                     status="success",
                                     data={"progress": task.progress, "total": task.total}
                                 )
-                                acc_display = acc.name if acc else f"账号-{account_id}"
+                                acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
                                 await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
                                 # 记录靶场击穿
                                 await self.db.update_target_pool_status(current_target_fname, is_success=True)
@@ -1085,7 +1085,7 @@ class BatchPostManager:
                                 yield {
                                     "status": "success", "tid": tid, "fname": current_target_fname,
                                     "account_id": account_id,
-                                    "account_name": acc.name if acc else f"ID:{account_id}",
+                                    "account_name": acc.user_name or acc.name if acc else f"账号(ID:{account_id})",
                                     "title": title,
                                     "material_id": current_material.id,
                                     "progress": task.progress, "total": task.total,
@@ -1119,11 +1119,11 @@ class BatchPostManager:
                                     forum_permission_denied = True
                                     break  # 退出账号重试循环，让外层换贴吧/物料
                                 else:
-                                    acc_display = acc.name if acc else f"账号-{account_id}"
+                                    acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
                                     await log_warn(f"账号 {acc_display} 发射遭拦截: {err_msg}，准备换号重试...")
                 except Exception as ex:
-                    acc_display = account_map.get(account_id)
-                    acc_display = acc_display.name if acc_display else f"账号-{account_id}"
+                    acc_info = account_map.get(account_id)
+                    acc_display = acc_info.user_name or acc_info.name if acc_info else f"账号(ID:{account_id})"
                     await log_error(f"执行链异常 ({acc_display} @ {current_target_fname}): {str(ex)}")
                     await failure_breaker.record_failure(account_id)
             
@@ -1167,7 +1167,7 @@ class BatchPostManager:
         
         # 预构建账号名映射
         _all_accs = await self.db.get_accounts()
-        _reply_acc_name = next((a.name or f"账号-{a.id}" for a in _all_accs if a.id == account_id), f"账号-{account_id}")
+        _reply_acc_name = next((a.user_name or a.name or f"账号(ID:{a.id})" for a in _all_accs if a.id == account_id), f"账号(ID:{account_id})")
         
         creds = await get_account_credentials(self.db, account_id)
         if not creds: return False
@@ -1232,7 +1232,7 @@ class BatchPostManager:
 
         # 预构建账号 ID -> 名称映射
         _unf_acc_list = await self.db.get_accounts()
-        _unf_acc_name_map = {a.id: (a.name or f"账号-{a.id}") for a in _unf_acc_list}
+        _unf_acc_name_map = {a.id: (a.user_name or a.name or f"账号(ID:{a.id})") for a in _unf_acc_list}
 
         total_actions = len(account_ids) * len(fnames)
         current_action = 0
@@ -1348,7 +1348,7 @@ class BatchPostManager:
 
         # 预构建账号 ID -> 名称映射
         _fol_acc_list = await self.db.get_accounts()
-        _fol_acc_name_map = {a.id: (a.name or f"账号-{a.id}") for a in _fol_acc_list}
+        _fol_acc_name_map = {a.id: (a.user_name or a.name or f"账号(ID:{a.id})") for a in _fol_acc_list}
 
         if not account_ids:
             result["failed"].append({"account_id": None, "fname": None, "reason": "无可用账号"})

@@ -36,7 +36,9 @@ class MaintManager:
             return False
 
         acc_id, bduss, stoken, proxy_id, cuid, ua = creds
-        account_name = f"ID:{acc_id}"
+        # 优化显示：获取实际账号名称而非仅显示 ID
+        acc = await self.db.get_account_by_id(acc_id)
+        account_name = acc.user_name or acc.name if acc else f"ID:{acc_id}"
 
         try:
             async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:

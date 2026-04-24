@@ -1592,7 +1592,7 @@ class AccountsPage:
                                     icon=icons.DELETE_OUTLINE,
                                     tooltip="删除账号",
                                     icon_color="error",
-                                    on_click=lambda e, aid=acc.id: self.page.run_task(self._show_delete_confirm, aid)
+                                    on_click=lambda e, a=acc: self.page.run_task(self._show_delete_confirm, a)
                                 ),
                             ],
                             spacing=0,
@@ -1619,7 +1619,10 @@ class AccountsPage:
             with_opacity(0.08, "primary") if is_hovered
             else (with_opacity(0.03, "primary") if e.control.border else with_opacity(0.02, "onSurface"))
         )
-        e.control.update()
+        try:
+            e.control.update()
+        except Exception:
+            pass
 
     async def _show_add_dialog(self, e):
         """显示添加账号对话框"""
@@ -1937,17 +1940,20 @@ class AccountsPage:
         else:
             self._show_snackbar("刷新失败，账号不存在", "error")
 
-    async def _show_delete_confirm(self, account_id: int):
+    async def _show_delete_confirm(self, account):
         """显示删除确认框"""
+        account_id = account.id
+        account_name = account.user_name or account.name or str(account_id)
+
         async def do_delete(e):
             await remove_account(self.db, account_id)
-            await log_warn(f"账号凭据已被用户手动移除: ID {account_id}")
+            await log_warn(f"账号凭据已被用户手动移除: {account_name}")
             self.page.close(dialog)
             await self.load_data()
-            self._show_snackbar("账号已从本地移除", "info")
+            self._show_snackbar(f"账号 '{account_name}' 已从本地移除", "info")
 
         dialog = ft.AlertDialog(
-            title=ft.Text("确认移除账号?"),
+            title=ft.Text(f"确认移除账号: {account_name}?"),
             content=ft.Text("此操作仅从本地数据库移除凭据，不会影响贴吧账号本身状态。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.close(dialog)),
@@ -2158,14 +2164,23 @@ class AccountsPage:
         self.page.open(dialog)
 
     def _show_snackbar(self, message: str, type="info"):
+        if not self.page:
+            return
         color = "primary"
         if type == "error": color = "error"
         elif type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(
-            ft.SnackBar(
-                content=ft.Text(message),
-                bgcolor=with_opacity(0.8, color),
-                behavior=ft.SnackBarBehavior.FLOATING,
+        
+        try:
+            self.page.show_snack_bar(
+                ft.SnackBar(
+                    content=ft.Text(message), 
+                    bgcolor=with_opacity(0.8, color), 
+                    behavior=ft.SnackBarBehavior.FLOATING,
+                    duration=3000
+                )
             )
-        )
+            # 确保在 FastAPI 异步模式下安全更新
+            self.page.update()
+        except Exception:
+            pass
 
