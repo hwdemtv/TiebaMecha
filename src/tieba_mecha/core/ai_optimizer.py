@@ -222,38 +222,37 @@ class AIOptimizer:
             "max_tokens": 50
         }
 
-        try:
-            import re
-            last_error = ""
-            for attempt in range(DEFAULT_MAX_RETRIES + 1):
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                            if resp.status != 200:
-                                error_text = await resp.text()
-                                last_error = f"API 请求失败 ({resp.status}): {error_text[:200]}"
-                                if resp.status in _RETRYABLE_STATUS and attempt < DEFAULT_MAX_RETRIES:
-                                    delay = DEFAULT_RETRY_DELAY * (attempt + 1)
-                                    logger.warning(f"自顶回复请求 {resp.status}，第 {attempt+1} 次重试，等待 {delay}s...")
-                                    await asyncio.sleep(delay)
-                                    continue
-                                return False, "", last_error
+        import re
+        last_error = ""
+        for attempt in range(DEFAULT_MAX_RETRIES + 1):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status != 200:
+                            error_text = await resp.text()
+                            last_error = f"API 请求失败 ({resp.status}): {error_text[:200]}"
+                            if resp.status in _RETRYABLE_STATUS and attempt < DEFAULT_MAX_RETRIES:
+                                delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                                logger.warning(f"自顶回复请求 {resp.status}，第 {attempt+1} 次重试，等待 {delay}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                            return False, "", last_error
 
-                            result = await resp.json()
-                            content = result['choices'][0]['message']['content'].strip()
-                            # 清理可能的引号包裹
-                            content = re.sub(r'^["\'"]|["\'"]$', '', content)
-                            return True, content, ""
-                except asyncio.TimeoutError:
-                    last_error = "AI 请求超时 (30s)"
-                    if attempt < DEFAULT_MAX_RETRIES:
-                        delay = DEFAULT_RETRY_DELAY * (attempt + 1)
-                        logger.warning(f"自顶回复超时，第 {attempt+1} 次重试，等待 {delay}s...")
-                        await asyncio.sleep(delay)
-                        continue
-                except Exception as e:
-                    return False, "", f"生成异常: {str(e)}"
-            return False, "", last_error
+                        result = await resp.json()
+                        content = result['choices'][0]['message']['content'].strip()
+                        # 清理可能的引号包裹
+                        content = re.sub(r'^["\'"]|["\'"]$', '', content)
+                        return True, content, ""
+            except asyncio.TimeoutError:
+                last_error = "AI 请求超时 (30s)"
+                if attempt < DEFAULT_MAX_RETRIES:
+                    delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                    logger.warning(f"自顶回复超时，第 {attempt+1} 次重试，等待 {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
+            except Exception as e:
+                return False, "", f"生成异常: {str(e)}"
+        return False, "", last_error
 
     async def test_connection(self, api_key: str = "", base_url: str = "", model: str = "") -> Tuple[bool, str]:
         """
