@@ -56,9 +56,9 @@ class SettingsPage:
         am = await get_auth_manager()
         self._settings["hwid"] = await am.get_hwid()
         
-        self.refresh_ui()
+        await self.refresh_ui()
 
-    def refresh_ui(self):
+    async def refresh_ui(self):
         if hasattr(self, "ai_key_field"):
             self.ai_key_field.value = self._settings.get("ai_api_key", "")
             self.ai_url_field.value = self._settings.get("ai_base_url", "")
