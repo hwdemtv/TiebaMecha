@@ -1071,7 +1071,8 @@ class BatchPostManager:
                                     tid=tid,
                                     status="success"
                                 )
-                                await log_info(f"[{task.strategy}] 成功: {account_id} @ {current_target_fname} ({task.progress}/{task.total})")
+                                acc_display = acc.name if acc else f"账号-{account_id}"
+                                await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
                                 # 记录靶场击穿
                                 await self.db.update_target_pool_status(current_target_fname, is_success=True)
                                 if task.progress < actual_total:
@@ -1113,9 +1114,12 @@ class BatchPostManager:
                                     forum_permission_denied = True
                                     break  # 退出账号重试循环，让外层换贴吧/物料
                                 else:
-                                    await log_warn(f"账号 {account_id} 发射遭拦截: {err_msg}，准备换号重试...")
+                                    acc_display = acc.name if acc else f"账号-{account_id}"
+                                    await log_warn(f"账号 {acc_display} 发射遭拦截: {err_msg}，准备换号重试...")
                 except Exception as ex:
-                    await log_error(f"执行链异常 ({account_id} @ {current_target_fname}): {str(ex)}")
+                    acc_display = account_map.get(account_id)
+                    acc_display = acc_display.name if acc_display else f"账号-{account_id}"
+                    await log_error(f"执行链异常 ({acc_display} @ {current_target_fname}): {str(ex)}")
                     await failure_breaker.record_failure(account_id)
             
             if not success_for_this_material:
@@ -1154,6 +1158,10 @@ class BatchPostManager:
         from .client_factory import create_client
         from .obfuscator import Obfuscator
         
+        # 预构建账号名映射
+        _all_accs = await self.db.get_accounts()
+        _reply_acc_name = next((a.name or f"账号-{a.id}" for a in _all_accs if a.id == account_id), f"账号-{account_id}")
+        
         creds = await get_account_credentials(self.db, account_id)
         if not creds: return False
 
@@ -1188,7 +1196,7 @@ class BatchPostManager:
                             update(MaterialPool).where(MaterialPool.posted_tid == tid).values(is_auto_bump=False)
                         )
                         await session.commit()
-                    await log_warn(f"账号 {account_id} 在 {fname} 遭遇封禁，已转入标记熔断并紧急关闭 TID:{tid} 的自动回帖。")
+                    await log_warn(f"账号 {_reply_acc_name} 在 {fname} 遭遇封禁，已转入标记熔断并紧急关闭 TID:{tid} 的自动回帖。")
                 
                 return False
 
@@ -1215,6 +1223,10 @@ class BatchPostManager:
             _ = await self.db.delete_target_pool_by_fnames(fnames)
             return True
 
+        # 预构建账号 ID -> 名称映射
+        _unf_acc_list = await self.db.get_accounts()
+        _unf_acc_name_map = {a.id: (a.name or f"账号-{a.id}") for a in _unf_acc_list}
+
         total_actions = len(account_ids) * len(fnames)
         current_action = 0
         failed_count = 0
@@ -1223,15 +1235,15 @@ class BatchPostManager:
             # ---- 账号间延迟 ----
             if acc_idx > 0:
                 account_gap = random.uniform(30, 60)
-                await log_info(f"账号切换冷却，休眠 {account_gap:.0f}s 后处理账号 {acc_id}...")
+                await log_info(f"账号切换冷却，休眠 {account_gap:.0f}s 后处理账号 {_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}...")
                 await asyncio.sleep(account_gap)
 
             # ---- 熔断检查 ----
             if captcha_breaker.is_in_cooldown(acc_id):
-                await log_warn(f"账号 [{acc_id}] 验证码熔断中，跳过取关")
+                await log_warn(f"账号 [{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}] 验证码熔断中，跳过取关")
                 continue
             if failure_breaker.is_in_cooldown(acc_id):
-                await log_warn(f"账号 [{acc_id}] 连续失败熔断中，跳过取关")
+                await log_warn(f"账号 [{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}] 连续失败熔断中，跳过取关")
                 continue
 
             creds = await get_account_credentials(self.db, acc_id)
@@ -1253,12 +1265,12 @@ class BatchPostManager:
 
                         # ---- 熔断二次检查 ----
                         if captcha_breaker.is_in_cooldown(acc_id):
-                            await log_warn(f"账号 [{acc_id}] 验证码熔断，跳过 [{fname}]")
+                            await log_warn(f"账号 [{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}] 验证码熔断，跳过 [{fname}]")
                             continue
 
                         try:
                             _ = await client.unfollow_forum(fname)
-                            await log_info(f"账号 {acc_id} 已成功取消关注 [{fname}]")
+                            await log_info(f"账号 {_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')} 已成功取消关注 [{fname}]")
                             await failure_breaker.record_success(acc_id)
                         except Exception as e:
                             err_msg = str(e)
@@ -1271,7 +1283,7 @@ class BatchPostManager:
                             is_captcha = await captcha_breaker.check_and_trigger(acc_id, err_msg, err_code)
                             if not is_captcha:
                                 await failure_breaker.record_failure(acc_id)
-                            await log_error(f"账号 {acc_id} 取消关注 [{fname}] 失败: {err_msg}")
+                            await log_error(f"账号 {_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')} 取消关注 [{fname}] 失败: {err_msg}")
                         
                         current_action += 1
                         if progress_callback:
@@ -1282,7 +1294,7 @@ class BatchPostManager:
                         await BionicDelay.sleep(adj_min, adj_max)
             except Exception as e:
                 failed_count += len(fnames)
-                await log_error(f"创建客户端执行取关任务失败(ID:{acc_id}): {e}")
+                await log_error(f"创建客户端执行取关任务失败(ID:{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}): {e}")
 
         # 2. 清理数据库记录
         del_membership_count = await self.db.delete_forum_memberships_globally(fnames)
@@ -1327,6 +1339,10 @@ class BatchPostManager:
             all_accounts = await self.db.get_accounts()
             account_ids = [acc.id for acc in all_accounts if acc.status in ("active", "pending")]
 
+        # 预构建账号 ID -> 名称映射
+        _fol_acc_list = await self.db.get_accounts()
+        _fol_acc_name_map = {a.id: (a.name or f"账号-{a.id}") for a in _fol_acc_list}
+
         if not account_ids:
             result["failed"].append({"account_id": None, "fname": None, "reason": "无可用账号"})
             return result
@@ -1350,13 +1366,13 @@ class BatchPostManager:
             # ---- 账号间延迟（防关联核心防线）----
             if acc_idx > 0:
                 account_gap = random.uniform(30, 60)
-                await log_info(f"账号切换冷却，休眠 {account_gap:.0f}s 后处理账号 {acc_id}...")
+                await log_info(f"账号切换冷却，休眠 {account_gap:.0f}s 后处理账号 {_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')}...")
                 await asyncio.sleep(account_gap)
 
             # ---- 熔断检查 ----
             if captcha_breaker.is_in_cooldown(acc_id):
                 remaining = captcha_breaker.get_remaining_cooldown(acc_id)
-                await log_warn(f"账号 [{acc_id}] 处于验证码熔断中（剩余 {remaining:.0f}s），跳过")
+                await log_warn(f"账号 [{_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')}] 处于验证码熔断中（剩余 {remaining:.0f}s），跳过")
                 result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"验证码熔断中（剩余 {remaining:.0f}s）"})
                 continue
             if failure_breaker.is_in_cooldown(acc_id):
@@ -1398,7 +1414,7 @@ class BatchPostManager:
                         try:
                             _ = await client.follow_forum(fname)
                             result["success"].append({"account_id": acc_id, "fname": fname})
-                            await log_info(f"账号 {acc_id} 成功关注 [{fname}]")
+                            await log_info(f"账号 {_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')} 成功关注 [{fname}]")
 
                             # 成功 → 重置失败计数
                             await failure_breaker.record_success(acc_id)
@@ -1456,7 +1472,7 @@ class BatchPostManager:
                                     await session.commit()
                             else:
                                 result["failed"].append({"account_id": acc_id, "fname": fname, "reason": err_msg[:50]})
-                            await log_error(f"账号 {acc_id} 关注 [{fname}] 失败: {err_msg}")
+                            await log_error(f"账号 {_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')} 关注 [{fname}] 失败: {err_msg}")
 
                         current_action += 1
                         if progress_callback:
@@ -1467,7 +1483,7 @@ class BatchPostManager:
                         await BionicDelay.sleep(adj_min, adj_max)
             except Exception as e:
                 result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"创建客户端失败: {str(e)[:30]}"})
-                await log_error(f"创建客户端执行关注任务失败(ID:{acc_id}): {e}")
+                await log_error(f"创建客户端执行关注任务失败(ID:{_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')}): {e}")
 
         await log_info(
             f"批量关注完成：成功 {len(result['success'])}, 失败 {len(result['failed'])}, 跳过 {len(result['skipped'])}"
@@ -1649,6 +1665,8 @@ class AutoBumpManager:
                 matrix_pool = await self.db.get_matrix_accounts()
             if not matrix_pool:
                 matrix_pool = [default_acc] if default_acc else []
+            # 构建账号 ID -> 名称映射，用于日志中显示可读名称
+            bump_acc_name_map = {a.id: (a.name or f"账号-{a.id}") for a in matrix_pool if a}
 
             # 预加载 AI 人格化设定和优化器
             ai_persona = await self.db.get_setting("ai_persona", "normal")
@@ -1765,9 +1783,9 @@ class AutoBumpManager:
                             
                             await upd_session.commit()
                     
-                    await log_info(f"物料 [{material.id}] 自顶成功 (账号:{target_account_id} | TID:{material.posted_tid} | 累计:{material.bump_count + 1}次)")
+                    await log_info(f"物料 [{material.id}] 自顶成功 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')} | TID:{material.posted_tid} | 累计:{material.bump_count + 1}次)")
                     await asyncio.sleep(random.uniform(15, 45))
                 else:
                     banned_pairs.add((target_account_id, material.posted_fname))
-                    await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{target_account_id})")
+                    await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')})")
 
