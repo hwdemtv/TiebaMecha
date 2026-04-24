@@ -84,7 +84,10 @@ class NotificationBell(ft.Container):
         self.visible = count > 0
 
         try:
-            await self._page.update_async()
+            # 仅在控件已挂载到页面控件树后才调用 update，
+            # 防止监听器在铃铛渲染前触发导致 AssertionError
+            if self.page:
+                await self._page.update_async()
         except Exception:
             pass
 

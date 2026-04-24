@@ -1000,19 +1000,25 @@ class BatchPostManager:
                         # 2.2 仿生预热浏览 (模拟进入贴吧首页)
                         quoted_fname = urllib.parse.quote(current_target_fname)
                         
-                        # 代理处理
+                        # 代理处理：SOCKS5 必须将凭据嵌入 URL，BasicAuth 对 SOCKS5 握手层无效
                         proxy_model = await self.db.get_proxy(proxy_id) if proxy_id else None
                         proxy_url = None
-                        proxy_auth = None
                         if proxy_model:
                             from .account import decrypt_value
                             p_user = decrypt_value(proxy_model.username) if proxy_model.username else ""
                             p_pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
-                            if p_user:
-                                proxy_auth = (p_user, p_pwd)
-                                proxy_url = f"{proxy_model.protocol}://{proxy_model.host}:{proxy_model.port}"
+                            proto = proxy_model.protocol
+                            host_port = f"{proxy_model.host}:{proxy_model.port}"
+
+                            if p_user and p_pwd:
+                                # 将认证信息直接嵌入 URL，适用于 SOCKS5 / HTTP 所有协议
+                                # 参考 proxy.py _build_proxy_config 的处理逻辑保持一致
+                                u = urllib.parse.quote(p_user, safe="")
+                                p = urllib.parse.quote(p_pwd, safe="")
+                                proxy_url = f"{proto}://{u}:{p}@{host_port}"
                             else:
-                                proxy_url = f"{proxy_model.protocol}://{proxy_model.host}:{proxy_model.port}"
+                                # 匿名代理（无认证）
+                                proxy_url = f"{proto}://{host_port}"
 
                         headers = {
                             "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
@@ -1023,11 +1029,9 @@ class BatchPostManager:
                             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                         }
                         # 安全提示：headers 中包含敏感凭证(BDUSS/STOKEN)，禁止在日志中打印此对象
-                        
-                        if proxy_auth:
-                            _http_client_ctx = httpx.AsyncClient(proxy=proxy_url, auth=httpx.BasicAuth(proxy_auth[0], proxy_auth[1]))
-                        else:
-                            _http_client_ctx = httpx.AsyncClient(proxy=proxy_url)
+
+                        # 统一使用 proxy_url（凭据已嵌入），不再单独传 auth 参数
+                        _http_client_ctx = httpx.AsyncClient(proxy=proxy_url)
                         async with _http_client_ctx as http_client:
                             # 预热延迟
                             try:
