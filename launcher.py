@@ -25,6 +25,22 @@ def _patched_configure_logging(self):
     return _orig_configure_logging(self)
 _uvc.Config.configure_logging = _patched_configure_logging
 
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  修复 Flet 0.23.2 pubsub_hub "dictionary changed size during       │
+# │  iteration" RuntimeError                                            │
+# └─────────────────────────────────────────────────────────────────────┘
+import flet_core.pubsub.pubsub_hub as _psh
+_orig_unsubscribe_all = _psh.PubSubHub.unsubscribe_all
+def _patched_unsubscribe_all(self, session_id: str):
+    import logging as _log
+    _log.getLogger(__name__).debug(f"pubsub.unsubscribe_all({session_id})")
+    with self._PubSubHub__lock:
+        self._PubSubHub__unsubscribe(session_id)
+        if session_id in self._PubSubHub__subscriber_topics:
+            for topic in list(self._PubSubHub__subscriber_topics[session_id].keys()):
+                self._PubSubHub__unsubscribe_topic(session_id, topic)
+_psh.PubSubHub.unsubscribe_all = _patched_unsubscribe_all
+
 # 智能路径检测：兼容开发版(src/)与便携版(root)
 SRC_DIR = os.path.join(ROOT_DIR, "src")
 if os.path.exists(SRC_DIR):

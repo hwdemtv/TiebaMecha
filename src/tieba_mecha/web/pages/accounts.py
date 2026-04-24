@@ -599,6 +599,9 @@ class AccountsPage:
         events = await self.db.get_captcha_events(limit=100)
         items = []
         
+        # 构建账号 ID -> 显示名映射，用于将数字 ID 解析为可读名称
+        acc_name_map = {a.id: (a.name or a.user_name or f"账号-{a.id}") for a in self._accounts}
+        
         pending_count = sum(1 for e in events if e["status"] == "pending")
         self.exception_pending_count.value = f"待处理: {pending_count}"
         self.exception_pending_count.color = "#F44336" if pending_count > 0 else "#4CAF50"
@@ -640,7 +643,7 @@ class AccountsPage:
                         ft.Text(f"原因: {event['reason'] or '未知'}", size=12, color="onSurfaceVariant"),
                     ]),
                     ft.Row([
-                        ft.Text(f"账号ID: {event['account_id'] or '-'}", size=12, color="onSurfaceVariant"),
+                        ft.Text(f"账号: {acc_name_map.get(event['account_id'], event['account_id'] or '-')}", size=12, color="onSurfaceVariant"),
                         ft.Container(expand=True),
                         ft.Text(f"任务ID: {event['task_id'] or '-'}", size=12, color="onSurfaceVariant"),
                     ]),
