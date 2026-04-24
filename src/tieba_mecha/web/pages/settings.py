@@ -459,7 +459,7 @@ class SettingsPage:
             
         e.control.disabled = False
         e.control.text = "立即验证授权"
-        self.refresh_ui()
+        await self.refresh_ui()
 
     async def _do_save(self, e):
         if not self.db: return
