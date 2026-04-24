@@ -42,26 +42,52 @@ async def get_best_proxy_config(db: Database, proxy_id: int | None = None) -> Op
 def _build_proxy_config(proxy) -> ProxyConfig:
     """内部工具函数：从模型构建 ProxyConfig，含解密逻辑"""
     from .account import decrypt_value
-    
-    # 解密用户名/密码
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # 解密用户名/密码（独立解密，不要求两者同时存在）
     username = None
     password = None
-    if proxy.username and proxy.password:
+    if proxy.username:
         try:
             username = decrypt_value(proxy.username)
         except Exception:
+            logger.warning("代理 %s:%d 用户名解密失败，可能加密密钥已变更", proxy.host, proxy.port)
             username = proxy.username
+    if proxy.password:
         try:
             password = decrypt_value(proxy.password)
         except Exception:
+            logger.warning("代理 %s:%d 密码解密失败，可能加密密钥已变更", proxy.host, proxy.port)
             password = proxy.password
 
     # SOCKS5 协议需要将认证信息嵌入 URL，BasicAuth 对 SOCKS 无效
-    if proxy.protocol.startswith("socks") and username and password:
-        import urllib.parse
-        u = urllib.parse.quote(username, safe="")
-        p = urllib.parse.quote(password, safe="")
-        proxy_url = f"{proxy.protocol}://{u}:{p}@{proxy.host}:{proxy.port}"
+    if proxy.protocol.startswith("socks"):
+        if username and password:
+            import urllib.parse
+            u = urllib.parse.quote(username, safe="")
+            p = urllib.parse.quote(password, safe="")
+            proxy_url = f"{proxy.protocol}://{u}:{p}@{proxy.host}:{proxy.port}"
+            return ProxyConfig(url=proxy_url, auth=None)
+        elif username or password:
+            # SOCKS5 认证不完整：有用户名无密码或反之
+            # 以无认证模式连接会触发 "NO ACCEPTABLE METHODS" 错误
+            logger.error(
+                "SOCKS5 代理 %s:%d 认证信息不完整"
+                "（用户名=%s，密码=%s），无法连接。"
+                "请在代理管理中补全认证信息。",
+                proxy.host, proxy.port,
+                "已设置" if username else "缺失",
+                "已设置" if password else "缺失",
+            )
+            raise ValueError(
+                f"SOCKS5 代理 {proxy.host}:{proxy.port} 认证信息不完整"
+                f"（用户名={'已设置' if username else '缺失'}，"
+                f"密码={'已设置' if password else '缺失'}），"
+                f"请在代理管理中补全用户名和密码"
+            )
+        # SOCKS5 无认证（匿名模式），允许通过
+        proxy_url = f"{proxy.protocol}://{proxy.host}:{proxy.port}"
         return ProxyConfig(url=proxy_url, auth=None)
 
     # HTTP/HTTPS 代理使用标准 BasicAuth
@@ -92,19 +118,25 @@ async def test_proxy(proxy_url: str, auth_user: str | None = None, auth_pass: st
     try:
         from aiohttp_socks import ProxyConnector
         # SOCKS5 认证必须使用已解密的值拼入 URL
-        if auth_user and auth_pass:
+        dec_user = None
+        dec_pass = None
+        if auth_user:
             try:
                 dec_user = decrypt_value(auth_user)
             except Exception:
                 dec_user = auth_user
+        if auth_pass:
             try:
                 dec_pass = decrypt_value(auth_pass)
             except Exception:
                 dec_pass = auth_pass
+        if dec_user and dec_pass:
             import urllib.parse
             u = urllib.parse.quote(dec_user, safe="")
             p = urllib.parse.quote(dec_pass, safe="")
             proxy_url = proxy_url.replace("://", f"://{u}:{p}@", 1)
+        elif dec_user or dec_pass:
+            return False, "SOCKS5 认证信息不完整，请补全用户名和密码"
         connector = ProxyConnector.from_url(proxy_url)
 
         async with aiohttp.ClientSession(connector=connector) as session:

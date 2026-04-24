@@ -166,6 +166,13 @@ class BatchPostPage:
             self.log_list.controls[:] = []  # 加载新数据前清空
             self._log_raw_items.clear()
             for log in reversed(logs):
+                # 从 data_json 中恢复进度信息
+                _extra = {}
+                try:
+                    import json as _json
+                    _extra = _json.loads(log.data_json) if log.data_json else {}
+                except Exception:
+                    pass
                 log_data = {
                     "status": log.status,
                     "account_name": log.account_name,
@@ -175,7 +182,8 @@ class BatchPostPage:
                     "msg": log.message,
                     "error": log.message,
                     "account_id": log.account_id,
-                    "progress": "-", "total": "-"
+                    "progress": _extra.get("progress", "-"),
+                    "total": _extra.get("total", "-"),
                 }
                 self._add_log(log_data, timestamp=self._format_log_timestamp(log.created_at))
             
@@ -3406,6 +3414,13 @@ class BatchPostPage:
             self.log_list.controls.clear()
             self._log_raw_items.clear()
             for log in reversed(logs):
+                # 从 data_json 中恢复进度信息
+                _extra = {}
+                try:
+                    import json as _json
+                    _extra = _json.loads(log.data_json) if log.data_json else {}
+                except Exception:
+                    pass
                 log_data = {
                     "status": log.status,
                     "account_name": log.account_name,
@@ -3415,7 +3430,8 @@ class BatchPostPage:
                     "msg": log.message,
                     "error": log.message,
                     "account_id": log.account_id,
-                    "progress": "-", "total": "-"
+                    "progress": _extra.get("progress", "-"),
+                    "total": _extra.get("total", "-"),
                 }
                 self._add_log(log_data, timestamp=self._format_log_timestamp(log.created_at))
             self.log_list.update()
