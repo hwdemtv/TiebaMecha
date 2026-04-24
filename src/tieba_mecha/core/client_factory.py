@@ -61,7 +61,13 @@ async def create_client(db: Database, bduss: str, stoken: str = "", proxy_id: in
     client_kwargs = {"ua": ua}
     
     if proxy_id:
-        proxy = await get_best_proxy_config(db, proxy_id=proxy_id)
+        try:
+            proxy = await get_best_proxy_config(db, proxy_id=proxy_id)
+        except ValueError as e:
+            # SOCKS5 代理认证信息不完整等配置错误
+            from .logger import log_error
+            await log_error(f"代理配置错误: {e}")
+            proxy = None
         if proxy:
             # 统一使用 ProxyConnector：实测 HTTP/HTTPS 代理直接传 proxy 参数会触发
             # "Can not write request body" 错误，改用 connector 模式可解决

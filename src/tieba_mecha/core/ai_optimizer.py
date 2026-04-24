@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import random
+import time
 import aiohttp
 from typing import Tuple, Optional
 from ..db.crud import Database
@@ -15,11 +17,31 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_DELAY = 3  # 秒
 
+# AI 调用最小间隔（秒），避免密集触发 API 限流
+_AI_CALL_INTERVAL_MIN = 1.0
+_AI_CALL_INTERVAL_MAX = 3.0
+
+# 全局上次 AI 调用时间戳
+_last_ai_call_time: float = 0.0
+
 class AIOptimizer:
     """基于 LLM 的贴吧帖子 SEO 优化器"""
 
     def __init__(self, db: Database):
         self.db = db
+
+    async def _wait_for_rate_limit(self):
+        """在 AI 调用前自动等待，确保两次调用之间有 1~3 秒间隔，避免 API 限流"""
+        global _last_ai_call_time
+        now = time.monotonic()
+        elapsed = now - _last_ai_call_time
+        # 随机目标间隔，增加自然感
+        target_interval = random.uniform(_AI_CALL_INTERVAL_MIN, _AI_CALL_INTERVAL_MAX)
+        if elapsed < target_interval:
+            wait = target_interval - elapsed
+            logger.debug(f"AI 调用限流等待 {wait:.1f}s")
+            await asyncio.sleep(wait)
+        _last_ai_call_time = time.monotonic()
 
     async def _get_config(self) -> dict:
         """获取 AI 配置"""
@@ -178,6 +200,7 @@ class AIOptimizer:
         生成自顶回复内容（简短拟人化）
         返回: (是否成功, 回复内容, 错误信息)
         """
+        await self._wait_for_rate_limit()
         config = await self._get_config()
         if not config["api_key"]:
             return False, "", "请先在设置中配置 AI API Key"

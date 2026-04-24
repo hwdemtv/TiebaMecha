@@ -1069,7 +1069,8 @@ class BatchPostManager:
                                     fname=current_target_fname,
                                     title=title,
                                     tid=tid,
-                                    status="success"
+                                    status="success",
+                                    data={"progress": task.progress, "total": task.total}
                                 )
                                 acc_display = acc.name if acc else f"账号-{account_id}"
                                 await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
@@ -1130,7 +1131,8 @@ class BatchPostManager:
                         fname=current_target_fname,
                         status="skip",
                         message=f"贴吧权限不足，跳过: {current_target_fname}",
-                        title=current_material.title
+                        title=current_material.title,
+                        data={"progress": task.progress, "total": task.total}
                     )
                     yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] 权限不足，跳过换吧", "progress": task.progress, "total": task.total}
                 else:
@@ -1140,7 +1142,8 @@ class BatchPostManager:
                         fname=base_target_fname,
                         status="error",
                         message="物料已由多个账号尝试均告失败，可能触发内容风控",
-                        title=current_material.title
+                        title=current_material.title,
+                        data={"progress": task.progress, "total": task.total}
                     )
                     await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败")
                     # 记录靶场拦截
