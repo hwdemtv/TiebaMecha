@@ -1,10 +1,19 @@
 """AI SEO Optimizer for TiebaMecha"""
+import asyncio
 import json
 import logging
 import aiohttp
 from typing import Tuple, Optional
 from ..db.crud import Database
 from .auth import require_pro
+
+logger = logging.getLogger(__name__)
+
+# 可重试的 HTTP 状态码
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_RETRY_DELAY = 3  # 秒
 
 class AIOptimizer:
     """基于 LLM 的贴吧帖子 SEO 优化器"""
@@ -93,6 +102,7 @@ class AIOptimizer:
             "Authorization": f"Bearer {config['api_key']}",
             "Content-Type": "application/json"
         }
+        # 基础请求体（不含 response_format，后续按需添加）
         data = {
             "model": config["model"],
             "messages": [
@@ -100,39 +110,67 @@ class AIOptimizer:
                 {"role": "user", "content": user_prompt}
             ],
             "temperature": 0.85,
-            "response_format": {"type": "json_object"}
         }
+        # response_format 并非所有兼容 API 都支持，首次尝试带，失败后去掉重试
+        data_with_format = {**data, "response_format": {"type": "json_object"}}
 
-        try:
-            import re
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        return False, title, content, f"API 请求失败 ({resp.status}): {error_text}"
-                    
-                    result = await resp.json()
-                    content_str = result['choices'][0]['message']['content']
-                    
-                    # 鲁棒性解析
-                    content_str = content_str.strip()
-                    if content_str.startswith("```"):
-                        content_str = re.sub(r'^```(?:json)?\s*|\s*```$', '', content_str, flags=re.MULTILINE | re.IGNORECASE).strip()
+        import re
+        last_error = ""
+        use_format = True
 
-                    try:
-                        parsed = json.loads(content_str)
-                    except json.JSONDecodeError:
-                        # 兜底：尝试正则提取
-                        t_m = re.search(r'"title":\s*"(.*?)"', content_str, re.S)
-                        c_m = re.search(r'"content":\s*"(.*?)"', content_str, re.S)
-                        if t_m and c_m:
-                            parsed = {"title": t_m.group(1), "content": c_m.group(1).replace("\\n", "\n")}
-                        else:
-                            return False, title, content, f"AI 返回格式不规范: {content_str[:50]}..."
-                    
-                    return True, parsed.get("title", title), parsed.get("content", content), ""
-        except Exception as e:
-            return False, title, content, f"优化异常: {str(e)}"
+        for attempt in range(DEFAULT_MAX_RETRIES + 1):
+            try:
+                req_data = data_with_format if use_format else data
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=req_data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status != 200:
+                            error_text = await resp.text()
+                            last_error = f"API 请求失败 ({resp.status}): {error_text[:200]}"
+
+                            # 422 通常是 response_format 不被支持，去掉后重试
+                            if resp.status == 422 and use_format:
+                                use_format = False
+                                logger.warning("response_format 不被支持，切换为纯文本模式重试")
+                                continue
+
+                            if resp.status in _RETRYABLE_STATUS and attempt < DEFAULT_MAX_RETRIES:
+                                delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                                logger.warning(f"AI 改写请求 {resp.status}，第 {attempt+1} 次重试，等待 {delay}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                            return False, title, content, last_error
+                        
+                        result = await resp.json()
+                        content_str = result['choices'][0]['message']['content']
+                        
+                        # 鲁棒性解析
+                        content_str = content_str.strip()
+                        if content_str.startswith("```"):
+                            content_str = re.sub(r'^```(?:json)?\s*|\s*```$', '', content_str, flags=re.MULTILINE | re.IGNORECASE).strip()
+
+                        try:
+                            parsed = json.loads(content_str)
+                        except json.JSONDecodeError:
+                            # 兜底：尝试正则提取
+                            t_m = re.search(r'"title":\s*"(.*?)"', content_str, re.S)
+                            c_m = re.search(r'"content":\s*"(.*?)"', content_str, re.S)
+                            if t_m and c_m:
+                                parsed = {"title": t_m.group(1), "content": c_m.group(1).replace("\\n", "\n")}
+                            else:
+                                return False, title, content, f"AI 返回格式不规范: {content_str[:50]}..."
+                        
+                        return True, parsed.get("title", title), parsed.get("content", content), ""
+            except asyncio.TimeoutError:
+                last_error = f"AI 请求超时 (60s)"
+                if attempt < DEFAULT_MAX_RETRIES:
+                    delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                    logger.warning(f"AI 改写超时，第 {attempt+1} 次重试，等待 {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
+            except Exception as e:
+                return False, title, content, f"优化异常: {str(e)}"
+
+        return False, title, content, last_error
 
     @require_pro
     async def generate_bump_content(self, title: str, persona: str = "normal") -> Tuple[bool, str, str]:
@@ -186,19 +224,36 @@ class AIOptimizer:
 
         try:
             import re
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        return False, "", f"API 请求失败 ({resp.status})"
+            last_error = ""
+            for attempt in range(DEFAULT_MAX_RETRIES + 1):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                            if resp.status != 200:
+                                error_text = await resp.text()
+                                last_error = f"API 请求失败 ({resp.status}): {error_text[:200]}"
+                                if resp.status in _RETRYABLE_STATUS and attempt < DEFAULT_MAX_RETRIES:
+                                    delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                                    logger.warning(f"自顶回复请求 {resp.status}，第 {attempt+1} 次重试，等待 {delay}s...")
+                                    await asyncio.sleep(delay)
+                                    continue
+                                return False, "", last_error
 
-                    result = await resp.json()
-                    content = result['choices'][0]['message']['content'].strip()
-                    # 清理可能的引号包裹
-                    content = re.sub(r'^["\'"]|["\'"]$', '', content)
-                    return True, content, ""
-        except Exception as e:
-            return False, "", f"生成异常: {str(e)}"
+                            result = await resp.json()
+                            content = result['choices'][0]['message']['content'].strip()
+                            # 清理可能的引号包裹
+                            content = re.sub(r'^["\'"]|["\'"]$', '', content)
+                            return True, content, ""
+                except asyncio.TimeoutError:
+                    last_error = "AI 请求超时 (30s)"
+                    if attempt < DEFAULT_MAX_RETRIES:
+                        delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                        logger.warning(f"自顶回复超时，第 {attempt+1} 次重试，等待 {delay}s...")
+                        await asyncio.sleep(delay)
+                        continue
+                except Exception as e:
+                    return False, "", f"生成异常: {str(e)}"
+            return False, "", last_error
 
     async def test_connection(self, api_key: str = "", base_url: str = "", model: str = "") -> Tuple[bool, str]:
         """
@@ -232,14 +287,25 @@ class AIOptimizer:
         }
         
         start_time = time.time()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    latency = int((time.time() - start_time) * 1000)
-                    if resp.status == 200:
-                        return True, f"连接成功 (延迟: {latency}ms)"
-                    else:
-                        error_text = await resp.text()
-                        return False, f"API 响应错误 ({resp.status}): {error_text[:100]}"
-        except Exception as e:
-            return False, f"网络连接异常: {str(e)[:100]}"
+        last_error = ""
+        for attempt in range(DEFAULT_MAX_RETRIES + 1):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        latency = int((time.time() - start_time) * 1000)
+                        if resp.status == 200:
+                            return True, f"连接成功 (延迟: {latency}ms)"
+                        else:
+                            error_text = await resp.text()
+                            last_error = f"API 响应错误 ({resp.status}): {error_text[:100]}"
+                            if resp.status in _RETRYABLE_STATUS and attempt < DEFAULT_MAX_RETRIES:
+                                delay = DEFAULT_RETRY_DELAY * (attempt + 1)
+                                await asyncio.sleep(delay)
+                                continue
+                            return False, last_error
+            except Exception as e:
+                last_error = f"网络连接异常: {str(e)[:100]}"
+                if attempt < DEFAULT_MAX_RETRIES:
+                    await asyncio.sleep(DEFAULT_RETRY_DELAY * (attempt + 1))
+                    continue
+        return False, last_error
