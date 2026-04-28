@@ -35,21 +35,23 @@ class LoginPage:
             return
 
         if self._is_setup_mode:
-            self.title_text.value = "设置访问密码"
-            self.subtitle_text.value = "INITIALIZE ACCESS / 首次配置"
-            self.hint_text.value = "为 Web 控制台设置访问密码"
-            self.confirm_field.visible = True
-            self.submit_btn.text = "激活防护矩阵"
-            self.status_text.value = "首次访问需要设置密码以保护控制台安全。"
-            self.status_text.color = "onSurfaceVariant"
+            if hasattr(self, "title_text"): self.title_text.value = "设置访问密码"
+            if hasattr(self, "subtitle_text"): self.subtitle_text.value = "INITIALIZE ACCESS / 首次配置"
+            if hasattr(self, "hint_text"): self.hint_text.value = "为 Web 控制台设置访问密码"
+            if hasattr(self, "confirm_field"): self.confirm_field.visible = True
+            if hasattr(self, "submit_btn"): self.submit_btn.text = "激活防护矩阵"
+            if hasattr(self, "status_text"): 
+                self.status_text.value = "首次访问需要设置密码以保护控制台安全。"
+                self.status_text.color = "onSurfaceVariant"
         else:
-            self.title_text.value = "身份验证"
-            self.subtitle_text.value = "ACCESS CONTROL / 访问控制"
-            self.hint_text.value = "输入访问密码"
-            self.confirm_field.visible = False
-            self.submit_btn.text = "验证身份"
-            self.status_text.value = "请输入密码以访问控制台。"
-            self.status_text.color = "onSurfaceVariant"
+            if hasattr(self, "title_text"): self.title_text.value = "身份验证"
+            if hasattr(self, "subtitle_text"): self.subtitle_text.value = "ACCESS CONTROL / 访问控制"
+            if hasattr(self, "hint_text"): self.hint_text.value = "输入访问密码"
+            if hasattr(self, "confirm_field"): self.confirm_field.visible = False
+            if hasattr(self, "submit_btn"): self.submit_btn.text = "验证身份"
+            if hasattr(self, "status_text"): 
+                self.status_text.value = "请输入密码以访问控制台。"
+                self.status_text.color = "onSurfaceVariant"
 
         self.page.update()
 
@@ -70,6 +72,12 @@ class LoginPage:
             can_reveal_password=True,
             border_color="primary",
             width=320,
+        )
+
+        self.hint_text = ft.Text(
+            "输入访问密码",
+            color="onSurfaceVariant",
+            size=13,
         )
 
         self.status_text = ft.Text(
@@ -93,7 +101,7 @@ class LoginPage:
 
         self.submit_btn = ft.FilledButton(
             "验证身份",
-            icon=icons.LOCK_OUTLINED,
+            icon=icons.LOCK_ROUNDED,
             on_click=self._on_submit,
             style=ft.ButtonStyle(bgcolor="primary"),
             width=320,
@@ -130,6 +138,7 @@ class LoginPage:
                         width=320,
                     ),
                     ft.Divider(height=20, color="transparent"),
+                    self.hint_text,
                     self.password_field,
                     self.confirm_field,
                     self.status_text,

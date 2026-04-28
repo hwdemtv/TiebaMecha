@@ -44,6 +44,41 @@ _uvc.Config.configure_logging = _patched_configure_logging
 # │  self.__unsubscribe_topic() 会删除同一个字典的键，导致 RuntimeError。│
 # │  解法：用 list() 复制键再迭代。此补丁必须在 import flet 之后执行。   │
 # └─────────────────────────────────────────────────────────────────────┘
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  修复 Flet 0.23.2 run_task "exception calling callback for         │
+# │  <Future state=cancelled>" 错误                                     │
+# │  根本原因：run_task 的 _on_completion 回调在 Future 被 cancel 后    │
+# │  仍调用 f.exception()，对已取消的 Future 调用 .exception() 会抛出   │
+# │  CancelledError，而在回调中 raise 又触发 asyncio 的                 │
+# │  "exception calling callback" 日志。                                │
+# │  解法：用安全版本替换 _on_completion，先检查 cancelled 状态。        │
+# │  此补丁必须在 import flet 之后、首次调用 run_task 之前执行。        │
+# └─────────────────────────────────────────────────────────────────────┘
+import flet_core.page as _fpage
+_orig_run_task = _fpage.Page.run_task
+def _patched_run_task(self, handler, *args, **kwargs):
+    """修复：在 _on_completion 回调中安全处理已取消的 Future"""
+    import asyncio as _asyncio
+    _fpage._session_page.set(self)
+    assert _asyncio.iscoroutinefunction(handler)
+
+    future = _asyncio.run_coroutine_threadsafe(handler(*args, **kwargs), self._Page__loop)
+
+    def _safe_on_completion(f):
+        if f.cancelled():
+            return  # Future 已取消，静默忽略
+        try:
+            exc = f.exception()
+        except _asyncio.CancelledError:
+            return  # CancelledError 也静默忽略
+        if exc:
+            import logging as _log
+            _log.getLogger(__name__).error(f"run_task coroutine raised: {exc}", exc_info=exc)
+
+    future.add_done_callback(_safe_on_completion)
+    return future
+_fpage.Page.run_task = _patched_run_task
+
 import flet_core.pubsub.pubsub_hub as _psh
 _orig_unsubscribe_all = _psh.PubSubHub.unsubscribe_all
 def _patched_unsubscribe_all(self, session_id: str):

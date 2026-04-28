@@ -183,6 +183,10 @@ class BatchPostPage:
                         if acc.status == "active":
                             self._selected_account_ids.add(acc.id)
                 self._initial_load_done = True
+
+            # [修复] 过滤掉数据库中已不存在的账号 ID，防止出现 6/5 这种逻辑错误
+            current_ids = {acc.id for acc in self._accounts}
+            self._selected_account_ids = {aid for aid in self._selected_account_ids if aid in current_ids}
             
             self._refresh_task_list()
             self._refresh_account_pool()
@@ -758,8 +762,8 @@ class BatchPostPage:
                         on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
                         cells=[
                             ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Text(display_t, tooltip=display_t)),
-                            ft.DataCell(ft.Text(display_c, tooltip=display_c)),
+                            ft.DataCell(ft.Text(display_t, tooltip=m_title)),
+                            ft.DataCell(ft.Text(display_c, tooltip=m_content)),
                             ft.DataCell(
                                 ft.Row([
                                     ft.Icon(status_icon, color=status_color, size=14),
@@ -891,7 +895,7 @@ class BatchPostPage:
                         on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
                         cells=[
                             ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Text(display_t, tooltip=display_t)),
+                            ft.DataCell(ft.Text(display_t, tooltip=m_title)),
                             ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
                             ft.DataCell(ft.Text(
                                 next((a.name for a in self._accounts if a.id == m.posted_account_id), f"账号-{m.posted_account_id}" if m.posted_account_id else "-"),
