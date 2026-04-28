@@ -5,6 +5,7 @@ import logging
 import random
 import re
 import time
+from datetime import datetime
 import aiohttp
 from typing import Tuple, Optional
 from ..db.crud import Database
@@ -175,12 +176,31 @@ class AIOptimizer:
         }
     }
 
+    async def _auto_select_persona(self) -> str:
+        """
+        根据当前时段自动选择人格，避免同一账号长期使用同一风格。
+        白天用轻松人格，晚上用专业人格，深夜用高冷人格。
+        """
+        hour = datetime.now().hour
+        if 9 <= hour <= 14:
+            pool = ["casual", "warm_netizen", "newbie"]
+        elif 15 <= hour <= 19:
+            pool = ["normal", "casual", "warm_netizen"]
+        elif 20 <= hour <= 23:
+            pool = ["normal", "tech_expert", "resource_god"]
+        else:
+            pool = ["resource_god", "tech_expert"]
+        return random.choice(pool)
+
     @require_pro
-    async def optimize_post(self, title: str, content: str, persona: str = "normal") -> Tuple[bool, str, str, str]:
+    async def optimize_post(self, title: str, content: str, persona: str = None) -> Tuple[bool, str, str, str]:
         """
         优化帖子内容
         返回: (是否成功, 优化后的标题, 优化后的内容, 错误信息)
         """
+        # persona 为 None 时自动根据时段轮换选择
+        if persona is None:
+            persona = await self._auto_select_persona()
         await self._wait_for_rate_limit()
         config = await self._get_config()
         if not config["api_key"]:

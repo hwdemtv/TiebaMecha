@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncGenerator
@@ -295,6 +296,18 @@ async def sign_all_forums(
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for forum in forums:
             try:
+                # [防检测] 签到前随机浏览伪装（20%概率，模拟真实用户先逛再签到）
+                if random.random() < 0.20:
+                    try:
+                        threads = await client.get_threads(forum.fname, pn=1)
+                        if threads and threads.objs:
+                            sample = random.sample(threads.objs[:5], min(1, len(threads.objs[:5])))
+                            for t in sample:
+                                await client.get_posts(t.tid, pn=1)
+                                await asyncio.sleep(random.uniform(3, 8))
+                    except Exception:
+                        pass  # 浏览失败不影响签到
+
                 # 针对底层网络抖动（如 Can not write request body）增加一次自动重试
                 try:
                     sign_res = await client.sign_forum(forum.fname)
@@ -473,6 +486,18 @@ async def sign_all_accounts(
         async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
             for forum in forums:
                 try:
+                    # [防检测] 签到前随机浏览伪装（20%概率）
+                    if random.random() < 0.20:
+                        try:
+                            threads = await client.get_threads(forum.fname, pn=1)
+                            if threads and threads.objs:
+                                sample = random.sample(threads.objs[:5], min(1, len(threads.objs[:5])))
+                                for t in sample:
+                                    await client.get_posts(t.tid, pn=1)
+                                    await asyncio.sleep(random.uniform(3, 8))
+                        except Exception:
+                            pass
+
                     # 针对底层网络抖动增加一次自动重试
                     try:
                         result_raw = await client.sign_forum(forum.fname)

@@ -102,6 +102,17 @@ class MaintManager:
                 else:
                     await self._human_sleep(5, 12)
 
+                # [防检测] 模拟搜索行为（15% 概率）
+                if random.random() < 0.15:
+                    search_keywords = ["Python", "游戏", "手机", "电脑", "音乐", "电影", "学习", "工作"]
+                    keyword = random.choice(search_keywords)
+                    await log_info(f"[BioWarming] {account_name} 模拟搜索: {keyword}")
+                    try:
+                        await client.search_threads(keyword)
+                        await self._human_sleep(5, 15)
+                    except Exception:
+                        pass
+
                 if threads and threads.objs:
                     # [Fix 6] 浏览 2-3 个帖子而非仅 1 个，增加行为多样性
                     browse_count = random.randint(2, 3)
@@ -140,6 +151,15 @@ class MaintManager:
                         # 帖子间延迟
                         await self._human_sleep(3, 8)
 
+                    # [防检测] 模拟翻页浏览（30% 概率，翻 2-3 页）
+                    if random.random() < 0.30:
+                        for page in range(2, random.randint(3, 4)):
+                            await self._human_sleep(3, 8)
+                            try:
+                                await client.get_threads(target_forum_name, pn=page)
+                            except Exception:
+                                break
+
                     # 破冰式关注 (仅在新号且处于公域探索模式时触发)
                     if is_cold_state and is_public_exploration:
                         if random.random() < 0.25:
@@ -163,8 +183,12 @@ class MaintManager:
             return False
 
     async def _human_sleep(self, min_s: float, max_s: float):
-        """模拟真人的变频停顿"""
-        sleep_time = random.uniform(min_s, max_s)
+        """对数正态分布停顿 — 大量短停顿 + 偶尔长停顿，模拟真人行为节奏"""
+        import math
+        mean = math.log((min_s + max_s) / 2)
+        sigma = 0.5
+        sleep_time = random.lognormvariate(mean, sigma)
+        sleep_time = max(min_s, min(max_s, sleep_time))
         await asyncio.sleep(sleep_time)
 
 

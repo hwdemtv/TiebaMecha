@@ -94,13 +94,46 @@ class Obfuscator:
         """在文本开头、结尾或段落间随机插入表情或符号"""
         if not text or random.random() > 0.5: # 50% 概率不注入，保持自然
             return text
-        
+
         symbol = random.choice(RANDOM_SYMBOLS)
         pos = random.choice(["start", "end", "both"])
-        
+
         if pos == "start":
             return f"{symbol} {text}"
         elif pos == "end":
             return f"{text} {symbol}"
         else:
             return f"{symbol} {text} {symbol}"
+
+    @staticmethod
+    def semantic_shuffling(text: str) -> str:
+        """
+        段落级语序打乱：对长段落（>=3个完整句子）随机交换相邻句子位置，
+        同时跳过含因果/转折连接词的句子，保持语义连贯性。
+        """
+        if not text:
+            return text
+
+        # 连接词列表：含这些词的句子不参与交换
+        connectors = {'因此', '所以', '但是', '然而', '另外', '此外',
+                      '而且', '不过', '总之', '于是', '否则', '接着'}
+
+        paragraphs = text.split('\n')
+        result = []
+        for p in paragraphs:
+            # 按句号、感叹号、问号分句（保留分隔符）
+            sentences = re.split(r'(?<=[。！？])', p)
+            sentences = [s for s in sentences if s.strip()]
+
+            if len(sentences) >= 3:
+                # 随机选择一对相邻句子交换
+                i = random.randint(0, len(sentences) - 2)
+                s1 = sentences[i]
+                s2 = sentences[i + 1]
+                # 两句都不含连接词时才交换
+                if (not any(c in s1 for c in connectors) and
+                    not any(c in s2 for c in connectors)):
+                    sentences[i], sentences[i + 1] = sentences[i + 1], sentences[i]
+
+            result.append(''.join(sentences))
+        return '\n'.join(result)

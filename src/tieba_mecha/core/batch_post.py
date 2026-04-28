@@ -229,13 +229,16 @@ class ContentSimilarityDetector:
     """
     内容重复度检测器：避免批量发送高度相似的内容被识别为机器行为。
     基于 bigram (2-gram) 字符级 Jaccard 相似度，比字符集方案对长文本更敏感。
+    时间窗口扩大到 24 小时，防止跨时段重复内容被百度回溯检测。
     """
-    def __init__(self, similarity_threshold: float = 0.7):
+    def __init__(self, similarity_threshold: float = 0.7, window_hours: float = 24.0):
         """
         Args:
             similarity_threshold: 相似度阈值，0-1，越高越严格
+            window_hours: 检测时间窗口（小时），默认24小时
         """
         self.similarity_threshold: float = similarity_threshold
+        self.window_hours: float = window_hours
         self._history: list[tuple[set[str], float]] = []  # [(bigram_set, timestamp)]
         self._lock: asyncio.Lock = asyncio.Lock()
 
@@ -272,8 +275,8 @@ class ContentSimilarityDetector:
 
         async with self._lock:
             max_similarity = 0.0
-            # 只检查最近30分钟内的历史记录
-            cutoff = time.time() - 1800
+            # 检查时间窗口内的历史记录（默认24小时）
+            cutoff = time.time() - self.window_hours * 3600
             self._history = [(bg, ts) for bg, ts in self._history if ts > cutoff]
 
             for history_bigrams, _ in self._history:
@@ -293,23 +296,38 @@ class ContentSimilarityDetector:
 
 class FailureCircuitBreaker:
     """
-    连续失败熔断器：账号连续失败N次后自动暂停，防止过度尝试导致封号。
+    渐进式连续失败熔断器：
+    - 第 1 次触发（连续 5 次失败）：暂停 30 分钟
+    - 第 2 次触发（24h 内）：暂停 2 小时
+    - 第 3 次触发（24h 内）：暂停 6 小时
+    避免一刀切导致误杀，也防止短时间内反复触发。
     """
-    def __init__(self, max_consecutive_failures: int = 3, cooldown_minutes: int = 60):
+    def __init__(self, max_consecutive_failures: int = 5, base_cooldown: int = 30):
         """
         Args:
-            max_consecutive_failures: 最大连续失败次数
-            cooldown_minutes: 熔断后暂停时长
+            max_consecutive_failures: 连续失败多少次触发熔断
+            base_cooldown: 基础熔断时长（分钟），逐级倍增
         """
         self.max_consecutive_failures: int = max_consecutive_failures
-        self.cooldown_minutes: int = cooldown_minutes
+        self.base_cooldown: int = base_cooldown
         self._failure_counts: dict[int, tuple[int, float]] = {}  # {account_id: (count, last_failure_time)}
+        self._trigger_history: dict[int, list[float]] = {}  # {account_id: [trigger_timestamps]}
         self._lock: asyncio.Lock = asyncio.Lock()
-    
+
+    def _get_cooldown_minutes(self, account_id: int) -> int:
+        """根据 24h 内触发次数计算渐进式冷却时长"""
+        triggers = self._trigger_history.get(account_id, [])
+        now = time.time()
+        recent = [t for t in triggers if now - t < 86400]
+        level = len(recent)
+        multipliers = [1, 4, 12]  # 30min, 2h, 6h
+        idx = min(level, len(multipliers) - 1)
+        return self.base_cooldown * multipliers[idx]
+
     async def record_failure(self, account_id: int) -> bool:
         """
         记录一次失败。
-        
+
         Returns:
             True 表示触发了熔断；False 表示正常
         """
@@ -326,35 +344,43 @@ class FailureCircuitBreaker:
                 self._failure_counts[account_id] = (count, now)
             else:
                 self._failure_counts[account_id] = (1, now)
-            
+
             count, _ = self._failure_counts[account_id]
             if count >= self.max_consecutive_failures:
+                cooldown = self._get_cooldown_minutes(account_id)
+                self._trigger_history.setdefault(account_id, []).append(now)
+                # 保留 24h 内的记录
+                self._trigger_history[account_id] = [
+                    t for t in self._trigger_history[account_id] if now - t < 86400
+                ]
                 await log_error(
-                    f"🚨 连续失败熔断：账号 [{account_id}] 连续失败 {count} 次，暂停 {self.cooldown_minutes} 分钟。请检查账号状态或网络。"
+                    f"🚨 渐进式熔断：账号 [{account_id}] 连续失败 {count} 次，"
+                    f"暂停 {cooldown} 分钟（24h 内第 {len(self._trigger_history[account_id])} 次触发）。"
+                    f"请检查账号状态或网络。"
                 )
                 return True
             return False
-    
+
     async def record_success(self, account_id: int):
         """记录一次成功，重置失败计数"""
         async with self._lock:
             if account_id in self._failure_counts:
                 del self._failure_counts[account_id]
-    
+
     def is_in_cooldown(self, account_id: int) -> bool:
         """检查账号是否处于熔断中"""
         if account_id not in self._failure_counts:
             return False
-        
+
         count: int
         last_time: float
         count, last_time = self._failure_counts[account_id]
         if count < self.max_consecutive_failures:
             return False
-        
+
+        cooldown = self._get_cooldown_minutes(account_id)
         elapsed: float = time.time() - last_time
-        if elapsed >= self.cooldown_minutes * 60:
-            # 超时自动解除，同时清零失败计数，避免下次立刻重新触发熔断
+        if elapsed >= cooldown * 60:
             del self._failure_counts[account_id]
             return False
         return True
@@ -384,17 +410,38 @@ class TimeWindowDispatcher:
     
     def get_multiplier(self) -> float:
         """
-        获取延迟倍率：
-        - 正常时段：1.0x
-        - 静默时段(1-6点)：3.0x（凌晨发帖风险极高，极端降速）
-        - 早高峰(7-9点)：1.5x（用户开始活跃，适度加速）
+        获取延迟倍率（区分工作日/周末）：
+        - 凌晨 1-6 点：3.0x（风险极高）
+        - 早高峰 7-10 点：1.5x
+        - 周末活跃窗口更长、延迟更低
+        - 工作日午休(12-14点)小高峰：0.9x
         """
         current_hour = datetime.now().hour
+        is_weekend = datetime.now().weekday() >= 5
+
         if 1 <= current_hour < 6:
-            return 3.0  # 凌晨风险最高
+            return 3.0
         elif 7 <= current_hour < 10:
-            return 1.5  # 早高峰，用户活跃
-        return 1.0
+            return 1.5
+
+        if is_weekend:
+            # 周末：用户活跃时段更长，整体延迟偏低
+            if 10 <= current_hour <= 22:
+                return 0.8
+            elif 22 < current_hour <= 24 or 0 <= current_hour < 1:
+                return 1.5
+            else:
+                return 2.5
+        else:
+            # 工作日：午休和下班后有小高峰
+            if 12 <= current_hour < 14:
+                return 0.9
+            elif 18 <= current_hour <= 22:
+                return 0.85
+            elif 22 < current_hour <= 24 or 0 <= current_hour < 1:
+                return 2.0
+            else:
+                return 1.0
     
     def get_adjusted_delay(self, min_delay: float, max_delay: float) -> tuple[float, float]:
         """获取调整后的延迟范围"""
@@ -676,7 +723,7 @@ class BatchPostTask:
     delay_min: float = 120.0  # 保守值：降低被检测风险
     delay_max: float = 600.0  # 保守值：降低被检测风险
     use_ai: bool = False
-    ai_persona: str = "normal"  # AI 人格选择
+    ai_persona: str = None  # AI 人格选择（None = 自动按时段轮换）
     status: str = "pending"
     progress: int = 0
     total: int = 0
@@ -1023,10 +1070,10 @@ class BatchPostManager:
         af_tracker = AccountForumCooldown(cooldown_seconds=600)  # 10分钟独立冷却
         # 验证码熔断器：检测验证码后自动暂停账号
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
-        # 内容重复度检测器：避免发送高度相似内容
-        similarity_detector = ContentSimilarityDetector(similarity_threshold=0.7)
-        # 连续失败熔断器：连续失败N次后暂停账号
-        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, cooldown_minutes=60)
+        # 内容重复度检测器：避免发送高度相似内容（24h窗口）
+        similarity_detector = ContentSimilarityDetector(similarity_threshold=0.7, window_hours=24.0)
+        # 渐进式连续失败熔断器：连续失败N次后暂停，24h内重复触发逐级加重
+        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=5, base_cooldown=30)
         # 根据时段调整发帖延迟（复用顶部已创建的 time_dispatcher）
         delay_min, delay_max = time_dispatcher.get_adjusted_delay(task.delay_min, task.delay_max)
 
@@ -1090,7 +1137,17 @@ class BatchPostManager:
                 # --- [状态预检] ---
                 if captcha_breaker.is_in_cooldown(account_id) or failure_breaker.is_in_cooldown(account_id):
                     continue
-                
+
+                # [防检测] 代理预热期检查：新绑定代理的账号在预热期内不允许发帖
+                from .proxy import get_warmup_manager
+                warmup_mgr = get_warmup_manager()
+                if await warmup_mgr.needs_warmup(self.db, account_id):
+                    remaining = await warmup_mgr.get_remaining_hours(self.db, account_id)
+                    await log_warn(
+                        f"账号 [{account_id}] 代理预热期中，剩余 {remaining:.1f}h，跳过发帖"
+                    )
+                    continue
+
                 # 阵地冷却检查与动态跳转
                 if not af_tracker.can_post(account_id, current_target_fname):
                     if task.pairing_mode == "strict":
@@ -1878,8 +1935,8 @@ class AutoBumpManager:
             # 构建账号 ID -> 名称映射，用于日志中显示可读名称
             bump_acc_name_map = {a.id: (a.name or f"账号-{a.id}") for a in matrix_pool if a}
 
-            # 预加载 AI 人格化设定和优化器
-            ai_persona = await self.db.get_setting("ai_persona", "normal")
+            # 预加载 AI 人格化设定和优化器（None = 自动按时段轮换）
+            ai_persona = await self.db.get_setting("ai_persona", None)
             from .ai_optimizer import AIOptimizer
             optimizer = AIOptimizer(self.db)
 
