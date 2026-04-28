@@ -1,6 +1,11 @@
 """存活分析页面 - 查看物料存活状态，支持筛选和分页，集成行为审计"""
 
+from __future__ import annotations
+
 import asyncio
+from datetime import datetime
+from typing import TYPE_CHECKING, Callable
+
 import flet as ft
 from ..flet_compat import COLORS
 from ..utils import with_opacity
@@ -12,6 +17,16 @@ from ..components.icons import (
     MEMORY_ROUNDED, VPN_KEY_ROUNDED, TRENDING_UP_ROUNDED,
     MONITOR_HEART_ROUNDED
 )
+
+if TYPE_CHECKING:
+    from tieba_mecha.db.crud import Database
+
+# 常量定义
+_PAGE_SIZE = 15  # 每页显示条数
+_MAX_ALERTS_DISPLAY = 3  # 最多显示告警数
+_MAX_RECOMMENDATIONS_DISPLAY = 2  # 最多显示建议数
+_MAX_CONTENT_PREVIEW = 40  # 内容预览最大字符数
+_MAX_DETAIL_CONTENT = 500  # 详情弹窗内容最大字符数
 
 # 删帖原因英文代码 → 中文友好显示
 _DEATH_REASON_MAP = {
@@ -32,63 +47,129 @@ def _death_reason_display(reason: str) -> str:
     return _DEATH_REASON_MAP.get(reason, reason)
 
 
+def _parse_date(date_str: str | None, end_of_day: bool = False) -> datetime | None:
+    """解析日期字符串
+
+    Args:
+        date_str: 日期字符串，格式 YYYY-MM-DD
+        end_of_day: 是否设为当天结束时间 (23:59:59)
+    """
+    if not date_str:
+        return None
+    try:
+        if end_of_day:
+            return datetime.strptime(date_str + " 23:59:59", "%Y-%m-%d %H:%M:%S")
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _truncate_text(text: str, max_len: int = 500) -> str:
+    """按自然断句截断文本"""
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    # 找最后一个句号/换行
+    last_break = max(
+        truncated.rfind('。'),
+        truncated.rfind('！'),
+        truncated.rfind('？'),
+        truncated.rfind('\n'),
+    )
+    if last_break > max_len * 0.8:
+        truncated = truncated[:last_break + 1]
+    return truncated + f"\n\n... (共 {len(text)} 字)"
+
+
+def _get_risk_color(score: float) -> tuple[str, str]:
+    """返回风险等级对应的颜色和标签
+
+    Returns:
+        (颜色代码, 风险等级标签)
+    """
+    if score >= 5:
+        return "#F44336", "高危"
+    elif score >= 2.5:
+        return "#FF9800", "中危"
+    return "#4CAF50", "低危"
+
+
 class SurvivalPage:
     """存活分析页面"""
 
-    def __init__(self, page: ft.Page, db=None, on_navigate=None):
+    def __init__(self, page: ft.Page, db: Database | None = None, on_navigate: Callable | None = None):
         self.page = page
         self.db = db
         self.on_navigate = on_navigate
-        self._stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
-        self._account_options = []
-        self._fname_options = []  # 贴吧名选项
-        self._death_reason_options = []  # 阵亡原因选项
-        self._account_name_map = {}  # account_id -> name 映射
-        self._current_page = 1
-        self._stat_cards_container = None
-        self._page_size = 15
-        self._total = 0
-        self._materials = []
-        self._audit_reports = []  # 行为审计报告
+        self._stats: dict[str, int] = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
+        self._account_options: list[ft.dropdown.Option] = []
+        self._fname_options: list[ft.dropdown.Option] = []  # 贴吧名选项
+        self._death_reason_options: list[ft.dropdown.Option] = []  # 阵亡原因选项
+        self._account_name_map: dict[int, str] = {}  # account_id -> name 映射
+        self._current_page: int = 1
+        self._stat_cards_container: ft.Container | None = None
+        self._page_size: int = _PAGE_SIZE
+        self._total: int = 0
+        self._materials: list = []
+        self._audit_reports: list[dict] = []  # 行为审计报告
         self._active_tab = "survival"  # 当前标签页
+        self._audit_error = None  # 审计加载错误信息
+
+    def cleanup(self):
+        """清理页面资源，导航离开时调用"""
+        self._materials = []
+        self._audit_reports = []
+        self._account_options = []
+        self._fname_options = []
+        self._death_reason_options = []
+        self._account_name_map = {}
 
     async def load_data(self):
         """加载数据"""
         if not self.db:
             return
         try:
+            # 仅首次加载或筛选选项为空时重新加载筛选选项
+            if not self._account_options:
+                accounts = await self.db.get_accounts()
+                self._account_options = [
+                    ft.dropdown.Option(str(a.id), a.name or f"账号-{a.id}")
+                    for a in accounts
+                ]
+                # 构建账号 ID -> 名称映射
+                self._account_name_map = {a.id: a.name or f"账号-{a.id}" for a in accounts}
+
+            if not self._fname_options:
+                fnames = await self.db.get_distinct_fnames()
+                self._fname_options = [ft.dropdown.Option(f, f) for f in fnames]
+
+            if not self._death_reason_options:
+                reasons = await self.db.get_distinct_death_reasons()
+                self._death_reason_options = [
+                    ft.dropdown.Option(r, _death_reason_display(r)) for r in reasons
+                ]
+
+            # 统计数据每次都需要刷新
             self._stats = await self.db.get_survival_stats()
-            accounts = await self.db.get_accounts()
-            self._account_options = [
-                ft.dropdown.Option(str(a.id), a.name or f"账号-{a.id}")
-                for a in accounts
-            ]
-            # 构建账号 ID -> 名称映射
-            self._account_name_map = {a.id: a.name or f"账号-{a.id}" for a in accounts}
-            # 获取贴吧名列表
-            fnames = await self.db.get_distinct_fnames()
-            self._fname_options = [ft.dropdown.Option(f, f) for f in fnames]
-            # 获取阵亡原因列表
-            reasons = await self.db.get_distinct_death_reasons()
-            self._death_reason_options = [
-                ft.dropdown.Option(r, _death_reason_display(r)) for r in reasons
-            ]
+
             await self._load_page(1)
             # 加载行为审计数据
             await self._load_audit_data()
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            from ..core.logger import log_error
+            await log_error(f"加载存活分析数据失败: {e}")
 
     async def _load_audit_data(self):
         """加载行为审计报告"""
         try:
             from ...core.behavior_audit import audit_all_accounts
             self._audit_reports = await audit_all_accounts(self.db, days=7)
+            self._audit_error = None
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"加载行为审计数据失败: {e}")
+            from ..core.logger import log_warn
+            await log_warn(f"加载行为审计数据失败: {e}")
             self._audit_reports = []
+            self._audit_error = str(e)
 
     async def _on_tab_change(self, e):
         """切换标签页"""
@@ -110,20 +191,8 @@ class SurvivalPage:
         death_reason = death_reason_filter if death_reason_filter and death_reason_filter != "all" else None
         status = status_filter if status_filter and status_filter != "all" else None
         # 解析日期
-        date_from = None
-        date_to = None
-        if date_from_filter:
-            try:
-                from datetime import datetime
-                date_from = datetime.strptime(date_from_filter, "%Y-%m-%d")
-            except ValueError:
-                pass
-        if date_to_filter:
-            try:
-                from datetime import datetime
-                date_to = datetime.strptime(date_to_filter + " 23:59:59", "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                pass
+        date_from = _parse_date(date_from_filter)
+        date_to = _parse_date(date_to_filter, end_of_day=True)
         materials, total = await self.db.get_materials_paginated(
             survival_status=status,
             account_id=account_id,
@@ -329,7 +398,7 @@ class SurvivalPage:
         # 标题（优先 title，其次 content 截取）
         title = m.title or ""
         if not title and m.content:
-            title = m.content[:40] + ("..." if len(m.content) > 40 else "")
+            title = m.content[:_MAX_CONTENT_PREVIEW] + ("..." if len(m.content) > _MAX_CONTENT_PREVIEW else "")
         if not title:
             title = "无标题"
 
@@ -413,10 +482,7 @@ class SurvivalPage:
                 ),
             ])
 
-        content_text = m.content or "无内容"
-        # 限制详情弹窗中的内容长度
-        if len(content_text) > 500:
-            content_text = content_text[:500] + f"\n\n... (共 {len(m.content)} 字)"
+        content_text = _truncate_text(m.content or "无内容", _MAX_DETAIL_CONTENT)
 
         detail_items = [
             ft.Row([ft.Icon(icon, color=color, size=18), ft.Text(f"状态: {label}", size=14, color=color, weight=ft.FontWeight.W_500)]),
@@ -447,6 +513,7 @@ class SurvivalPage:
         ))
 
         dialog = ft.AlertDialog(
+            modal=False,  # 允许点击外部关闭
             title=ft.Row([ft.Icon(icon, color=color), ft.Text(f"物料详情 #{m.id}")]),
             content=ft.Container(
                 content=ft.Column(detail_items, spacing=8, scroll=ft.ScrollMode.AUTO),
@@ -477,6 +544,8 @@ class SurvivalPage:
         """执行删除"""
         self.page.close(confirm_dialog)
         if self.db:
+            from ..core.logger import log_info
+            await log_info(f"用户删除物料 #{material_id}")
             await self.db.delete_material(material_id)
             # 重新加载统计数据和当前页
             self._stats = await self.db.get_survival_stats()
@@ -523,6 +592,20 @@ class SurvivalPage:
     def _build_audit_overview(self) -> ft.Control:
         """构建审计概览区（总风险评分 + 高危统计）"""
         reports = self._audit_reports
+
+        # 审计加载失败时显示错误信息
+        if self._audit_error:
+            return ft.Container(
+                content=ft.Column([
+                    ft.Icon(ERROR, size=48, color="error"),
+                    ft.Text("审计数据加载失败", size=14, color="error"),
+                    ft.Text(self._audit_error, size=11, color="onSurfaceVariant"),
+                    ft.Text("请检查网络连接或重试", size=11, color="onSurfaceVariant"),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                alignment=ft.alignment.center,
+                padding=40,
+            )
+
         if not reports:
             return ft.Container(
                 content=ft.Column([
@@ -541,12 +624,7 @@ class SurvivalPage:
         avg_score = sum(r.get("risk_score", 0) for r in reports) / len(reports)
 
         # 总体评分色
-        if avg_score >= 5:
-            score_color = COLORS.ERROR if hasattr(COLORS, 'ERROR') else "#F44336"
-        elif avg_score >= 2.5:
-            score_color = COLORS.AMBER if hasattr(COLORS, 'AMBER') else "#FF9800"
-        else:
-            score_color = COLORS.GREEN
+        score_color, _ = _get_risk_color(avg_score)
 
         overview_cards = ft.Row([
             # 综合风险评分
@@ -615,17 +693,12 @@ class SurvivalPage:
         name = report.get("account_name", "未知")
 
         # 风险等级色
+        risk_color, risk_label = _get_risk_color(score)
         if score >= 5:
-            risk_color = "#F44336"
-            risk_label = "高危"
             risk_icon = WARNING_AMBER_ROUNDED
         elif score >= 2.5:
-            risk_color = "#FF9800"
-            risk_label = "中危"
             risk_icon = INFO_OUTLINED
         else:
-            risk_color = "#4CAF50"
-            risk_label = "低危"
             risk_icon = VERIFIED_ROUNDED
 
         # 风险评分进度条
@@ -652,19 +725,19 @@ class SurvivalPage:
             badges.append(self._mini_badge("代理失败", str(proxy_fails),
                           "#F44336" if proxy_fails > 5 else "#FF9800"))
 
-        # 告警列表（折叠显示前 2 条）
+        # 告警列表（折叠显示前 N 条）
         alert_controls = []
-        for i, alert in enumerate(alerts[:3]):
+        for i, alert in enumerate(alerts[:_MAX_ALERTS_DISPLAY]):
             alert_controls.append(ft.Row([
                 ft.Icon(WARNING_AMBER_ROUNDED, size=14, color="#FF9800"),
                 ft.Text(alert, size=12, color="onSurface", expand=True),
             ], spacing=5))
-        if len(alerts) > 3:
-            alert_controls.append(ft.Text(f"... 还有 {len(alerts) - 3} 条告警", size=11, color="onSurfaceVariant", italic=True))
+        if len(alerts) > _MAX_ALERTS_DISPLAY:
+            alert_controls.append(ft.Text(f"... 还有 {len(alerts) - _MAX_ALERTS_DISPLAY} 条告警", size=11, color="onSurfaceVariant", italic=True))
 
         # 建议列表
         rec_controls = []
-        for i, rec in enumerate(recommendations[:2]):
+        for i, rec in enumerate(recommendations[:_MAX_RECOMMENDATIONS_DISPLAY]):
             rec_controls.append(ft.Row([
                 ft.Icon(TRENDING_UP_ROUNDED, size=14, color="#4CAF50"),
                 ft.Text(rec, size=12, color="onSurface", expand=True),
@@ -723,15 +796,7 @@ class SurvivalPage:
         stats = report.get("stats", {})
         name = report.get("account_name", "未知")
 
-        if score >= 5:
-            risk_color = "#F44336"
-            risk_label = "高危"
-        elif score >= 2.5:
-            risk_color = "#FF9800"
-            risk_label = "中危"
-        else:
-            risk_color = "#4CAF50"
-            risk_label = "低危"
+        risk_color, risk_label = _get_risk_color(score)
 
         items = [
             ft.Row([
@@ -809,6 +874,7 @@ class SurvivalPage:
                 ]))
 
         dialog = ft.AlertDialog(
+            modal=False,  # 允许点击外部关闭
             title=ft.Text("行为审计详情"),
             content=ft.Container(
                 content=ft.Column(items, spacing=8, scroll=ft.ScrollMode.AUTO),
