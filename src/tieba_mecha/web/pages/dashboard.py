@@ -1,7 +1,12 @@
 """Dashboard page with Cyber-Mecha aesthetic"""
 
+import asyncio
+import logging
+
 import flet as ft
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from ..components import (
     CoreButtonWithLabel,
@@ -39,7 +44,9 @@ class DashboardPage:
         self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._recent_forums = []
         self._ai_api_key_set = False  # AI API Key 是否已配置
-        
+        self._log_task = None  # 日志监听任务引用
+        self._log_task_running = False  # 日志监听任务运行标志
+
         # --- 方案 A: 跨页面进度同步订阅 ---
         self.page.pubsub.subscribe_topic("sign_progress", self._on_sign_progress)
 
@@ -82,9 +89,9 @@ class DashboardPage:
                 self._add_single_log_ui(log_entry)
         
         # 开启日志监听任务
-        if not hasattr(self, "_log_task_running") or not self._log_task_running:
+        if not self._log_task_running:
             self._log_task_running = True
-            self.page.run_task(self._listen_logs)
+            self._log_task = self.page.run_task(self._listen_logs)
             
         self.refresh_ui()
 
@@ -111,12 +118,18 @@ class DashboardPage:
     async def _listen_logs(self):
         """监听日志队列并更新 UI"""
         queue = get_log_queue()
-        while True:
-            log_entry = await queue.get()
-            if hasattr(self, "log_list"):
-                self._add_single_log_ui(log_entry)
-                self.page.update()
-            queue.task_done()
+        try:
+            while True:
+                log_entry = await queue.get()
+                if hasattr(self, "log_list"):
+                    self._add_single_log_ui(log_entry)
+                    self.page.update()
+                queue.task_done()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._log_task_running = False
+            self._log_task = None
 
     def refresh_ui(self):
         if hasattr(self, "hud"):
@@ -157,7 +170,7 @@ class DashboardPage:
             self.ai_nav_btn.visible = not ai_configured
             
         if hasattr(self, "forum_list"):
-            self.forum_list.items = [
+            new_items = [
                 {
                     "title": f.fname,
                     "subtitle": f"连续签到 {f.sign_count} 天",
@@ -165,6 +178,11 @@ class DashboardPage:
                 }
                 for f in self._recent_forums
             ]
+            # 仅当数据变化时才重建列表，避免不必要的 UI 开销
+            old_signature = [(i["title"], i["subtitle"]) for i in self.forum_list.items]
+            new_signature = [(i["title"], i["subtitle"]) for i in new_items]
+            if old_signature != new_signature:
+                self.forum_list.items = new_items
             
         self.page.update()
 
@@ -412,6 +430,15 @@ class DashboardPage:
             expand=True,
         )
 
+    def cleanup(self):
+        """页面卸载时清理资源：取消 pubsub 订阅、停止后台任务"""
+        try:
+            self.page.pubsub.unsubscribe_topic("sign_progress", self._on_sign_progress)
+        except Exception:
+            pass
+        if self._log_task and not self._log_task.done():
+            self._log_task.cancel()
+
     def _navigate(self, page_name: str):
         if self.on_navigate:
             self.on_navigate(page_name)
@@ -436,5 +463,5 @@ class DashboardPage:
             # 安全更新页面（如果当前页面实例属于当前活跃视图）
             if self.page:
                 self.page.update()
-        except Exception:
-            pass # 避免跨页面销毁或状态不一致时的崩溃
+        except Exception as e:
+            logger.debug(f"签到进度回调忽略异常（页面可能已卸载）: {e}")

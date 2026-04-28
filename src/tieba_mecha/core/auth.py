@@ -50,7 +50,15 @@ class LicenseManager:
     async def get_hwid(self) -> str:
         """获取硬件指纹 (支持多平台与 Docker)"""
         if self._hwid: return self._hwid
-        
+
+        # 优先从 DB 缓存读取，避免重复采集
+        if not self.db:
+            self.db = await get_db()
+        cached = await self.db.get_setting("device_id", "")
+        if cached:
+            self._hwid = cached
+            return self._hwid
+
         raw_id = ""
         try:
             import platform
@@ -107,6 +115,11 @@ class LicenseManager:
             # 统一 SHA256 混淆并截取 32 位大写
             self._hwid = hashlib.sha256(raw_id.encode()).hexdigest()[:32].upper()
             logging.info(f"[AUTH] 设备唯一标识生成成功: {self._hwid[:8]}***")
+            # 缓存到 DB，避免重启后重复采集
+            try:
+                await self.db.set_setting("device_id", self._hwid)
+            except Exception:
+                pass
             return self._hwid
             
         except Exception as e:

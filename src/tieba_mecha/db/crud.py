@@ -921,6 +921,18 @@ class Database:
                 session.add(setting)
             await session.commit()
 
+    async def set_settings_bulk(self, settings: dict[str, str]) -> None:
+        """批量保存设置（单次事务）"""
+        async with self.async_session() as session:
+            for key, value in settings.items():
+                setting = await session.get(Setting, key)
+                if setting:
+                    setting.value = value
+                else:
+                    setting = Setting(key=key, value=value)
+                    session.add(setting)
+            await session.commit()
+
     # ========== Proxy CRUD ==========
 
     async def add_proxy(

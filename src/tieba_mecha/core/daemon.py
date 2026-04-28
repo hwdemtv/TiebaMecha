@@ -259,13 +259,21 @@ async def do_maintenance_task():
 
 async def do_auth_check_task():
     """执行在线授权静默探测的内部包裹"""
-    am = await get_auth_manager()
-    print(f"[{datetime.now()}] [DAEMON] 启动后台授权校准与多节点探活...")
-    success = await am.verify_online()
-    if success:
-        print(f"[{datetime.now()}] [DAEMON] 授权状态校准完毕: PRO 已激活")
-    else:
-        print(f"[{datetime.now()}] [DAEMON] 授权状态校准完毕: FREE/ERROR 系统将维持当前状态")
+    try:
+        am = await get_auth_manager()
+        if not hasattr(am, "verify_online"):
+            print(f"[DAEMON] FATAL: get_auth_manager() 返回了 {type(am)} 而非 LicenseManager")
+            return
+        print(f"[{datetime.now()}] [DAEMON] 启动后台授权校准与多节点探活...")
+        success = await am.verify_online()
+        if success:
+            print(f"[{datetime.now()}] [DAEMON] 授权状态校准完毕: PRO 已激活")
+        else:
+            print(f"[{datetime.now()}] [DAEMON] 授权状态校准完毕: FREE/ERROR 系统将维持当前状态")
+    except Exception as e:
+        print(f"[DAEMON] 授权校验异常: {e}")
+        import traceback
+        traceback.print_exc()
 
 class TiebaMechaDaemon:
     _instance = None

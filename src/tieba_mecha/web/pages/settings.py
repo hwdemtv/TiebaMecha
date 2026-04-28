@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from ..components import create_gradient_button
 from ..utils import with_opacity
+from ... import __version__
 from ...core.ai_optimizer import AIOptimizer, _decrypt_api_key, _encrypt_api_key
 from ...core.link_manager import SmartLinkConnector
 from ...core.auth import get_auth_manager, AuthStatus
@@ -26,7 +27,6 @@ class SettingsPage:
         self.db = db
         self.on_navigate = on_navigate
         self._settings = {}
-        self._ai_key_was_encrypted = False  # 跟踪加载时 API Key 是否已加密
 
     async def load_data(self):
         """同步数据库中的配置项"""
@@ -34,7 +34,6 @@ class SettingsPage:
         
         # 加载核心配置（API Key 需解密显示）
         raw_key = await self.db.get_setting("ai_api_key", "")
-        self._ai_key_was_encrypted = bool(raw_key)
         self._settings["ai_api_key"] = _decrypt_api_key(raw_key)
         self._settings["ai_base_url"] = await self.db.get_setting("ai_base_url", "https://open.bigmodel.cn/api/paas/v4/")
         self._settings["ai_model"] = await self.db.get_setting("ai_model", "glm-4-flash")
@@ -363,7 +362,7 @@ class SettingsPage:
                     ft.Divider(height=10, color="transparent"),
                     # 底部：版本与保存
                     ft.Row([
-                        ft.Text("TiebaMecha v1.1.1 | Current Path: Cyber-Router", size=10, color="onSurfaceVariant"),
+                        ft.Text(f"TiebaMecha v{__version__} | Current Path: Cyber-Router", size=10, color="onSurfaceVariant"),
                         ft.Container(expand=True),
                         save_btn,
                     ]),
@@ -425,12 +424,8 @@ class SettingsPage:
         e.control.text = "正在握手..."
         self.page.update()
         
-        # 临时保存以便测试
-        # 临时清理旧配置，以免干扰 API 模式
-
         connector = SmartLinkConnector(self.db)
-        
-        # 预存以便测试
+
         await self.db.set_setting("slm_api_url", self.slm_api_url_field.value)
         await self.db.set_setting("slm_api_key", self.slm_api_key_field.value)
         
@@ -448,12 +443,23 @@ class SettingsPage:
         e.control.disabled = True
         e.control.text = "正在核销..."
         self.page.update()
-        
-        # 先保存当前填写的配置，以便验证
-        await self.db.set_setting("license_key", self.license_key_field.value)
-        
-        am = get_auth_manager()
-        success = await am.verify_online()
+
+        try:
+            # 先保存当前填写的配置，以便验证
+            await self.db.set_setting("license_key", self.license_key_field.value)
+
+            am = await get_auth_manager()
+            if not hasattr(am, "verify_online"):
+                raise TypeError(f"get_auth_manager() 返回了 {type(am)} 而非 LicenseManager")
+            success = await am.verify_online()
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            self._show_snackbar(f"❌ 授权验证异常: {ex}", "error")
+            e.control.disabled = False
+            e.control.text = "立即验证授权"
+            self.page.update()
+            return
         
         if success:
             self._show_snackbar("🎉 授权激活成功！Pro 功能已解锁。", "success")
@@ -464,26 +470,64 @@ class SettingsPage:
         e.control.text = "立即验证授权"
         await self.refresh_ui()
 
+    @staticmethod
+    def _validate_time_hhmm(value: str) -> bool:
+        """校验 HH:mm 格式"""
+        import re
+        return bool(re.fullmatch(r"\d{2}:\d{2}", value))
+
     async def _do_save(self, e):
         if not self.db: return
-        
-        # 同步各字段到数据库（API Key 加密存储）
-        await self.db.set_setting("ai_api_key", _encrypt_api_key(self.ai_key_field.value))
-        await self.db.set_setting("ai_base_url", self.ai_url_field.value)
-        await self.db.set_setting("ai_model", self.ai_model_field.value)
-        await self.db.set_setting("ai_system_prompt", self.ai_prompt_field.value)
-        await self.db.set_setting("proxy_fallback", "true" if self.proxy_fallback_switch.value else "false")
-        await self.db.set_setting("heartbeat_interval", self.heartbeat_field.value)
-        await self.db.set_setting("delay_min", self.delay_min_field.value)
-        await self.db.set_setting("delay_max", self.delay_max_field.value)
-        await self.db.set_setting("quiet_start", self.quiet_start_field.value)
-        await self.db.set_setting("quiet_end", self.quiet_end_field.value)
-        
-        await self.db.set_setting("slm_api_url", self.slm_api_url_field.value)
-        await self.db.set_setting("slm_api_key", self.slm_api_key_field.value)
-        
-        await self.db.set_setting("license_key", self.license_key_field.value)
-        
+
+        # 输入校验
+        import re
+        errors = []
+
+        # 延迟范围
+        try:
+            d_min = float(self.delay_min_field.value)
+            d_max = float(self.delay_max_field.value)
+            if d_min < 0 or d_max < 0:
+                errors.append("延迟值不能为负数")
+            elif d_min > d_max:
+                errors.append("最小延迟不能大于最大延迟")
+        except ValueError:
+            errors.append("延迟值必须为数字")
+
+        # 静默时间窗
+        for label, field in [("静默开始", self.quiet_start_field), ("静默结束", self.quiet_end_field)]:
+            if not self._validate_time_hhmm(field.value):
+                errors.append(f"{label}格式无效，应为 HH:mm")
+
+        # 心跳间隔
+        try:
+            hb = float(self.heartbeat_field.value)
+            if hb <= 0:
+                errors.append("心跳间隔必须大于 0")
+        except ValueError:
+            errors.append("心跳间隔必须为数字")
+
+        if errors:
+            self._show_snackbar("校验失败: " + "; ".join(errors), "error")
+            return
+
+        # 单次事务批量写入所有配置
+        await self.db.set_settings_bulk({
+            "ai_api_key": _encrypt_api_key(self.ai_key_field.value),
+            "ai_base_url": self.ai_url_field.value,
+            "ai_model": self.ai_model_field.value,
+            "ai_system_prompt": self.ai_prompt_field.value,
+            "proxy_fallback": "true" if self.proxy_fallback_switch.value else "false",
+            "heartbeat_interval": self.heartbeat_field.value,
+            "delay_min": self.delay_min_field.value,
+            "delay_max": self.delay_max_field.value,
+            "quiet_start": self.quiet_start_field.value,
+            "quiet_end": self.quiet_end_field.value,
+            "slm_api_url": self.slm_api_url_field.value,
+            "slm_api_key": self.slm_api_key_field.value,
+            "license_key": self.license_key_field.value,
+        })
+
         self._show_snackbar("配置已同步至核心数据库", "success")
 
     def _navigate(self, page_name: str):
