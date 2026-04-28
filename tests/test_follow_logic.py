@@ -6,6 +6,24 @@ from tieba_mecha.core.batch_post import BatchPostManager
 from tieba_mecha.db.models import Forum, TargetPool
 
 
+def _make_mock_client():
+    """创建带 get_forum mock 的客户端（每个贴吧返回不同 fid）"""
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.follow_forum = AsyncMock(return_value=None)
+
+    # get_forum 根据贴吧名返回不同 fid
+    _fid_counter = [10000]
+    async def _mock_get_forum(fname):
+        info = MagicMock()
+        _fid_counter[0] += 1
+        info.fid = _fid_counter[0]
+        return info
+    mock_client.get_forum = _mock_get_forum
+    return mock_client
+
+
 @pytest.mark.asyncio
 class TestFollowForumsBulk:
     """Tests for the bulk follow functionality."""
@@ -18,11 +36,7 @@ class TestFollowForumsBulk:
         enc_bduss = encrypt_value("a" * 192)
         acc1 = await db.add_account(name="acc1", bduss=enc_bduss)
 
-        # Mock 客户端
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.follow_forum = AsyncMock(return_value=None)
+        mock_client = _make_mock_client()
 
         with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
             pm = BatchPostManager(db)
@@ -57,10 +71,7 @@ class TestFollowForumsBulk:
         acc1 = await db.add_account(name="acc1", bduss=enc_bduss)
         await db.add_forum(fid=1, fname="already_followed", account_id=acc1.id)
 
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.follow_forum = AsyncMock(return_value=None)
+        mock_client = _make_mock_client()
 
         with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
             pm = BatchPostManager(db)
@@ -100,9 +111,7 @@ class TestFollowForumsBulk:
         acc1 = await db.add_account(name="acc1", bduss=enc_bduss)
 
         # 模拟被拉黑的错误
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
+        mock_client = _make_mock_client()
         mock_client.follow_forum = AsyncMock(side_effect=Exception("400013: 被拉黑"))
 
         with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
@@ -128,6 +137,13 @@ class TestFollowForumsBulk:
 @pytest.mark.asyncio
 class TestPickOptimalAccount:
     """Tests for the optimal account selection logic."""
+
+    async def _build_maps(self, db, task):
+        """构建 native_map 和 followed_map 用于测试"""
+        pm = BatchPostManager(db)
+        native_map = await pm._build_native_account_map(task.accounts)
+        followed_map = await pm._build_followed_account_map(task.accounts)
+        return native_map, followed_map
 
     async def test_pick_account_skip_banned_forum(self, db):
         """测试选择账号时跳过已被该吧封禁的账号"""
@@ -157,12 +173,14 @@ class TestPickOptimalAccount:
             accounts=[acc1.id, acc2.id],
             strategy="weighted"
         )
+        native_map, followed_map = await self._build_maps(db, task)
 
         # 多次选择，应该只选 acc1
         selected_ids = set()
         for _ in range(10):
             selected = await pm._pick_optimal_account_for_target(
-                task, "target_forum", 0, [(acc1.id, 5), (acc2.id, 5)]
+                task, "target_forum", 0, [(acc1.id, 5), (acc2.id, 5)],
+                native_map, followed_map
             )
             selected_ids.add(selected)
 
@@ -196,10 +214,12 @@ class TestPickOptimalAccount:
             accounts=[acc1.id, acc2.id],
             strategy="round_robin"  # 使用轮询策略作为回退
         )
+        native_map, followed_map = await self._build_maps(db, task)
 
         # 应该回落到 round_robin 策略
         selected = await pm._pick_optimal_account_for_target(
-            task, "target_forum", 0, [(acc1.id, 5), (acc2.id, 5)]
+            task, "target_forum", 0, [(acc1.id, 5), (acc2.id, 5)],
+            native_map, followed_map
         )
 
         # 因为原生号全被封禁，会回落到 round_robin，选择 acc1
@@ -224,10 +244,12 @@ class TestPickOptimalAccount:
             accounts=[acc1.id],
             strategy="round_robin"
         )
+        native_map, followed_map = await self._build_maps(db, task)
 
         # 没有原生号，回落到 round_robin
         selected = await pm._pick_optimal_account_for_target(
-            task, "target_forum", 0, [(acc1.id, 5)]
+            task, "target_forum", 0, [(acc1.id, 5)],
+            native_map, followed_map
         )
 
         # 应该使用轮询策略选择的账号

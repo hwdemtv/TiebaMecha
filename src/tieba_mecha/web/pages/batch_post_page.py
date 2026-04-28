@@ -12,6 +12,31 @@ from ...core.batch_post import BatchPostTask, BatchPostManager
 from ...core.link_manager import SmartLinkConnector
 from ...core.ai_optimizer import AIOptimizer
 
+def _format_schedule_display(task) -> str:
+    """格式化任务的调度信息显示"""
+    schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
+    schedule_time = getattr(task, 'schedule_time', None)
+    
+    if schedule_type == 'once':
+        return schedule_time.strftime("%m-%d %H:%M") if schedule_time else "即时"
+    elif schedule_type == 'daily':
+        time_str = schedule_time.strftime("%H:%M") if schedule_time else "??:??"
+        cycle = getattr(task, 'cycle_count', 0) or 0
+        return f"每天 {time_str} (第{cycle+1}轮)"
+    elif schedule_type == 'weekly':
+        day_names = ["一", "二", "三", "四", "五", "六", "日"]
+        day_idx = getattr(task, 'schedule_day_of_week', 0) or 0
+        time_str = schedule_time.strftime("%H:%M") if schedule_time else "??:??"
+        cycle = getattr(task, 'cycle_count', 0) or 0
+        return f"每周{day_names[day_idx]} {time_str} (第{cycle+1}轮)"
+    elif schedule_type == 'interval':
+        hours = getattr(task, 'interval_hours', 6) or 6
+        cycle = getattr(task, 'cycle_count', 0) or 0
+        next_str = schedule_time.strftime("%m-%d %H:%M") if schedule_time else ""
+        return f"每{hours}h (第{cycle+1}轮) {next_str}"
+    return schedule_time.strftime("%m-%d %H:%M") if schedule_time else "即时"
+
+
 class BatchPostPage:
     def __init__(self, page: ft.Page, db=None, on_navigate=None):
         self.page = page
@@ -99,9 +124,12 @@ class BatchPostPage:
             if sched_raw is not None:
                 self.use_schedule.value = sched_raw == "1"
                 # 恢复定时输入框的可见性
-                if hasattr(self, "schedule_time") and hasattr(self, "interval_hours"):
-                    self.schedule_time.visible = sched_raw == "1"
-                    self.interval_hours.visible = sched_raw == "1"
+                if hasattr(self, "schedule_type_dropdown"):
+                    self.schedule_type_dropdown.visible = sched_raw == "1"
+                    if sched_raw == "1":
+                        st = self.schedule_type_dropdown.value or "once"
+                        if hasattr(self, '_update_schedule_visibility'):
+                            self._update_schedule_visibility(st)
             
             # [自顶配置同步] 恢复矩阵协同模式开关
             matrix_raw = await self.db.get_setting("bump_matrix_enabled")
@@ -128,13 +156,13 @@ class BatchPostPage:
                 try:
                     restored = json.loads(last_local_raw)
                     self._temp_local_fnames = [fn for fn in restored if fn in valid_fnames]
-                except: pass
+                except Exception: pass
             last_global_raw = await self.db.get_setting("last_selected_global_forums")
             if last_global_raw:
                 try:
                     restored = json.loads(last_global_raw)
                     self._temp_global_fnames = [fn for fn in restored if fn in valid_fnames]
-                except: pass
+                except Exception: pass
             self._update_forum_select_btn()
 
             # [持久化同步] 恢复上次选中的账号
@@ -146,7 +174,7 @@ class BatchPostPage:
                     if acc_ids:
                         self._selected_account_ids = set(acc_ids)
                         has_last_acc = True
-                except: pass
+                except Exception: pass
 
             # 首次加载初始化选择：如果有持久化则用持久化，否则仅勾选状态正常的账号
             if not self._initial_load_done:
@@ -315,7 +343,7 @@ class BatchPostPage:
                 self.bump_duration_field.value = "7"
                 self.bump_duration_field.tooltip = None
             try: self.bump_duration_field.update()
-            except: pass
+            except Exception: pass
 
     def _refresh_account_pool(self):
         """刷新账号池选择器 UI - 支持过滤与独立展示"""
@@ -372,7 +400,7 @@ class BatchPostPage:
             
             try:
                 self.page.update()
-            except:
+            except Exception:
                 pass
 
     def _refresh_forum_pool(self):
@@ -421,7 +449,7 @@ class BatchPostPage:
                 cb.visible = text.lower() in cb.label.lower()
         try:
             container.update()
-        except:
+        except Exception:
             pass
 
     def _toggle_select_all(self, container: ft.Column, value: bool):
@@ -441,7 +469,7 @@ class BatchPostPage:
                     else: self._selected_group_names.discard(cb.data)
         try:
             container.update()
-        except:
+        except Exception:
             pass
         if container == self.account_pool_column:
             self._save_account_selection()
@@ -455,7 +483,7 @@ class BatchPostPage:
             count = len(self._selected_account_ids)
             self.account_pool_title.value = f"参与账号池 ({count}/{len(self._accounts)})"
             try: self.account_pool_title.update()
-            except: pass
+            except Exception: pass
         self._save_account_selection()
 
     def _save_account_selection(self):
@@ -517,9 +545,9 @@ class BatchPostPage:
                 try:
                     forum_list_container.update()
                     summary_text.update()
-                except:
+                except Exception:
                     pass
-            except:
+            except Exception:
                 pass
 
         summary_text = ft.Text("", size=12, weight="bold")
@@ -951,7 +979,7 @@ class BatchPostPage:
                 self._mat_page_info.update()
                 self._mat_prev_btn.update()
                 self._mat_next_btn.update()
-            except:
+            except Exception:
                 pass
         except Exception:
             pass
@@ -1733,7 +1761,7 @@ class BatchPostPage:
             self.forum_select_btn.update()
             self.local_status_btn.update()
             self.global_status_btn.update()
-        except:
+        except Exception:
             pass
 
     async def _open_safety_config_dialog(self, pre_selected: set):
@@ -1781,7 +1809,7 @@ class BatchPostPage:
             try:
                 forums_list_container.update()
                 summary_text.update()
-            except:
+            except Exception:
                 pass
 
         search_field.on_change = lambda e: render_forums(e.control.value)
@@ -1864,7 +1892,7 @@ class BatchPostPage:
         def update_local_count():
             local_count_text.value = f"已选: {len(local_selected)} 个目标"
             try: local_count_text.update()
-            except: pass
+            except Exception: pass
         
         def on_local_item_check(e):
             fn = e.control.data
@@ -1905,7 +1933,7 @@ class BatchPostPage:
                         )
                     )
             try: local_container.update()
-            except: pass
+            except Exception: pass
         
         local_search_field.on_change = lambda e: render_local_list(e.control.value)
         
@@ -1926,7 +1954,7 @@ class BatchPostPage:
                         local_selected.discard(fn)
             update_local_count()
             try: local_container.update()
-            except: pass
+            except Exception: pass
         
         local_select_all_cb.on_change = on_local_select_all
         
@@ -1987,7 +2015,7 @@ class BatchPostPage:
             total = len(global_selected | manual_fnames)
             global_count_text.value = f"已选: {total} 个目标"
             try: global_count_text.update()
-            except: pass
+            except Exception: pass
         
         async def on_group_check(e):
             group_name = e.control.data
@@ -2273,7 +2301,7 @@ class BatchPostPage:
         self._link_table.rows = rows
         try:
             self.page.update()
-        except:
+        except Exception:
             pass
 
     async def _on_archive_surv_filter_click(self, mode):
@@ -2295,7 +2323,7 @@ class BatchPostPage:
             all_text = self._archive_all_btn.content.controls[0]
             all_text.color = "white" if f == "all" else "onSurfaceVariant"
             try: self._archive_all_btn.update()
-            except: pass
+            except Exception: pass
         if hasattr(self, "_archive_alive_btn"):
             self._archive_alive_btn.bgcolor = "green" if f == "alive" else with_opacity(0.1, "onSurface")
             alive_icon = self._archive_alive_btn.content.controls[0]
@@ -2303,7 +2331,7 @@ class BatchPostPage:
             alive_icon.color = "green" if f == "alive" else "onSurfaceVariant"
             alive_text.color = "white" if f == "alive" else "onSurfaceVariant"
             try: self._archive_alive_btn.update()
-            except: pass
+            except Exception: pass
         if hasattr(self, "_archive_dead_btn"):
             self._archive_dead_btn.bgcolor = "error" if f == "dead" else with_opacity(0.1, "onSurface")
             dead_icon = self._archive_dead_btn.content.controls[0]
@@ -2311,7 +2339,7 @@ class BatchPostPage:
             dead_icon.color = "error" if f == "dead" else "onSurfaceVariant"
             dead_text.color = "white" if f == "dead" else "onSurfaceVariant"
             try: self._archive_dead_btn.update()
-            except: pass
+            except Exception: pass
 
     def _build_material_view(self):
         """独立构建物料池 Tab 内容 - 增加搜索与批量控制"""
@@ -2596,12 +2624,67 @@ class BatchPostPage:
             value=False,
             on_change=lambda e: (self._toggle_schedule(e), self.page.run_task(self._auto_save_switch, "use_schedule", e.control.value))[1]
         )
+        # --- 循环调度控件 ---
+        self.schedule_type_dropdown = ft.Dropdown(
+            label="循环模式",
+            value="once",
+            visible=False,
+            expand=1,
+            text_size=12,
+            options=[
+                ft.dropdown.Option("once", "单次执行"),
+                ft.dropdown.Option("daily", "每天定时"),
+                ft.dropdown.Option("weekly", "每周定时"),
+                ft.dropdown.Option("interval", "自定义间隔"),
+            ],
+            on_change=self._on_schedule_type_change,
+        )
+        # 单次模式：完整日期+时间
         self.schedule_time = ft.TextField(
             label="计划时间 (YYYY-MM-DD HH:mm)", 
             value=(datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
             visible=False, text_size=12
         )
-        self.interval_hours = ft.TextField(label="循环周期 (小时)", value="0", visible=False, text_size=12, input_filter=ft.NumbersOnlyInputFilter(), tooltip="建议: ≥6小时，避免频繁触发导致封号")
+        # daily/weekly 模式：仅时分
+        self.schedule_time_hm = ft.TextField(
+            label="执行时间 (HH:mm)",
+            value=datetime.now().strftime("%H:%M"),
+            visible=False, text_size=12, width=120,
+        )
+        self.schedule_day_of_week = ft.Dropdown(
+            label="每周几",
+            value="0",
+            visible=False,
+            expand=1,
+            text_size=12,
+            options=[
+                ft.dropdown.Option("0", "周一"),
+                ft.dropdown.Option("1", "周二"),
+                ft.dropdown.Option("2", "周三"),
+                ft.dropdown.Option("3", "周四"),
+                ft.dropdown.Option("4", "周五"),
+                ft.dropdown.Option("5", "周六"),
+                ft.dropdown.Option("6", "周日"),
+            ],
+        )
+        self.interval_hours = ft.TextField(
+            label="间隔 (小时, 最小6)", value="6", visible=False, text_size=12,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            tooltip="建议: ≥6小时，避免频繁触发导致封号",
+            width=120,
+        )
+        self.reset_strategy_dropdown = ft.Dropdown(
+            label="物料轮转",
+            value="new_only",
+            visible=False,
+            expand=1,
+            text_size=12,
+            options=[
+                ft.dropdown.Option("new_only", "仅新物料 (安全)"),
+                ft.dropdown.Option("reuse", "重置复用"),
+            ],
+            tooltip="循环轮次开始前如何处理已用完的物料",
+        )
         
         # 4. 账号与策略
         self.strategy_dropdown = ft.Dropdown(
@@ -2805,7 +2888,10 @@ class BatchPostPage:
                                 self.post_count,
                                 ft.Row([self.use_ai_switch, self.ai_persona_dropdown], spacing=10),
                                 ft.Row([self.use_schedule], spacing=10),
+                                ft.Row([self.schedule_type_dropdown, self.reset_strategy_dropdown], spacing=10),
                                 self.schedule_time,
+                                ft.Row([self.schedule_time_hm, self.schedule_day_of_week], spacing=10),
+                                self.interval_hours,
                                 ft.Row([self.min_delay, self.max_delay], spacing=10),
                                 # 时段风险提示卡片
                                 ft.Container(
@@ -2958,7 +3044,7 @@ class BatchPostPage:
             ft.DataCell(ft.Text(fnames_disp_short, size=11, tooltip=tooltip_text)),
             ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
-            ft.DataCell(ft.Text(t.schedule_time.strftime("%m-%d %H:%M") if t.schedule_time else "即时")),
+            ft.DataCell(ft.Text(_format_schedule_display(t))),
             ft.DataCell(ft.Text(t.status.upper(), color=status_color, weight=ft.FontWeight.BOLD)),
             ft.DataCell(ft.Text(f"{t.progress}/{t.total}")),
             ft.DataCell(
@@ -2981,7 +3067,7 @@ class BatchPostPage:
         try:
             fnames = json.loads(task.fnames_json) if hasattr(task, "fnames_json") and task.fnames_json else []
             task_desc = fnames[0] if fnames else (task.fname or str(task_id))
-        except:
+        except Exception:
             task_desc = task.fname or str(task_id)
 
         if await self.db.delete_batch_task(task_id):
@@ -2999,9 +3085,33 @@ class BatchPostPage:
         await self.db.set_setting("ai_persona", persona)
 
     def _toggle_schedule(self, e):
-        self.schedule_time.visible = e.control.value
-        self.interval_hours.visible = e.control.value
+        visible = e.control.value
+        self.schedule_type_dropdown.visible = visible
+        # 根据循环模式决定具体时间控件和物料轮转的可见性
+        if visible:
+            self._update_schedule_visibility(self.schedule_type_dropdown.value or "once")
+        else:
+            self.schedule_time.visible = False
+            self.schedule_time_hm.visible = False
+            self.schedule_day_of_week.visible = False
+            self.interval_hours.visible = False
+            self.reset_strategy_dropdown.visible = False
         self.page.update()
+
+    def _on_schedule_type_change(self, e):
+        """循环模式切换时，更新时间输入控件和物料轮转可见性"""
+        self._update_schedule_visibility(e.control.value)
+        self.page.update()
+
+    def _update_schedule_visibility(self, schedule_type: str):
+        """根据循环模式统一控制所有调度相关控件的可见性"""
+        # 时间输入：once→完整日期时间, daily/weekly→仅时分, interval→隐藏
+        self.schedule_time.visible = (schedule_type == "once")
+        self.schedule_time_hm.visible = (schedule_type in ("daily", "weekly"))
+        self.schedule_day_of_week.visible = (schedule_type == "weekly")
+        self.interval_hours.visible = (schedule_type == "interval")
+        # 物料轮转：仅循环模式显示
+        self.reset_strategy_dropdown.visible = (schedule_type != "once")
 
     async def _on_file_result(self, e: ft.FilePickerResultEvent):
         if not e.files: return
@@ -3089,7 +3199,7 @@ class BatchPostPage:
                     # 处理完后清理临时文件
                     try:
                         os.remove(file_server_path)
-                    except:
+                    except Exception:
                         pass
             else:
                 # 文件不存在，给出明确错误提示
@@ -3186,30 +3296,67 @@ class BatchPostPage:
             
         if self.use_schedule.value:
             try:
-                st = datetime.strptime(self.schedule_time.value, "%Y-%m-%d %H:%M")
+                schedule_type = self.schedule_type_dropdown.value or "once"
+                reset_strategy = self.reset_strategy_dropdown.value or "new_only"
+
+                # 根据循环模式解析 schedule_time
+                now = datetime.now()
+                if schedule_type == "once":
+                    # 单次：完整日期时间
+                    st = datetime.strptime(self.schedule_time.value, "%Y-%m-%d %H:%M")
+                elif schedule_type in ("daily", "weekly"):
+                    # 每天/每周：仅时分，自动拼上今天的日期
+                    hm = datetime.strptime(self.schedule_time_hm.value, "%H:%M")
+                    st = now.replace(hour=hm.hour, minute=hm.minute, second=0, microsecond=0)
+                    # 如果今天的时间已过，推到明天/下周
+                    if st <= now:
+                        if schedule_type == "daily":
+                            st += timedelta(days=1)
+                        else:
+                            st += timedelta(days=7)
+                elif schedule_type == "interval":
+                    # 间隔模式：立即开始（或1小时后）
+                    st = now + timedelta(hours=1)
+                else:
+                    st = now + timedelta(hours=1)
+
                 await self.db.add_batch_task(
                     fname=fnames[0], # 保留以作向下兼容
                     fnames_json=json.dumps(fnames, ensure_ascii=False),
                     titles_json="[]",
                     contents_json="[]",
                     accounts_json=json.dumps(selected_accounts, ensure_ascii=False),
-                    strategy=f"{strategy}:{pairing_mode}",
+                    strategy=strategy,
+                    pairing_mode=pairing_mode,
                     total=int(self.post_count.value),
                     delay_min=float(self.min_delay.value),
                     delay_max=float(self.max_delay.value),
                     use_ai=self.use_ai_switch.value,
                     ai_persona=self.ai_persona_dropdown.value or "normal",
-                    interval_hours=int(self.interval_hours.value) if self.interval_hours.value else 0,
+                    schedule_type=schedule_type,
+                    interval_hours=int(self.interval_hours.value) if self.interval_hours.value and schedule_type == "interval" else 0,
+                    schedule_day_of_week=int(self.schedule_day_of_week.value) if schedule_type == "weekly" else None,
+                    reset_strategy=reset_strategy if schedule_type != "once" else "new_only",
                     schedule_time=st,
                     status="pending"
                 )
-                self._show_snackbar("定时矩阵任务已加入全域队列", "success")
+                # 生成提示
+                type_labels = {"once": "单次", "daily": "每天", "weekly": "每周", "interval": f"每{self.interval_hours.value}小时"}
+                self._show_snackbar(f"{type_labels.get(schedule_type, '')}矩阵任务已加入全域队列", "success")
                 await self.load_data()
 
                 # --- 自动步进优化：将界面时间向后推移 ---
-                # 获取步进长度：如果有循环周期按周期跳，否则默认跳 1 小时
-                step_hours = int(self.interval_hours.value) if self.interval_hours.value and int(self.interval_hours.value) > 0 else 1
-                next_st = st + timedelta(hours=step_hours)
+                if schedule_type == "daily":
+                    next_st = st + timedelta(days=1)
+                    self.schedule_time_hm.value = next_st.strftime("%H:%M")
+                elif schedule_type == "weekly":
+                    next_st = st + timedelta(weeks=1)
+                    self.schedule_time_hm.value = next_st.strftime("%H:%M")
+                elif schedule_type == "interval":
+                    step_hours = int(self.interval_hours.value) if self.interval_hours.value and int(self.interval_hours.value) > 0 else 6
+                    next_st = st + timedelta(hours=step_hours)
+                else:
+                    next_st = st + timedelta(hours=1)
                 self.schedule_time.value = next_st.strftime("%Y-%m-%d %H:%M")
                 self.page.update()
                 
@@ -3237,15 +3384,38 @@ class BatchPostPage:
             delay_min=float(self.min_delay.value),
             delay_max=float(self.max_delay.value),
             use_ai=self.use_ai_switch.value,
+            ai_persona=self.ai_persona_dropdown.value or "normal",
             pairing_mode=pairing_mode
         )
+
+        # 持久化即时任务到数据库，使 UI 刷新后任务队列可见
+        try:
+            await self.db.add_batch_task(
+                fname=fnames[0],
+                fnames_json=json.dumps(fnames, ensure_ascii=False),
+                titles_json="[]",
+                contents_json="[]",
+                accounts_json=json.dumps(selected_accounts, ensure_ascii=False),
+                strategy=strategy,
+                pairing_mode=pairing_mode,
+                total=int(self.post_count.value),
+                delay_min=float(self.min_delay.value),
+                delay_max=float(self.max_delay.value),
+                use_ai=self.use_ai_switch.value,
+                ai_persona=self.ai_persona_dropdown.value or "normal",
+                schedule_type="once",
+                status="running"
+            )
+            await self.load_data()
+        except Exception:
+            pass  # 持久化失败不阻塞执行
 
         try:
             async for update in self.manager.execute_task(task):
                 if not self._is_running:
                     self._add_log("！任务已被人工干预中止")
                     break
-                
+
                 if update["status"] == "success":
                     self._add_log(update) # 直接传入字典以进行结构化渲染
                     self.progress_bar.value = update["progress"] / update["total"]
@@ -3253,11 +3423,11 @@ class BatchPostPage:
                     self._add_log(update, "error")
                 elif update["status"] == "skipped":
                     self._add_log(update)
-                
+
                 try:
                     self.log_list.update()
                     self.progress_bar.update()
-                except:
+                except Exception:
                     pass
         except asyncio.CancelledError:
             self._add_log("！任务已被系统强制回收")
@@ -3271,6 +3441,8 @@ class BatchPostPage:
             self.progress_bar.visible = False
             self.start_btn.update()
             self.progress_bar.update()
+            # 刷新任务列表以反映最终状态
+            self._refresh_task_list()
 
     def _format_log_timestamp(self, dt_or_str):
         """格式化流水时间戳：当天显示 HH:MM:SS，跨天显示 MM-DD HH:MM"""
@@ -3561,5 +3733,5 @@ class BatchPostPage:
                 )
             )
             self.page.update()
-        except:
+        except Exception:
             pass

@@ -153,14 +153,14 @@ class TestBackfillSuccessCount:
         assert pool.success_count == 2  # 只有 2 条 success
 
     async def test_backfill_creates_nonexistent_forum(self, db):
-        """BatchPostLog 中的 fname 在 target_pool 不存在 → 自动创建并同步"""
+        """BatchPostLog 中的 fname 在 target_pool 不存在 → 跳过（不自动创建，避免删除后自动恢复）"""
         await db.add_batch_post_log(task_id="t1", fname="phantom_forum", status="success", title="post1")
 
         updated = await db.backfill_success_count()
-        assert updated >= 1
+        # 不创建新记录，只更新已有记录
+        assert updated == 0
         pool = await db._get_target_pool("phantom_forum")
-        assert pool is not None
-        assert pool.success_count == 1
+        assert pool is None
 
     async def test_backfill_idempotent(self, db):
         """重复调用幂等：值与日志一致时不产生更新"""
@@ -183,7 +183,7 @@ class TestAutoSyncPostTarget:
     """测试 auto_sync_post_target：自动判定本土作战许可"""
 
     async def test_safe_when_not_banned_no_deletions(self, db):
-        """未封禁 + 无删帖记录 → is_post_target=True"""
+        """未封禁 + 无删帖记录 → is_post_target 保持不变（不再自动开启）"""
         acc = await db.add_account(name="test_acc", bduss="x" * 192)
         await db.add_forum(fid=1, fname="safe_forum", account_id=acc.id)
 
@@ -192,7 +192,9 @@ class TestAutoSyncPostTarget:
         forums = await db.get_forums(account_id=acc.id)
         safe = [f for f in forums if f.fname == "safe_forum"]
         assert len(safe) == 1
-        assert safe[0].is_post_target is True
+        # auto_sync 只关闭被封禁的目标，不再自动开启安全目标
+        # 用户需通过 UI 手动开启发帖许可
+        assert safe[0].is_post_target is False
 
     async def test_unsafe_when_banned(self, db):
         """已封禁 → is_post_target=False"""

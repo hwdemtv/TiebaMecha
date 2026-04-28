@@ -57,20 +57,19 @@ class TestBatchPostTask:
         task = BatchPostTask(
             id="test-task-1",
             fname="test_forum",
-            titles=["Title 1", "Title 2"],
-            contents=["Content 1"],
+            fnames=["test_forum", "test_forum_2"],
             accounts=[1, 2, 3],
             strategy="round_robin",
+            pairing_mode="random",
             total=10,
         )
 
         assert task.id == "test-task-1"
         assert task.fname == "test_forum"
-        assert task.fnames == []
-        assert task.titles == ["Title 1", "Title 2"]
-        assert task.contents == ["Content 1"]
+        assert task.fnames == ["test_forum", "test_forum_2"]
         assert task.accounts == [1, 2, 3]
         assert task.strategy == "round_robin"
+        assert task.pairing_mode == "random"
         assert task.total == 10
         assert task.status == "pending"
         assert task.progress == 0
@@ -80,10 +79,9 @@ class TestBatchPostTask:
         task = BatchPostTask(id="test", fname="forum")
 
         assert task.fnames == []
-        assert task.titles == []
-        assert task.contents == []
         assert task.accounts == []
         assert task.strategy == "round_robin"
+        assert task.pairing_mode == "random"
         assert task.delay_min == 120.0  # Updated default to 120s
         assert task.delay_max == 600.0  # Updated default to 600s
         assert task.use_ai is False

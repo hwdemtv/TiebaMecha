@@ -376,7 +376,6 @@ class PostsPage:
             success, opt_t, opt_c, err = await optimizer.optimize_post(t.title, t.text or "")
             if success:
                 results.append((t.title, opt_t, opt_c))
-            await asyncio.sleep(0.5)
 
         self.loading_indicator.visible = False
         

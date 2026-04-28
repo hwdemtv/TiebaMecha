@@ -189,14 +189,27 @@ class BatchPostTask(Base):
     contents_json: Mapped[str] = mapped_column(Text, nullable=False, comment="内容池 JSON")
     accounts_json: Mapped[str] = mapped_column(Text, nullable=False, comment="账号 ID 列表 JSON")
     fnames_json: Mapped[str] = mapped_column(Text, default="[]", comment="目标贴吧列表 JSON（多贴吧支持）")
-    strategy: Mapped[str] = mapped_column(String(20), default="round_robin", comment="发帖策略: round_robin/random/weighted")
+    strategy: Mapped[str] = mapped_column(String(50), default="round_robin", comment="发帖策略: round_robin/strict_round_robin/random")
+    pairing_mode: Mapped[str] = mapped_column(String(20), default="random", comment="文案组合模式: random/strict")
     delay_min: Mapped[float] = mapped_column(Float, default=60.0)
     delay_max: Mapped[float] = mapped_column(Float, default=300.0)
 
     use_ai: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否启用 AI 改写")
     ai_persona: Mapped[str] = mapped_column(String(50), default="normal", comment="AI 人格设定: normal/resource_god/casual/newbie")
     schedule_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="计划执行时间")
-    interval_hours: Mapped[int] = mapped_column(Integer, default=0, comment="重复执行间隔(小时)，0表示不重复")
+    # --- 循环调度字段 ---
+    # schedule_type: once=单次, daily=每天, weekly=每周, interval=自定义间隔
+    schedule_type: Mapped[str] = mapped_column(String(20), default="once", comment="调度类型: once/daily/weekly/interval")
+    # interval_hours: 仅 schedule_type=interval 时使用，自定义间隔小时数
+    interval_hours: Mapped[int] = mapped_column(Integer, default=0, comment="自定义间隔(小时)，仅interval模式")
+    # schedule_day_of_week: 仅 schedule_type=weekly 时使用，0=周一...6=周日
+    schedule_day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="每周几执行(0=周一..6=周日)")
+    # reset_strategy: 循环轮次开始前物料处理策略
+    # new_only=只发新物料(默认), reuse=重置复用
+    reset_strategy: Mapped[str] = mapped_column(String(20), default="new_only", comment="物料重置策略: new_only/reuse")
+    # 循环轮次计数
+    cycle_count: Mapped[int] = mapped_column(Integer, default=0, comment="已执行循环轮次数")
+    # --- 通用字段 ---
     status: Mapped[str] = mapped_column(String(20), default="pending", comment="pending/running/completed/failed")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     total: Mapped[int] = mapped_column(Integer, default=0)
@@ -248,6 +261,7 @@ class MaterialPool(Base):
     survival_status: Mapped[str] = mapped_column(String(20), default="unknown", comment="存活状态: unknown/alive/dead")
     death_reason: Mapped[str] = mapped_column(String(100), default="", comment="被删原因: deleted_by_user/auto_removed/banned_by_mod/error")
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后存活检测时间")
+    task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="关联批量任务ID，空表示手动录入")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="注入时间")
     
     __table_args__ = (

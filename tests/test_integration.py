@@ -18,16 +18,18 @@ class TestAccountWorkflow:
             get_account_credentials,
         )
 
-        # BDUSS 必须是 192 字符
+        # BDUSS 必须是 192 字符，STOKEN 必须是 64 字符
         bduss1 = "a" * 192
         bduss2 = "b" * 192
+        stoken1 = "s" * 64
+        stoken2 = "t" * 64
 
-        # Add first account
-        acc1 = await add_account(db, "account1", bduss1, "stoken1")
+        # Add first account (verify=False to avoid network calls in this test)
+        acc1 = await add_account(db, "account1", bduss1, stoken1, verify=False)
         assert acc1.is_active is True
 
         # Add second account
-        acc2 = await add_account(db, "account2", bduss2, "stoken2")
+        acc2 = await add_account(db, "account2", bduss2, stoken2, verify=False)
         assert acc2.is_active is False
 
         # List accounts
@@ -37,13 +39,13 @@ class TestAccountWorkflow:
         # Get credentials for active account
         creds = await get_account_credentials(db)
         assert creds is not None
-        _, bduss, _, _, _, _ = creds
+        acc_id, bduss, stoken, proxy_id, cuid, ua = creds
         assert bduss == bduss1
 
         # Switch to second account
         await switch_account(db, acc2.id)
         creds = await get_account_credentials(db)
-        _, bduss, _, _, _, _ = creds
+        acc_id, bduss, stoken, proxy_id, cuid, ua = creds
         assert bduss == bduss2
 
         # Remove first account
@@ -64,12 +66,14 @@ class TestAccountWorkflow:
 
         # Add account with proxy (BDUSS 必须是 192 字符)
         bduss = "c" * 192
+        stoken = "s" * 64
         acc = await add_account(
             db,
             "proxied_account",
             bduss,
-            "stoken",
+            stoken,
             proxy_id=proxy.id,
+            verify=False,
         )
 
         # Verify proxy binding
@@ -77,7 +81,7 @@ class TestAccountWorkflow:
 
         # Get credentials should include proxy_id
         creds = await get_account_credentials(db)
-        _, _, proxy_id, _, _, _ = creds
+        acc_id, bduss_val, stoken_val, proxy_id, cuid, ua = creds
         assert proxy_id == proxy.id
 
 
@@ -240,9 +244,9 @@ class TestConcurrency:
         import asyncio
 
         # Create multiple accounts
-        acc1 = await add_account(db, "acc1", "bduss1")
-        acc2 = await add_account(db, "acc2", "bduss2")
-        acc3 = await add_account(db, "acc3", "bduss3")
+        acc1 = await add_account(db, "acc1", "a" * 192, verify=False)
+        acc2 = await add_account(db, "acc2", "b" * 192, verify=False)
+        acc3 = await add_account(db, "acc3", "c" * 192, verify=False)
 
         # Concurrent switches
         await asyncio.gather(
@@ -261,7 +265,7 @@ class TestConcurrency:
         from tieba_mecha.core.account import add_account
         import asyncio
 
-        acc = await add_account(db, "acc", "bduss")
+        acc = await add_account(db, "acc", "a" * 192, verify=False)
 
         # Add forums concurrently
         await asyncio.gather(

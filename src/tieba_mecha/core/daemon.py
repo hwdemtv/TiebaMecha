@@ -28,7 +28,7 @@ async def do_sign_task():
         d_max = float(await db.get_setting("sign_delay_max", "15"))
         ad_min = float(await db.get_setting("sign_acc_delay_min", "30"))
         ad_max = float(await db.get_setting("sign_acc_delay_max", "120"))
-    except:
+    except Exception:
         d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
     print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: {mode.upper()} | 吧间延迟: {d_min}-{d_max}s")
@@ -80,7 +80,7 @@ async def do_auto_monitor_task():
                 print(f"[DAEMON] 监控 {fname} 失败: {e}")
 
 async def do_batch_post_tasks():
-    """执行到期的批量发帖任务"""
+    """执行到期的批量发帖任务（支持 daily/weekly/interval 循环调度）"""
     db = await get_db()
     pending_tasks = await db.get_pending_batch_tasks()
     if not pending_tasks:
@@ -89,22 +89,46 @@ async def do_batch_post_tasks():
     manager = BatchPostManager(db)
     for task in pending_tasks:
         print(f"[{datetime.now()}] [DAEMON] 触发定时任务: ID={task.id} 贴吧={task.fname}")
-        
+
+        # 循环任务：根据 reset_strategy 重置物料
+        schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
+        if schedule_type != 'once':
+            reset_strategy = getattr(task, 'reset_strategy', 'new_only') or 'new_only'
+            use_ai = getattr(task, 'use_ai', False)
+            if reset_strategy == 'reuse':
+                try:
+                    # reuse 模式：重置物料状态；若 AI 改写开启，同时恢复原文供下次改写
+                    reset_count = await db.reset_materials_for_task(
+                        strategy="reuse",
+                        restore_original=use_ai,
+                        task_id=str(task.id),
+                    )
+                    ai_note = " (含原文恢复)" if use_ai else ""
+                    print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 物料重置: 策略=reuse{ai_note}, 重置数={reset_count}")
+                except Exception as e:
+                    print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 物料重置失败: {e}")
+
         # 转换数据库模型为 Core 任务对象
+        # 优先使用独立 pairing_mode 字段，向后兼容旧的复合字符串格式
+        task_pairing = getattr(task, 'pairing_mode', None)
+        if not task_pairing and ":" in task.strategy:
+            task_pairing = task.strategy.split(":")[1]
+        else:
+            task_pairing = task_pairing or "random"
+
         core_task = CoreBatchPostTask(
             id=str(task.id),
             fname=task.fname,
             fnames=json.loads(task.fnames_json),
             accounts=json.loads(task.accounts_json),
             strategy=task.strategy.split(":")[0] if ":" in task.strategy else task.strategy,
-            pairing_mode=task.strategy.split(":")[1] if ":" in task.strategy else "random",
+            pairing_mode=task_pairing,
             delay_min=task.delay_min,
             delay_max=task.delay_max,
             use_ai=task.use_ai,
+            ai_persona=getattr(task, 'ai_persona', 'normal') or 'normal',
             total=task.total
         )
-        
-        # 移除原先自动调用 reset_materials_status() 的逻辑，允许“每日提取新物料（滴灌）”的打法
 
         # 更新任务状态为 running
         await db.update_batch_task(task.id, status="running")
@@ -112,28 +136,92 @@ async def do_batch_post_tasks():
         try:
             # 执行任务（内部会更新物料状态），同步进度到数据库
             async for update in manager.execute_task(core_task):
+                update_status = update.get("status", "running")
+                # 记录错误/跳过信息到日志，但不中断任务流
+                if update_status in ("error", "failed"):
+                    print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 单条失败: {update.get('msg', update)}")
                 await db.update_batch_task(
                     task.id,
                     progress=update.get("progress", 0),
                     status="running"
                 )
             
-            # 执行完毕后处理：如果是循环任务，更新下一次执行时间；否则标记完成
-            if task.interval_hours > 0:
-                # [风控增强] 强制最小循环间隔为6小时，防止频繁触发导致封号
-                MIN_INTERVAL_HOURS = 6
-                actual_interval = max(task.interval_hours, MIN_INTERVAL_HOURS)
-                if task.interval_hours < MIN_INTERVAL_HOURS:
-                    print(f"[DAEMON] ⚠️ 循环间隔过短 ({task.interval_hours}h)，已自动调整为 {actual_interval}h")
-                
-                next_time = datetime.now() + timedelta(hours=actual_interval)
-                await db.update_batch_task(task.id, status="pending", schedule_time=next_time, progress=0)
-                print(f"[DAEMON] 循环任务 ID={task.id} 已完成本轮，下次执行: {next_time}")
+            # 执行完毕后处理：根据 schedule_type 决定下一步
+            if schedule_type != 'once':
+                next_time = _calc_next_schedule_time(task)
+                new_cycle = (getattr(task, 'cycle_count', 0) or 0) + 1
+                await db.update_batch_task(
+                    task.id,
+                    status="pending",
+                    schedule_time=next_time,
+                    progress=0,
+                    cycle_count=new_cycle,
+                )
+                print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 第{new_cycle}轮完成，下次执行: {next_time}")
             else:
                 await db.update_batch_task(task.id, status="completed")
         except Exception as e:
-            print(f"[DAEMON] 任务 ID={task.id} 执行异常: {e}")
-            await db.update_batch_task(task.id, status="failed")
+            print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 执行异常: {e}")
+            # 循环任务异常也重置为 pending，下次继续
+            if schedule_type != 'once':
+                next_time = _calc_next_schedule_time(task)
+                await db.update_batch_task(task.id, status="pending", schedule_time=next_time)
+            else:
+                await db.update_batch_task(task.id, status="failed")
+
+
+def _calc_next_schedule_time(task) -> datetime:
+    """
+    根据任务的调度类型计算下次执行时间。
+    
+    - daily: 明天 schedule_time 的 HH:MM
+    - weekly: 下一个 schedule_day_of_week 的 schedule_time HH:MM  
+    - interval: now + interval_hours
+    """
+    schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
+    schedule_time = task.schedule_time or datetime.now()
+    
+    if schedule_type == 'daily':
+        # 每天：明天的同一时刻
+        now = datetime.now()
+        next_dt = now.replace(
+            hour=schedule_time.hour,
+            minute=schedule_time.minute,
+            second=0, microsecond=0
+        )
+        if next_dt <= now:
+            next_dt += timedelta(days=1)
+        return next_dt
+        
+    elif schedule_type == 'weekly':
+        # 每周：下一个指定星期几
+        day_of_week = getattr(task, 'schedule_day_of_week', 0) or 0  # 0=周一...6=周日
+        now = datetime.now()
+        # 计算目标时间的时分
+        target_time = now.replace(
+            hour=schedule_time.hour,
+            minute=schedule_time.minute,
+            second=0, microsecond=0
+        )
+        # Python weekday(): 0=Monday...6=Sunday，与我们的定义一致
+        current_weekday = now.weekday()
+        days_ahead = day_of_week - current_weekday
+        if days_ahead < 0 or (days_ahead == 0 and target_time <= now):
+            days_ahead += 7
+        return target_time + timedelta(days=days_ahead)
+        
+    elif schedule_type == 'interval':
+        # 自定义间隔
+        interval_hours = getattr(task, 'interval_hours', 6) or 6
+        # 强制最小6小时间隔，防止频繁触发
+        actual_interval = max(interval_hours, 6)
+        if interval_hours < 6:
+            print(f"[DAEMON] ⚠️ 循环间隔过短 ({interval_hours}h)，已自动调整为 {actual_interval}h")
+        return datetime.now() + timedelta(hours=actual_interval)
+    
+    else:
+        # fallback
+        return datetime.now() + timedelta(hours=6)
 
 async def do_auto_bump_task():
     """执行自动回帖(自顶)任务的内部包裹"""
@@ -147,18 +235,25 @@ async def do_maintenance_task():
     db = await get_db()
     from .maintenance import MaintManager
     manager = MaintManager(db)
-    
+
     # 获取所有开启了养号功能的账号
     maint_accounts = await db.get_maint_accounts()
     if not maint_accounts:
         return
-        
+
+    # [Fix 8] 从数据库读取可配置的账号间延迟范围
+    try:
+        acc_delay_min = float(await db.get_setting("maint_acc_delay_min", "300"))
+        acc_delay_max = float(await db.get_setting("maint_acc_delay_max", "900"))
+    except Exception:
+        acc_delay_min, acc_delay_max = 300.0, 900.0
+
     print(f"[{datetime.now()}] [DAEMON] 启动全域 BioWarming 养号周期，覆盖 {len(maint_accounts)} 个终端...")
     for acc in maint_accounts:
         try:
             await manager.run_maint_cycle(acc.id)
             # 账号间增加长随机延迟，防止 IP 行为重合
-            await asyncio.sleep(random.uniform(300, 900)) 
+            await asyncio.sleep(random.uniform(acc_delay_min, acc_delay_max))
         except Exception as e:
             print(f"[DAEMON] 账号 {acc.name} 维护异常: {e}")
 
@@ -212,12 +307,19 @@ class TiebaMechaDaemon:
             
             # --- 立即执行一次初始化探测 ---
             asyncio.create_task(do_auth_check_task())
-            
+
             self.scheduler.add_job(do_auto_bump_task, 'interval', minutes=20, id="auto_bump_job", replace_existing=True)
-            self.scheduler.add_job(do_maintenance_task, 'interval', hours=4, id="biowarming_job", replace_existing=True)
-            
-            # 尝试从库热加载签到
+
+            # 尝试从库热加载签到 + 养号间隔
             db = await get_db()
+
+            # [Fix 8] 养号间隔可配置，默认 4 小时
+            try:
+                maint_hours = float(await db.get_setting("maint_interval_hours", "4"))
+            except Exception:
+                maint_hours = 4.0
+            self.scheduler.add_job(do_maintenance_task, 'interval', hours=maint_hours, id="biowarming_job", replace_existing=True)
+
             await self.reload(db)
             
             self.scheduler.start()

@@ -396,7 +396,6 @@ class NotificationManager:
         # 注意：Database.clear_old_notifications 默认只清 30 天前的
         # 我们这里定义一个清空所有已读的逻辑
         from sqlalchemy import delete
-        from .auth import Database
         from ..db.models import Notification
         
         async with self.db.async_session() as session:
