@@ -233,7 +233,15 @@ class AccountsPage:
 
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
-            ft.TextButton("一键智能权重", icon=icons.AUTO_AWESOME, on_click=lambda e: self.page.run_task(self._auto_calculate_weights, e), tooltip="根据账号等级/签到成功率/状态等自动计算推荐权重"),
+            ft.PopupMenuButton(
+                items=[
+                    ft.PopupMenuItem(text="全量重算 (所有账号)", on_click=lambda e: self.page.run_task(self._auto_calculate_weights, e, False)),
+                    ft.PopupMenuItem(text="增量计算 (仅变更账号)", on_click=lambda e: self.page.run_task(self._auto_calculate_weights, e, True)),
+                ],
+                icon=icons.AUTO_AWESOME,
+                tooltip="智能权重计算",
+            ),
+            ft.IconButton(icon=icons.SETTINGS, tooltip="评分模型配置", on_click=lambda e: self.page.run_task(self._show_weight_config_dialog), icon_size=18),
             ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=lambda e: self.page.run_task(self._bulk_verify_accounts, e), visible=False),
             ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=lambda e: self.page.run_task(self._bulk_delete_accounts, e), style=ft.ButtonStyle(color="error"), visible=False),
             ft.Container(expand=True),
@@ -2051,33 +2059,46 @@ class AccountsPage:
         )
         self.page.open(dialog)
 
-    async def _auto_calculate_weights(self, e):
+    async def _auto_calculate_weights(self, e, incremental: bool = False):
         """一键自动计算所有账号的推荐权重"""
         from ...core.batch_post import AutoWeightCalculator
-        
+
         self._show_snackbar("正在分析账号数据，计算智能权重...", "info")
-        
-        # 获取所有账号及其关联的贴吧
-        accounts_with_forums = await self.db.get_accounts_with_forums()
-        
+
+        # 加载自定义权重比例
+        ratios = await AutoWeightCalculator.get_weight_ratios(self.db)
+
+        if incremental:
+            accounts_with_forums = await self.db.get_accounts_with_forums()
+            calc_times = [a.last_weight_calc_at for a, _ in accounts_with_forums if a.last_weight_calc_at]
+            if calc_times:
+                from datetime import datetime as _dt
+                since = min(calc_times)
+                accounts_with_forums = await self.db.get_accounts_needing_weight_recalc(since)
+                if not accounts_with_forums:
+                    self._show_snackbar("所有账号权重均为最新，无需重新计算", "info")
+                    return
+        else:
+            accounts_with_forums = await self.db.get_accounts_with_forums()
+
         if not accounts_with_forums:
             self._show_snackbar("未找到账号数据", "error")
             return
-        
+
         weight_updates = []
         results = []
-        
+
         for account, forums in accounts_with_forums:
-            recommended_weight, details = AutoWeightCalculator.calculate(account, forums)
+            recommended_weight, details = await AutoWeightCalculator.calculate(account, forums, db=self.db)
             weight_updates.append((account.id, recommended_weight))
-            
+
             old_weight = account.post_weight or 5
             change = ""
             if recommended_weight > old_weight:
                 change = "↑"
             elif recommended_weight < old_weight:
                 change = "↓"
-            
+
             results.append({
                 "name": account.name or f"账号-{account.id}",
                 "old": old_weight,
@@ -2085,33 +2106,35 @@ class AccountsPage:
                 "change": change,
                 "details": details,
             })
-        
+
         # 批量更新权重
-        update_result = await self.db.batch_update_weights(weight_updates)
-        
+        update_result = await self.db.batch_update_weights(weight_updates, source="auto_calculate")
+
+        # 更新增量计算时间戳
+        updated_ids = [account.id for account, _ in accounts_with_forums]
+        await self.db.update_weight_calc_timestamp(updated_ids)
+
         # 构建结果展示
         result_lines = [f"✅ 权重智能计算完成！共分析 {len(results)} 个账号"]
         result_lines.append(f"更新成功: {update_result['updated']} | 失败: {update_result['failed']}")
         result_lines.append("")
         result_lines.append("📊 计算依据：")
-        result_lines.append("• 平均贴吧等级 (30%)")
-        result_lines.append("• 签到成功率 (25%)")
-        result_lines.append("• 账号状态 (20%)")
-        result_lines.append("• 代理绑定 (15%)")
-        result_lines.append("• 验证时效 (10%)")
+        for key, label in AutoWeightCalculator._WEIGHT_LABELS.items():
+            pct = int(ratios[key] * 100)
+            result_lines.append(f"• {label} ({pct}%)")
         result_lines.append("")
         result_lines.append("📋 权重变化详情：")
-        
+
         # 按变化排序：降权优先 > 不变 > 升权
         results.sort(key=lambda x: (x["change"] == "↑", x["change"] == "↓", -x["old"]))
-        
+
         for r in results[:10]:  # 只显示前10个
             emoji = "🟢" if r["change"] == "↑" else ("🔴" if r["change"] == "↓" else "⚪")
             result_lines.append(f"{emoji} {r['name']}: {r['old']} → {r['new']} {r['change']}")
-        
+
         if len(results) > 10:
             result_lines.append(f"... 还有 {len(results) - 10} 个账号")
-        
+
         # 显示结果对话框
         dialog = ft.AlertDialog(
             title=ft.Text("🧠 智能权重计算报告"),
@@ -2119,21 +2142,137 @@ class AccountsPage:
                 content=ft.Column([
                     ft.Text("\n".join(result_lines), size=11, selectable=True),
                     ft.Container(height=10),
-                    ft.Text("💡 提示：权重越高，该账号在批量发帖时被选中的概率越大。建议定期执行此功能以保持权重与账号状态同步。", 
+                    ft.Text("💡 提示：权重越高，该账号在批量发帖时被选中的概率越大。建议定期执行此功能以保持权重与账号状态同步。",
                            size=10, color="onSurfaceVariant"),
                 ], tight=True),
                 width=400,
                 height=400,
             ),
             actions=[
+                ft.TextButton("查看历史", on_click=lambda _: (self.page.close(dialog), self.page.run_task(self._show_weight_history))),
                 ft.TextButton("确定", on_click=lambda _: self.page.close(dialog)),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.open(dialog)
-        
+
         # 刷新账号列表显示新权重
         await self.load_data()
+
+    async def _show_weight_config_dialog(self):
+        """显示评分模型权重配置对话框"""
+        import json
+        from ...core.batch_post import AutoWeightCalculator
+
+        current = await AutoWeightCalculator.get_weight_ratios(self.db)
+        labels = AutoWeightCalculator._WEIGHT_LABELS
+
+        sliders: dict[str, ft.Slider] = {}
+        pct_texts: dict[str, ft.Text] = {}
+        rows = []
+
+        for key, default_val in current.items():
+            slider = ft.Slider(
+                min=0, max=100, divisions=20,
+                value=int(default_val * 100),
+                label="{value}%",
+                expand=True,
+            )
+            pct_text = ft.Text(f"{int(default_val * 100)}%", width=50, text_align="right")
+
+            def _make_on_change(t):
+                def _handler(e):
+                    t.value = f"{int(e.control.value)}%"
+                    self.page.update()
+                return _handler
+
+            slider.on_change = _make_on_change(pct_text)
+            sliders[key] = slider
+            pct_texts[key] = pct_text
+            rows.append(ft.Row([
+                ft.Text(labels.get(key, key), width=100, size=13),
+                slider,
+                pct_text,
+            ], spacing=10))
+
+        async def _on_save(e):
+            ratios = {k: s.value / 100.0 for k, s in sliders.items()}
+            total = sum(ratios.values())
+            if abs(total - 1.0) > 0.05:
+                self._show_snackbar(f"权重总和为 {total:.0%}，需接近 100%", "error")
+                return
+            await self.db.set_setting("auto_weight_ratios", json.dumps(ratios))
+            self.page.close(dialog)
+            self._show_snackbar("评分模型权重已保存", "success")
+
+        def _on_reset(e):
+            for key, s in sliders.items():
+                s.value = int(AutoWeightCalculator.DEFAULT_WEIGHTS[key] * 100)
+                pct_texts[key].value = f"{int(AutoWeightCalculator.DEFAULT_WEIGHTS[key] * 100)}%"
+            self.page.update()
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("⚙️ 评分模型权重配置"),
+            content=ft.Container(
+                content=ft.Column(rows + [
+                    ft.Text("提示：各项权重总和应为 100%。调整后点击「智能权重计算」即使用新比例。",
+                           size=10, color="onSurfaceVariant"),
+                ], spacing=8),
+                width=420,
+            ),
+            actions=[
+                ft.TextButton("恢复默认", on_click=_on_reset),
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("保存", on_click=_on_save),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dialog)
+
+    async def _show_weight_history(self, account_id: int | None = None):
+        """显示权重变更历史"""
+        history = await self.db.get_weight_history(account_id=account_id, limit=50)
+
+        if not history:
+            self._show_snackbar("暂无权重变更记录", "info")
+            return
+
+        source_labels = {"manual": "手动", "auto_calculate": "智能计算", "batch": "批量"}
+        rows = []
+        for h in history:
+            change = "↑" if h.new_weight > h.old_weight else ("↓" if h.new_weight < h.old_weight else "=")
+            source_label = source_labels.get(h.source, h.source)
+            rows.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Text(h.account_name or str(h.account_id), size=11)),
+                ft.DataCell(ft.Text(f"{h.old_weight} → {h.new_weight} {change}", size=11)),
+                ft.DataCell(ft.Text(source_label, size=11)),
+                ft.DataCell(ft.Text(h.created_at.strftime("%m-%d %H:%M") if h.created_at else "", size=10)),
+            ]))
+
+        table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("账号", size=11, weight="bold")),
+                ft.DataColumn(ft.Text("权重变化", size=11, weight="bold")),
+                ft.DataColumn(ft.Text("来源", size=11, weight="bold")),
+                ft.DataColumn(ft.Text("时间", size=11, weight="bold")),
+            ],
+            rows=rows,
+            border=ft.border.all(1, "outline"),
+            heading_row_height=30,
+            column_spacing=20,
+        )
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("📜 权重变更历史"),
+            content=ft.Container(
+                content=ft.Column([table], scroll=ft.ScrollMode.AUTO),
+                width=550,
+                height=400,
+            ),
+            actions=[ft.TextButton("关闭", on_click=lambda _: self.page.close(dialog))],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dialog)
 
     def _navigate(self, page_name: str):
         if self.on_navigate:

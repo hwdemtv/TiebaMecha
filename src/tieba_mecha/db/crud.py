@@ -27,6 +27,7 @@ from .models import (
     SignLog,
     TargetPool,
     ThreadRecord,
+    WeightHistory,
 )
 
 T = TypeVar("T", bound=Base)
@@ -99,9 +100,15 @@ class Database:
                 ("suspended_reason", "VARCHAR(200) DEFAULT ''"),
                 ("is_maint_enabled", "BOOLEAN DEFAULT 0"),
                 ("last_maint_at", "DATETIME DEFAULT NULL"),
+                ("last_weight_calc_at", "DATETIME DEFAULT NULL"),
             ]
             for col_name, col_type in accounts_migrations:
                 await self._safe_add_column(conn, "accounts", col_name, col_type, accounts_cols)
+
+            # 索引迁移 - post_weight 索引优化加权查询
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_accounts_post_weight ON accounts (post_weight DESC)"
+            ))
 
             # BatchPostTask 新字段迁移
             batch_migrations = [
@@ -156,6 +163,14 @@ class Database:
             ]
             for col_name, col_type in forums_migrations:
                 await self._safe_add_column(conn, "forums", col_name, col_type, forums_cols)
+
+            # WeightHistory 索引迁移
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_weight_history_account_id ON weight_history (account_id)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_weight_history_created_at ON weight_history (created_at)"
+            ))
 
         # 数据自愈：确保所有账号的 post_weight 都有默认值 5
         try:
@@ -387,21 +402,31 @@ class Database:
             await session.commit()
             return accounts
 
-    async def update_account_weight(self, account_id: int, weight: int) -> None:
-        """更新单个账号的发帖权重"""
+    async def update_account_weight(self, account_id: int, weight: int, source: str = "manual") -> None:
+        """更新单个账号的发帖权重，并记录变更历史"""
         async with self.async_session() as session:
             account = await session.get(Account, account_id)
             if account:
+                old_w = account.post_weight
                 account.post_weight = max(1, min(10, weight))
+                if old_w != account.post_weight:
+                    session.add(WeightHistory(
+                        account_id=account_id,
+                        account_name=account.name or "",
+                        old_weight=old_w,
+                        new_weight=account.post_weight,
+                        source=source,
+                    ))
                 await session.commit()
 
-    async def batch_update_weights(self, weight_updates: list[tuple[int, int]]) -> dict:
+    async def batch_update_weights(self, weight_updates: list[tuple[int, int]], source: str = "auto_calculate") -> dict:
         """
-        批量更新多个账号的权重。
-        
+        批量更新多个账号的权重，并记录变更历史。
+
         Args:
             weight_updates: [(account_id, weight), ...] 列表
-            
+            source: 变更来源标记
+
         Returns:
             {"updated": count, "failed": count}
         """
@@ -412,7 +437,16 @@ class Database:
                 try:
                     account = await session.get(Account, acc_id)
                     if account:
+                        old_w = account.post_weight
                         account.post_weight = max(1, min(10, weight))
+                        if old_w != account.post_weight:
+                            session.add(WeightHistory(
+                                account_id=acc_id,
+                                account_name=account.name or "",
+                                old_weight=old_w,
+                                new_weight=account.post_weight,
+                                source=source,
+                            ))
                         updated += 1
                     else:
                         failed += 1
@@ -420,6 +454,49 @@ class Database:
                     failed += 1
             await session.commit()
         return {"updated": updated, "failed": failed}
+
+    async def get_weight_history(self, account_id: int | None = None, limit: int = 50) -> list[WeightHistory]:
+        """查询权重变更历史"""
+        async with self.async_session() as session:
+            stmt = select(WeightHistory).order_by(WeightHistory.created_at.desc()).limit(limit)
+            if account_id is not None:
+                stmt = stmt.where(WeightHistory.account_id == account_id)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def update_weight_calc_timestamp(self, account_ids: list[int]) -> None:
+        """更新账号的最后权重计算时间"""
+        async with self.async_session() as session:
+            now = datetime.now()
+            for acc_id in account_ids:
+                account = await session.get(Account, acc_id)
+                if account:
+                    account.last_weight_calc_at = now
+            await session.commit()
+
+    async def get_accounts_needing_weight_recalc(self, since: datetime | None = None) -> list[tuple[Account, list[Forum]]]:
+        """获取自上次权重计算以来有变更的账号 (增量模式)"""
+        async with self.async_session() as session:
+            if since is None:
+                return await self.get_accounts_with_forums()
+
+            acc_stmt = select(Account).where(Account.updated_at > since).order_by(Account.id)
+            acc_result = await session.execute(acc_stmt)
+            changed_accounts = list(acc_result.scalars().all())
+
+            if not changed_accounts:
+                return []
+
+            changed_ids = {a.id for a in changed_accounts}
+            forum_stmt = select(Forum).where(Forum.account_id.in_(changed_ids)).order_by(Forum.account_id)
+            forum_result = await session.execute(forum_stmt)
+            all_forums = list(forum_result.scalars().all())
+
+            forums_by_account: dict[int, list[Forum]] = {}
+            for f in all_forums:
+                forums_by_account.setdefault(f.account_id, []).append(f)
+
+            return [(acc, forums_by_account.get(acc.id, [])) for acc in changed_accounts]
 
     async def get_accounts_with_forums(self) -> list[tuple[Account, list[Forum]]]:
         """获取所有账号及其关联的贴吧列表（批量查询避免 N+1 问题）"""
