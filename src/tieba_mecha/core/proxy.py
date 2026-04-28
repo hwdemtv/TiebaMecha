@@ -1,7 +1,72 @@
 import random
+from datetime import datetime
 from typing import Optional
 from aiotieba.config import ProxyConfig
 from ..db.crud import Database
+
+
+class ProxyWarmupManager:
+    """
+    代理预热管理器：新绑定代理的账号在预热期内只允许低风险操作（签到、浏览），
+    不允许发帖/顶贴，避免 IP 突变触发百度关联检测。
+
+    预热期默认 48 小时，可在 settings 表中配置 proxy_warmup_hours。
+    """
+
+    # 预热期内允许的操作白名单
+    SAFE_ACTIONS = {"sign", "browse", "warmup"}
+
+    def __init__(self, warmup_hours: int = 48):
+        self.warmup_hours = warmup_hours
+
+    async def needs_warmup(self, db: Database, account_id: int) -> bool:
+        """
+        检查账号绑定的代理是否还在预热期。
+        通过比较 proxy_bind_time 与当前时间判断。
+        """
+        try:
+            account = await db.get_account_by_id(account_id)
+            if not account:
+                return False
+            # 检查是否有绑定时间字段（兼容旧数据）
+            bind_time = getattr(account, 'proxy_bind_time', None)
+            if bind_time is None:
+                return False
+            elapsed = (datetime.now() - bind_time).total_seconds()
+            return elapsed < self.warmup_hours * 3600
+        except Exception:
+            return False
+
+    def is_action_safe(self, action: str) -> bool:
+        """检查操作是否在预热期白名单内"""
+        return action in self.SAFE_ACTIONS
+
+    async def get_remaining_hours(self, db: Database, account_id: int) -> float:
+        """获取预热剩余小时数，0 表示已过预热期"""
+        try:
+            account = await db.get_account_by_id(account_id)
+            if not account:
+                return 0.0
+            bind_time = getattr(account, 'proxy_bind_time', None)
+            if bind_time is None:
+                return 0.0
+            elapsed = (datetime.now() - bind_time).total_seconds()
+            remaining = self.warmup_hours * 3600 - elapsed
+            return max(0.0, remaining / 3600)
+        except Exception:
+            return 0.0
+
+
+# 全局预热管理器实例
+_warmup_manager: Optional[ProxyWarmupManager] = None
+
+
+def get_warmup_manager() -> ProxyWarmupManager:
+    """获取全局代理预热管理器"""
+    global _warmup_manager
+    if _warmup_manager is None:
+        _warmup_manager = ProxyWarmupManager()
+    return _warmup_manager
 
 async def get_best_proxy_config(db: Database, proxy_id: int | None = None) -> Optional[ProxyConfig]:
     """
