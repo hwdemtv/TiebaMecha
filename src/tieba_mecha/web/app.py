@@ -468,6 +468,11 @@ class TiebaMechaApp:
     async def _navigate(self, page_name: str):
         """页面路由跳转核心逻辑"""
         try:
+            # 导航离开时清理旧页面（取消订阅、停止后台任务等）
+            old_page_obj = self._pages_cache.get(self.current_page)
+            if old_page_obj and hasattr(old_page_obj, "cleanup"):
+                old_page_obj.cleanup()
+
             self.current_page = page_name
 
             # 清除残留的对话框（Web 刷新后 page.overlay 中可能残留之前打开的 AlertDialog/BottomSheet）
