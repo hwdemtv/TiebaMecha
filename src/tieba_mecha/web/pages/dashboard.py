@@ -119,9 +119,9 @@ class DashboardPage:
         """监听日志队列并更新 UI"""
         queue = get_log_queue()
         try:
-            while True:
+            while self._log_task_running:
                 log_entry = await queue.get()
-                if hasattr(self, "log_list"):
+                if self._log_task_running and hasattr(self, "log_list"):
                     self._add_single_log_ui(log_entry)
                     self.page.update()
                 queue.task_done()
