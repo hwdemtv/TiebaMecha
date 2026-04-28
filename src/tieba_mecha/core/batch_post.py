@@ -1587,10 +1587,11 @@ class BatchPostManager:
         if account_ids is None:
             all_accounts = await self.db.get_accounts()
             account_ids = [acc.id for acc in all_accounts if acc.status in ("active", "pending")]
+        else:
+            all_accounts = await self.db.get_accounts()
 
-        # 预构建账号 ID -> 名称映射
-        _fol_acc_list = await self.db.get_accounts()
-        _fol_acc_name_map = {a.id: (a.user_name or a.name or f"账号(ID:{a.id})") for a in _fol_acc_list}
+        # 预构建账号 ID -> 名称映射（复用 all_accounts，避免重复查询）
+        _fol_acc_name_map = {a.id: (a.user_name or a.name or f"账号(ID:{a.id})") for a in all_accounts}
 
         if not account_ids:
             result["failed"].append({"account_id": None, "fname": None, "reason": "无可用账号"})

@@ -544,6 +544,33 @@ class Database:
             missing_accounts = [acc for acc in all_accounts if acc.id not in followed_ids]
             return missing_accounts
 
+    async def get_accounts_not_following_any_forums(self, fnames: list[str]) -> list[Account]:
+        """
+        获取未关注指定贴吧列表中任意一个的活跃账号（批量版，N+1 优化）。
+        用于批量补齐关注：一次查询替代逐吧调用 get_accounts_not_following_forum。
+        """
+        if not fnames:
+            return []
+
+        async with self.async_session() as session:
+            # 获取关注了任一指定贴吧的账号 ID（用于排除）
+            followed_stmt = select(Forum.account_id).where(
+                Forum.fname.in_(fnames),
+                Forum.is_banned == False
+            ).distinct()
+            followed_result = await session.execute(followed_stmt)
+            followed_ids = {row[0] for row in followed_result}
+
+            # 获取所有活跃账号
+            all_accounts_stmt = select(Account).where(
+                Account.status.notin_(["suspended", "suspended_proxy", "banned", "expired"])
+            )
+            all_result = await session.execute(all_accounts_stmt)
+            all_accounts = list(all_result.scalars().all())
+
+            # 返回未关注至少一个指定贴吧的账号
+            return [acc for acc in all_accounts if acc.id not in followed_ids]
+
     # ========== Forum CRUD ==========
 
     async def add_forum(
@@ -1407,7 +1434,12 @@ class Database:
         """分页查询物料，返回 (列表, 总数)"""
         async with self.async_session() as session:
             from sqlalchemy import func, select as sa_select
-            base_where = []
+            # 基础条件：仅统计已发帖成功的物料
+            base_where = [
+                MaterialPool.status == "success",
+                MaterialPool.posted_tid.isnot(None),
+                MaterialPool.posted_tid != 0,
+            ]
             if survival_status:
                 base_where.append(MaterialPool.survival_status == survival_status)
             if account_id:
@@ -2202,10 +2234,13 @@ class Database:
             )
             existing_fnames = set(existing_result.scalars().all())
             
-            # 插入缺失的
+            # 批量插入缺失的
             missing_fnames = set(fnames) - existing_fnames
-            for fname in missing_fnames:
-                session.add(TargetPool(fname=fname, post_group=group))
+            if missing_fnames:
+                session.add_all([
+                    TargetPool(fname=fname, post_group=group)
+                    for fname in missing_fnames
+                ])
             
             # 更新已存在的
             if existing_fnames:

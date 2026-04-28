@@ -117,9 +117,10 @@ class BehaviorAuditor:
                 cutoff = datetime.now() - timedelta(days=days)
 
                 # 签到统计
+                from sqlalchemy import case
                 sign_stmt = select(
                     func.count(SignLog.id).label("total"),
-                    func.sum(func.cast(SignLog.success, type_=func.count().type)).label("success")
+                    func.sum(case((SignLog.success == True, 1), else_=0)).label("success")
                 ).where(
                     SignLog.account_id == account_id,
                     SignLog.created_at >= cutoff
@@ -178,6 +179,7 @@ class BehaviorAuditor:
 
         except Exception as e:
             stats["error"] = str(e)
+            await log_warn(f"收集账号 {account_id} 行为数据失败: {e}")
 
         return stats
 

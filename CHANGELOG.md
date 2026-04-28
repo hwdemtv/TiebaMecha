@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-04-29
+
+- **全域战略吧库性能优化 (Strategic Library Performance)**
+  - 修复批量补齐关注的 N+1 查询问题：新增 `get_accounts_not_following_any_forums` 批量查询方法，将逐吧循环查询优化为单次查询 + 单次批量操作，查询次数从 2N 降至 2。
+  - 全域战略吧库列表新增分页功能（每页 20 条），支持上/下翻页导航，筛选变化自动重置页码，避免大量贴吧时的渲染性能问题。
+  - 修复搜索框清除逻辑的 UI 耦合问题：搜索框改为实例属性直接引用，不再依赖 widget 树遍历。
+  - 优化 `bulk_update_target_group` 批量插入：使用 `session.add_all()` 替代逐个 `session.add()`。
+  - 消除 `follow_forums_bulk` 中重复的 `get_accounts()` 调用，复用首次查询结果。
+
 ## [1.1.2] - 2026-04-12
 
 - **战术火力配置工作流 (Artillery Tactical Workflow)**

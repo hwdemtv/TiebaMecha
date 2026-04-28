@@ -34,6 +34,11 @@ class AccountsPage:
         self._banned_forum_details = []
         self._banned_forum_map: dict[str, list[dict]] = {}
         self._active_tab_index = 0
+
+        # 吧库分页
+        self._matrix_current_page = 1
+        self._matrix_page_size = 20
+        self._matrix_filtered_count = 0
         
         # 存活分析数据
         self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
@@ -271,7 +276,7 @@ class AccountsPage:
     def _build_strategic_tab(self) -> ft.Control:
         """全域战略吧库标签页"""
         # 工具栏
-        search_field = ft.TextField(
+        self._matrix_search_field = ft.TextField(
             hint_text="搜索吧名或标签...",
             prefix_icon=icons.SEARCH,
             border_radius=10,
@@ -365,9 +370,29 @@ class AccountsPage:
             padding=10,
         )
 
+        # 分页控件
+        self._matrix_page_info = ft.Text("", size=12, color="onSurfaceVariant")
+        self._matrix_prev_btn = ft.IconButton(
+            icon=icons.ARROW_BACK_IOS_NEW, icon_size=16,
+            tooltip="上一页",
+            on_click=lambda e: self.page.run_task(self._on_matrix_prev_page),
+            disabled=True,
+        )
+        self._matrix_next_btn = ft.IconButton(
+            icon=icons.NAVIGATE_NEXT, icon_size=16,
+            tooltip="下一页",
+            on_click=lambda e: self.page.run_task(self._on_matrix_next_page),
+            disabled=True,
+        )
+        matrix_pagination = ft.Row(
+            [self._matrix_prev_btn, self._matrix_page_info, self._matrix_next_btn],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+        )
+
         return ft.Column(
             controls=[
-                ft.Row([search_field, self.banned_filter_btn, self.deleted_filter_btn, sync_btn, clear_search_btn, follow_btn], spacing=10),
+                ft.Row([self._matrix_search_field, self.banned_filter_btn, self.deleted_filter_btn, sync_btn, clear_search_btn, follow_btn], spacing=10),
                 self.matrix_bulk_bar,
                 self.matrix_header_info,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
@@ -375,6 +400,7 @@ class AccountsPage:
                     content=self.matrix_list,
                     expand=True,
                 ),
+                matrix_pagination,
             ],
             spacing=10,
         )
@@ -702,11 +728,13 @@ class AccountsPage:
 
     def _on_matrix_search_change(self, e):
         self._matrix_search_text = e.control.value
+        self._matrix_current_page = 1
         self.refresh_ui()
 
     def _on_toggle_banned_filter(self, e):
         """切换封禁贴吧筛选"""
         self._matrix_banned_filter = not self._matrix_banned_filter
+        self._matrix_current_page = 1
         if self._matrix_banned_filter:
             self.banned_filter_btn.icon = icons.FILTER_LIST
             self.banned_filter_btn.icon_color = "error"
@@ -720,6 +748,7 @@ class AccountsPage:
     def _on_toggle_deleted_filter(self, e):
         """切换被删帖贴吧筛选"""
         self._matrix_deleted_filter = not self._matrix_deleted_filter
+        self._matrix_current_page = 1
         if self._matrix_deleted_filter:
             self.deleted_filter_btn.icon_color = "error"
             self.deleted_filter_btn.tooltip = "显示全部贴吧"
@@ -731,14 +760,32 @@ class AccountsPage:
     def _on_clear_matrix_search(self, e):
         """清除全域战略吧库搜索"""
         self._matrix_search_text = ""
-        # 找到搜索框并清空
-        for ctrl in self.tabs.tabs[1].content.controls:
-            if isinstance(ctrl, ft.Row) and len(ctrl.controls) > 0:
-                for c in ctrl.controls:
-                    if isinstance(c, ft.TextField):
-                        c.value = ""
-                        break
+        self._matrix_current_page = 1
+        if hasattr(self, "_matrix_search_field"):
+            self._matrix_search_field.value = ""
         self.refresh_ui()
+
+    async def _on_matrix_prev_page(self, e):
+        """吧库分页 - 上一页"""
+        if self._matrix_current_page > 1:
+            self._matrix_current_page -= 1
+            self.refresh_ui()
+
+    async def _on_matrix_next_page(self, e):
+        """吧库分页 - 下一页"""
+        total_pages = max(1, (self._matrix_filtered_count + self._matrix_page_size - 1) // self._matrix_page_size)
+        if self._matrix_current_page < total_pages:
+            self._matrix_current_page += 1
+            self.refresh_ui()
+
+    def _update_matrix_pagination(self):
+        """更新吧库分页信息"""
+        if not hasattr(self, "_matrix_page_info"):
+            return
+        total_pages = max(1, (self._matrix_filtered_count + self._matrix_page_size - 1) // self._matrix_page_size)
+        self._matrix_page_info.value = f"第 {self._matrix_current_page}/{total_pages} 页，共 {self._matrix_filtered_count} 个贴吧"
+        self._matrix_prev_btn.disabled = self._matrix_current_page <= 1
+        self._matrix_next_btn.disabled = self._matrix_current_page >= total_pages
 
     async def _on_sync_matrix(self, e):
         """全域同步关注列表"""
@@ -1019,23 +1066,27 @@ class AccountsPage:
         self.page.update()
 
     async def _bulk_matrix_complement_follow(self):
-        """批量补齐关注"""
+        """批量补齐关注（N+1 优化：单次查询 + 单次批量操作）"""
         if not self._matrix_selected_fnames: return
         fnames = list(self._matrix_selected_fnames)
-        total_success = 0
-        total_failed = 0
         try:
-            for f in fnames:
-                missing_accounts = await self.db.get_accounts_not_following_forum(f)
-                if not missing_accounts:
-                    continue
+            # 单次查询获取所有缺失关注的账号（替代逐吧循环查询）
+            missing_accounts = await self.db.get_accounts_not_following_any_forums(fnames)
+            if not missing_accounts:
+                self._show_snackbar("✅ 所有账号已关注选中的贴吧", "info")
+            else:
                 missing_ids = [acc.id for acc in missing_accounts]
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
-                result = await pm.follow_forums_bulk([f], account_ids=missing_ids)
-                total_success += len(result["success"])
-                total_failed += len(result["failed"])
-            self._show_snackbar(f"✅ 补齐关注完成: 成功 {total_success}, 失败 {total_failed}", "success")
+                # 单次调用处理所有贴吧
+                result = await pm.follow_forums_bulk(fnames, account_ids=missing_ids)
+                total_success = len(result["success"])
+                total_failed = len(result["failed"])
+                total_skipped = len(result.get("skipped", []))
+                msg = f"✅ 补齐关注完成: 成功 {total_success}, 失败 {total_failed}"
+                if total_skipped > 0:
+                    msg += f", 跳过 {total_skipped}"
+                self._show_snackbar(msg, "success")
         except Exception as e:
             self._show_snackbar(f"❌ 批量补齐失败: {str(e)}", "error")
         self._matrix_selected_fnames.clear()
@@ -1235,20 +1286,38 @@ class AccountsPage:
         self.matrix_header_info.value = base_info
 
     def _build_matrix_items(self) -> list[ft.Control]:
-        """构建战略贴吧列表项"""
+        """构建战略贴吧列表项（含分页）"""
         items = []
         search_lower = self._matrix_search_text.lower()
-        
+
+        # 第一步：筛选
+        filtered = []
         for stat in self._matrix_stats:
             fname = stat['fname']
             if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
                 continue
-            # 封禁筛选：仅显示被封禁的贴吧
             if self._matrix_banned_filter and not stat.get('is_banned', False):
                 continue
-            # 被删筛选：仅显示有删帖记录的贴吧
             if self._matrix_deleted_filter and stat.get('deleted_count', 0) == 0:
                 continue
+            filtered.append(stat)
+
+        # 记录筛选后总数
+        self._matrix_filtered_count = len(filtered)
+
+        # 页码越界保护
+        total_pages = max(1, (len(filtered) + self._matrix_page_size - 1) // self._matrix_page_size)
+        if self._matrix_current_page > total_pages:
+            self._matrix_current_page = total_pages
+
+        # 分页切片
+        start = (self._matrix_current_page - 1) * self._matrix_page_size
+        end = start + self._matrix_page_size
+        page_items = filtered[start:end]
+
+        # 第二步：构建卡片（仅当前页）
+        for stat in page_items:
+            fname = stat['fname']
                 
             acc_count = stat['account_count']
             groups = stat['post_group']
@@ -1429,7 +1498,10 @@ class AccountsPage:
                 padding=50,
                 alignment=ft.alignment.center,
             ))
-            
+
+        # 更新分页控件
+        self._update_matrix_pagination()
+
         return items
 
     def _build_account_items(self) -> list[ft.Control]:
