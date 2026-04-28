@@ -79,6 +79,12 @@
 - **死亡原因分类**：识别并分类帖子失效原因（吧务删除、系统屏蔽、用户举报等）
 - **多维筛选**：按账号、贴吧、死亡原因等维度快速过滤分析
 
+### 11. Web 密码认证
+- **访问控制**：为 Web 控制台设置访问密码，防止未授权访问
+- **登录拦截**：首次访问显示设置密码页面，之后显示登录页面
+- **密码管理**：在系统设置中可修改密码或关闭密码保护
+- **密码重置**：忘记密码时，通过环境变量 `TIEBA_MECHA_WEB_PASSWORD_RESET=true` 启动应用即可重置
+
 ---
 
 ## 🚀 快速开始
@@ -235,7 +241,7 @@ tieba web --port 9006
 | **拟人化养号** | 自动浏览、随性点赞、权重维护、定时调度 |
 | **矩阵发帖** | 战术向导配置、物料池管理、AI 改写、定时任务、自动回帖 |
 | **插件系统** | 扩展功能加载与管理 |
-| **系统设置** | AI 配置、全局参数、安全选项、定时任务调度 |
+| **系统设置** | AI 配置、全局参数、安全选项（Web 密码管理）、定时任务调度 |
 | **新手引导** | 首次使用向导，引导完成账号导入与基础配置 |
 
 ### 命令行工具（CLI）
@@ -289,6 +295,7 @@ tieba web --port 9006 --host 0.0.0.0
 | `TIEBA_MECHA_DB_PATH` | ❌ | 数据库路径 | `data/tieba_mecha.db` |
 | `TIEBA_MECHA_LOG_LEVEL` | ❌ | 日志级别 | `INFO` |
 | `TIEBA_MECHA_DEBUG` | ❌ | 调试模式 | `false` |
+| `TIEBA_MECHA_WEB_PASSWORD_RESET` | ❌ | Web 密码重置（设为 `true` 启动时清除密码） | 无 |
 
 ### AI 改写配置
 
@@ -361,14 +368,15 @@ TiebaMecha/
 │   │   ├── proxy.py         # 代理管理
 │   │   ├── sign.py          # 签到引擎
 │   │   ├── updater.py       # GitHub Releases 更新检测
-│   │   └── auth.py          # 授权 & 硬件指纹验证
+│   │   ├── auth.py          # 授权 & 硬件指纹验证
+│   │   └── web_auth.py      # Web 密码认证 (PBKDF2)
 │   ├── db/                  # 数据库层
 │   │   ├── models.py        # SQLAlchemy 模型 (15 张表)
 │   │   └── crud.py          # 异步 CRUD 操作 (40+ 方法)
 │   ├── web/                 # Web UI (Flet)
 │   │   ├── app.py           # 主应用 & 路由管理
 │   │   ├── components/      # UI 组件 (HUD、通知铃铛、主题等)
-│   │   └── pages/           # 页面模块 (12 个页面)
+│   │   └── pages/           # 页面模块 (13 个页面)
 │   └── assets/              # 静态资源 (图标等)
 ├── data/                    # 数据目录（不纳入版本控制）
 │   └── tieba_mecha.db       # SQLite 数据库
@@ -517,6 +525,13 @@ class MyPlugin(PluginBase):
 - 检查 `.env` 文件是否存在且配置正确
 - 确认端口 9006 未被占用
 - 查看容器日志：`docker logs tieba-mecha`
+
+### 忘记 Web 访问密码？
+在 `.env` 文件中添加以下配置后重启应用：
+```bash
+TIEBA_MECHA_WEB_PASSWORD_RESET=true
+```
+启动后会自动清除密码并恢复访问。进入**系统设置 → 安全**重新设置密码，然后删除该配置项。
 
 ---
 

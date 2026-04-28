@@ -33,6 +33,7 @@ class Account(Base):
     suspended_reason: Mapped[str] = mapped_column(String(200), default="", comment="挂起原因（代理失效自动填充）")
     is_maint_enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启拟人化自动养号")
     last_maint_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次养号维护时间")
+    last_weight_calc_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后权重计算时间")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
@@ -43,6 +44,7 @@ class Account(Base):
         Index("ix_accounts_is_active", "is_active"),  # 查找活跃账号
         Index("ix_accounts_status", "status"),  # 按状态筛选
         Index("ix_accounts_proxy_id", "proxy_id"),  # 查找绑定特定代理的账号
+        Index("ix_accounts_post_weight", "post_weight"),  # 加权随机查询优化
     )
 
 
@@ -142,6 +144,26 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text, default="", comment="设置值(JSON/String)")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
+    )
+
+
+class WeightHistory(Base):
+    """权重变更历史 (append-only log)"""
+
+    __tablename__ = "weight_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
+    account_name: Mapped[str] = mapped_column(String(100), default="", comment="账号名称快照")
+    old_weight: Mapped[int] = mapped_column(Integer, nullable=False, comment="变更前权重")
+    new_weight: Mapped[int] = mapped_column(Integer, nullable=False, comment="变更后权重")
+    source: Mapped[str] = mapped_column(String(50), default="manual", comment="变更来源: manual/auto_calculate/batch")
+    details: Mapped[str] = mapped_column(Text, default="", comment="计算详情 JSON")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="变更时间")
+
+    __table_args__ = (
+        Index("ix_weight_history_account_id", "account_id"),
+        Index("ix_weight_history_created_at", "created_at"),
     )
 
 

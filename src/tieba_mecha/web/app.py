@@ -14,11 +14,15 @@ from .components import get_dark_theme, get_light_theme, icons
 if TYPE_CHECKING:
     from tieba_mecha.db.crud import Database
 
+# 已通过 Web 认证的会话 ID 集合（模块级持久化，跨页面刷新存活）
+_authenticated_sessions: set[str] = set()
+
 # 页面懒加载映射（避免启动时导入所有模块）
 PAGE_MODULES = {
     "dashboard": ("dashboard", "DashboardPage"),
     "accounts": ("accounts", "AccountsPage"),
     "welcome": ("welcome", "WelcomePage"),
+    "login": ("login", "LoginPage"),
     "sign": ("sign", "SignPage"),
     "posts": ("posts", "PostsPage"),
     "crawl": ("crawl", "CrawlPage"),
@@ -176,6 +180,61 @@ class TiebaMechaApp:
         """初始化数据库和其他异步资源"""
         self.db = db
 
+        # 密码重置模式：环境变量 TIEBA_MECHA_WEB_PASSWORD_RESET=true 时跳过认证并清除密码
+        import os
+        if os.getenv("TIEBA_MECHA_WEB_PASSWORD_RESET", "").lower() == "true":
+            from ..core.web_auth import clear_password
+            await clear_password(db)
+            os.environ.pop("TIEBA_MECHA_WEB_PASSWORD_RESET", None)
+            from ..core.logger import log_info
+            await log_info("密码重置模式：已清除 Web 密码，可进入设置页重新配置")
+
+        # Web 认证检查：未认证则显示登录页，跳过后台任务初始化
+        if self.page.session_id not in _authenticated_sessions:
+            from ..core.web_auth import is_password_set
+            if await is_password_set(db):
+                # 密码已设置 → 显示登录页
+                self._show_login_only()
+                await self._navigate("login")
+                return
+            else:
+                # 未设置密码 → 显示设置密码页（可跳过）
+                self._show_login_only()
+                await self._navigate("login")
+                return
+
+        # 认证已通过，执行完整初始化
+        await self._full_initialize(db)
+
+    def _show_login_only(self):
+        """隐藏导航栏，仅显示登录页"""
+        self.nav_rail.visible = False
+        # 隐藏分隔线（导航栏右侧的 VerticalDivider）
+        if self.page.controls and isinstance(self.page.controls[0], ft.Row):
+            row = self.page.controls[0]
+            for ctrl in row.controls:
+                if isinstance(ctrl, ft.VerticalDivider):
+                    ctrl.visible = False
+        self.page.update()
+
+    def _show_main_ui(self):
+        """显示导航栏和主界面"""
+        self.nav_rail.visible = True
+        if self.page.controls and isinstance(self.page.controls[0], ft.Row):
+            row = self.page.controls[0]
+            for ctrl in row.controls:
+                if isinstance(ctrl, ft.VerticalDivider):
+                    ctrl.visible = True
+        self.page.update()
+
+    async def _on_login_success(self):
+        """登录成功回调"""
+        _authenticated_sessions.add(self.page.session_id)
+        self._show_main_ui()
+        await self._full_initialize(self.db)
+
+    async def _full_initialize(self, db: Database):
+        """完整初始化（认证通过后执行）"""
         # 延迟导入重模块
         from ..core.logger import log_info, log_warn, log_error
         from ..core.notification import init_notification_manager, get_notification_manager
@@ -434,7 +493,7 @@ class TiebaMechaApp:
 
 
     def _on_web_reconnect(self, e):
-        """浏览器刷新/重连时清除残留的对话框"""
+        """浏览器刷新/重连时清除残留的对话框，忽略已取消的 Future 回调"""
         try:
             overlay_to_keep = []
             for ctrl in self.page.overlay:
@@ -444,7 +503,7 @@ class TiebaMechaApp:
             self.page.overlay.clear()
             self.page.overlay.extend(overlay_to_keep)
             self.page.update()
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             pass
 
     def _on_nav_change(self, e):
@@ -496,6 +555,10 @@ class TiebaMechaApp:
 
                 page_obj = page_class(self.page, self.db, self._navigate_sync)
                 self._pages_cache[page_name] = page_obj  # 缓存页面对象
+
+            # 登录页注入认证成功回调
+            if page_name == "login" and hasattr(page_obj, "set_success_callback"):
+                page_obj.set_success_callback(self._on_login_success)
 
             # 每次导航都重新 build 并挂载（确保 UI 控件引用一致）
             self.content_area.content = page_obj.build()

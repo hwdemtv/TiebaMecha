@@ -405,36 +405,74 @@ class TimeWindowDispatcher:
 class AutoWeightCalculator:
     """
     自动权重计算器：根据账号多维度指标自动计算推荐发帖权重。
-    
-    计算因素及权重：
-    - 平均贴吧等级 (30%): 无等级=1, 1-3级=3, 4-6级=5, 7-10级=7, 10+级=10
+
+    计算因素及默认权重：
+    - 平均贴吧等级 (30%): 线性插值平滑过渡
     - 签到成功率 (25%): success/(total||1) * 10
     - 账号状态 (20%): active=10, pending=7, error=3, 其他=1
     - 代理绑定 (15%): 已绑定=10, 未绑定=5
-    - 验证时效 (10%): 7天内=10, 30天内=7, 30天+=3, 从未=1
+    - 验证时效 (10%): 7天内=10, 30天内=7, 60天+=5, 从未=1
     """
-    
-    # 各因素权重配置
-    WEIGHT_LEVEL: float = 0.30      # 等级权重
-    WEIGHT_SIGN: float = 0.25       # 签到成功率权重
-    WEIGHT_STATUS: float = 0.20    # 账号状态权重
-    WEIGHT_PROXY: float = 0.15     # 代理绑定权重
-    WEIGHT_VERIFIED: float = 0.10  # 验证时效权重
-    
+
+    # 默认权重比例 (用户可通过 settings 表自定义)
+    DEFAULT_WEIGHTS: dict[str, float] = {
+        "level": 0.30,
+        "sign": 0.25,
+        "status": 0.20,
+        "proxy": 0.15,
+        "verified": 0.10,
+    }
+
+    _WEIGHT_LABELS: dict[str, str] = {
+        "level": "贴吧等级",
+        "sign": "签到成功率",
+        "status": "账号状态",
+        "proxy": "代理绑定",
+        "verified": "验证时效",
+    }
+
+    @classmethod
+    async def get_weight_ratios(cls, db) -> dict[str, float]:
+        """从 settings 表加载自定义权重比例，若无配置或无效则返回默认值"""
+        raw = await db.get_setting("auto_weight_ratios", "")
+        if raw:
+            try:
+                ratios = json.loads(raw)
+                if all(k in ratios for k in cls.DEFAULT_WEIGHTS):
+                    total = sum(ratios.values())
+                    if 0.95 <= total <= 1.05:
+                        return {k: float(ratios[k]) for k in cls.DEFAULT_WEIGHTS}
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
+        return cls.DEFAULT_WEIGHTS.copy()
+
     @classmethod
     def calc_level_score(cls, avg_level: float) -> float:
-        """根据平均等级计算得分 (1-10)"""
-        if avg_level <= 0:
-            return 1.0
-        elif avg_level <= 3:
-            return 3.0
-        elif avg_level <= 6:
-            return 5.0
-        elif avg_level <= 10:
-            return 7.0
-        else:
-            return 10.0
-    
+        """根据平均等级计算得分 (1-10)，使用线性插值实现平滑过渡"""
+        # 节点: (level, score) — 保留原始分档的关键点，中间线性插值
+        knots = [
+            (0, 1.0),
+            (1, 2.0),
+            (3, 3.0),
+            (6, 5.0),
+            (10, 7.0),
+            (15, 10.0),
+        ]
+
+        if avg_level <= knots[0][0]:
+            return knots[0][1]
+        if avg_level >= knots[-1][0]:
+            return knots[-1][1]
+
+        for i in range(len(knots) - 1):
+            lv_low, sc_low = knots[i]
+            lv_high, sc_high = knots[i + 1]
+            if lv_low <= avg_level <= lv_high:
+                t = (avg_level - lv_low) / (lv_high - lv_low)
+                return sc_low + t * (sc_high - sc_low)
+
+        return knots[-1][1]
+
     @classmethod
     def calc_sign_score(cls, success: int, total: int) -> float:
         """根据签到成功率计算得分 (1-10)"""
@@ -442,7 +480,7 @@ class AutoWeightCalculator:
             return 5.0  # 无历史数据，给予中等分数
         rate = success / max(total, 1)
         return min(10.0, rate * 10.0)
-    
+
     @classmethod
     def calc_status_score(cls, status: str) -> float:
         """根据账号状态计算得分 (1-10)"""
@@ -456,20 +494,20 @@ class AutoWeightCalculator:
             "expired": 1.0,
         }
         return status_scores.get(status.lower(), 1.0)
-    
+
     @classmethod
     def calc_proxy_score(cls, has_proxy: bool) -> float:
         """根据代理绑定情况计算得分 (1-10)"""
         return 10.0 if has_proxy else 5.0
-    
+
     @classmethod
     def calc_verified_score(cls, last_verified: datetime | None) -> float:
         """根据验证时效计算得分 (1-10)"""
         if last_verified is None:
             return 1.0  # 从未验证
-        
+
         days_since = (datetime.now() - last_verified).days
-        
+
         if days_since <= 7:
             return 10.0
         elif days_since <= 30:
@@ -478,19 +516,28 @@ class AutoWeightCalculator:
             return 5.0
         else:
             return 2.0
-    
+
     @classmethod
-    def calculate(cls, account: Account, forums: list[Forum] | None = None) -> tuple[int, dict[str, Any]]:
+    def calculate_sync(
+        cls,
+        account: Account,
+        forums: list[Forum] | None = None,
+        ratios: dict[str, float] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         """
-        计算账号的推荐权重。
-        
+        同步版权重计算（供批量循环调用，避免重复 db 查询）。
+
         Args:
             account: Account 对象
-            forums: 该账号关联的 Forum 对象列表，可选
-            
+            forums: 关联的 Forum 列表，可选
+            ratios: 权重比例字典，为 None 时使用 DEFAULT_WEIGHTS
+
         Returns:
             (推荐权重 1-10, 详细得分字典)
         """
+        if ratios is None:
+            ratios = cls.DEFAULT_WEIGHTS
+
         # 1. 计算平均等级得分
         if forums:
             levels: list[int] = [f.level for f in forums if f.level > 0]
@@ -498,7 +545,7 @@ class AutoWeightCalculator:
         else:
             avg_level = 0.0
         level_score = cls.calc_level_score(avg_level)
-        
+
         # 2. 计算签到成功率得分
         if forums:
             total_signs: int = sum(f.history_total for f in forums)
@@ -506,28 +553,33 @@ class AutoWeightCalculator:
         else:
             total_signs, success_signs = 0, 0
         sign_score = cls.calc_sign_score(success_signs, total_signs)
-        
+
         # 3. 账号状态得分
         status_score: float = cls.calc_status_score(account.status)
-        
+
         # 4. 代理绑定得分
         proxy_score: float = cls.calc_proxy_score(account.proxy_id is not None)
-        
+
         # 5. 验证时效得分
         verified_score: float = cls.calc_verified_score(account.last_verified)
-        
-        # 6. 加权计算总分
+
+        # 6. 加权计算总分 (使用动态比例)
         total_score: float = (
-            level_score * cls.WEIGHT_LEVEL +
-            sign_score * cls.WEIGHT_SIGN +
-            status_score * cls.WEIGHT_STATUS +
-            proxy_score * cls.WEIGHT_PROXY +
-            verified_score * cls.WEIGHT_VERIFIED
+            level_score * ratios["level"]
+            + sign_score * ratios["sign"]
+            + status_score * ratios["status"]
+            + proxy_score * ratios["proxy"]
+            + verified_score * ratios["verified"]
         )
-        
+
         # 7. 映射到 1-10 范围
         final_weight: int = max(1, min(10, round(total_score)))
-        
+
+        # 7.5 终态账号强制下限: banned/suspended/expired 权重锁定为 1
+        _TERMINAL_STATUSES = {"banned", "suspended", "expired"}
+        if account.status in _TERMINAL_STATUSES:
+            final_weight = 1
+
         # 8. 构建详细得分报告
         details: dict[str, Any] = {
             "account_id": account.id,
@@ -545,9 +597,35 @@ class AutoWeightCalculator:
             "verified_score": round(verified_score, 1),
             "total_score": round(total_score, 1),
             "recommended_weight": final_weight,
+            "ratios": {k: round(v, 2) for k, v in ratios.items()},
         }
-        
+        if account.status in _TERMINAL_STATUSES:
+            details["note"] = f"账号状态为 {account.status}，权重强制设为 1"
+
         return final_weight, details
+
+    @classmethod
+    async def calculate(
+        cls,
+        account: Account,
+        forums: list[Forum] | None = None,
+        db=None,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        异步版权重计算：自动从 settings 加载权重比例后委托给 calculate_sync。
+
+        Args:
+            account: Account 对象
+            forums: 关联的 Forum 列表，可选
+            db: Database 实例，用于读取自定义权重比例
+
+        Returns:
+            (推荐权重 1-10, 详细得分字典)
+        """
+        ratios = cls.DEFAULT_WEIGHTS
+        if db is not None:
+            ratios = await cls.get_weight_ratios(db)
+        return cls.calculate_sync(account, forums, ratios)
 
 
 class BionicDelay:
@@ -634,13 +712,17 @@ class BatchPostManager:
         weights = [a[1] for a in accounts_with_weights]
         return random.choices(ids, weights=weights, k=1)[0]
 
+    # 应完全排除出加权池的终态状态
+    _EXCLUDED_STATUSES: set[str] = {"banned", "suspended", "expired"}
+
     async def _build_weighted_accounts(self, task: BatchPostTask, all_accounts: list[Account] | None = None) -> list[tuple[int, int]]:
         """
         构建账号+权重列表。临时覆盖优先于数据库全局权重。
+        封禁/过期/停用账号会被自动排除。
 
         Returns:
             [(account_id, weight), ...]
-            
+
         Note:
             预构建权重列表,避免在发帖循环中重复查询数据库(N+1问题)
         """
@@ -648,15 +730,19 @@ class BatchPostManager:
         if all_accounts is None:
             all_accounts = await self.db.get_accounts()
         account_map = {acc.id: acc for acc in all_accounts}
-        
+
         result: list[tuple[int, int]] = []
         for acc_id in task.accounts:
+            acc_obj = account_map.get(acc_id)
+
+            # 终态账号直接排除，不参与加权选择
+            if acc_obj and acc_obj.status in self._EXCLUDED_STATUSES:
+                continue
+
             # 优先使用临时覆盖权重
             if acc_id in task.weight_override:
                 weight: int = max(1, min(10, task.weight_override[acc_id]))
             else:
-                # 从预加载的账号映射中读取权重
-                acc_obj = account_map.get(acc_id)
                 weight = acc_obj.post_weight if acc_obj else 5
             result.append((acc_id, weight))
         return result

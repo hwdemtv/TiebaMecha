@@ -11,11 +11,13 @@ from ... import __version__
 from ...core.ai_optimizer import AIOptimizer, _decrypt_api_key, _encrypt_api_key
 from ...core.link_manager import SmartLinkConnector
 from ...core.auth import get_auth_manager, AuthStatus
+from ...core.web_auth import is_password_set, set_password, check_password, clear_password
 from ..components.icons import (
     GPP_GOOD_ROUNDED, ARROW_BACK_IOS_NEW, SAVE_ROUNDED,
     VPN_KEY_ROUNDED, MEMORY_ROUNDED, NETWORK_CHECK,
     LINK_ROUNDED, TIMER_OUTLINED, AUTO_AWESOME,
-    OPEN_IN_NEW, WIFI_TETHERING_ROUNDED, LOGIN_ROUNDED
+    OPEN_IN_NEW, WIFI_TETHERING_ROUNDED, LOGIN_ROUNDED,
+    LOCK_ROUNDED, SECURITY
 )
 
 
@@ -57,7 +59,11 @@ class SettingsPage:
         # 获取硬件指纹
         am = await get_auth_manager()
         self._settings["hwid"] = await am.get_hwid()
-        
+
+        # 加载 Web 密码状态
+        pwd_set = await is_password_set(self.db)
+        self._settings["web_password_set"] = pwd_set
+
         await self.refresh_ui()
 
     async def refresh_ui(self):
@@ -77,7 +83,15 @@ class SettingsPage:
             self.slm_api_key_field.value = self._settings.get("slm_api_key", "")
             
             self.license_key_field.value = self._settings.get("license_key", "")
-            
+
+            # 更新密码状态
+            if self._settings.get("web_password_set"):
+                self.web_password_status.value = "已启用"
+                self.web_password_status.color = COLORS.GREEN
+            else:
+                self.web_password_status.value = "未设置"
+                self.web_password_status.color = COLORS.AMBER
+
             # 更新授权状态标签
             am = await get_auth_manager()
             if am.status == AuthStatus.PRO:
@@ -161,6 +175,33 @@ class SettingsPage:
             on_click=self._verify_license_online,
         )
 
+        # Web 密码管理字段
+        self.web_password_status = ft.Text("检测中...", size=12, color="onSurfaceVariant")
+        self.web_old_pwd_field = ft.TextField(
+            label="当前密码",
+            password=True,
+            can_reveal_password=True,
+            border_color="primary",
+            text_size=13,
+            width=250,
+        )
+        self.web_new_pwd_field = ft.TextField(
+            label="新密码",
+            password=True,
+            can_reveal_password=True,
+            border_color="primary",
+            text_size=13,
+            width=250,
+        )
+        self.web_confirm_pwd_field = ft.TextField(
+            label="确认新密码",
+            password=True,
+            can_reveal_password=True,
+            border_color="primary",
+            text_size=13,
+            width=250,
+        )
+
         # 标题区域
         header = ft.Row(
             controls=[
@@ -195,6 +236,7 @@ class SettingsPage:
                 ft.TextButton("网络", icon=NETWORK_CHECK, on_click=lambda e: self._scroll_to("network")),
                 ft.TextButton("短链", icon=LINK_ROUNDED, on_click=lambda e: self._scroll_to("link")),
                 ft.TextButton("自动化", icon=TIMER_OUTLINED, on_click=lambda e: self._scroll_to("auto")),
+                ft.TextButton("安全", icon=SECURITY, on_click=lambda e: self._scroll_to("security")),
             ], spacing=5, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=with_opacity(0.05, "primary"),
             border_radius=8,
@@ -335,6 +377,41 @@ class SettingsPage:
             ]),
         )
 
+        # 安全设置段
+        self.security_section = ft.Container(
+            key="security",
+            content=ft.Column([
+                self._create_section_title("访问安全 / WEB SECURITY", SECURITY),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Text("Web 控制台密码保护", size=12, color="onSurfaceVariant"),
+                            ft.Container(expand=True),
+                            self.web_password_status,
+                        ]),
+                        ft.Row([
+                            self.web_old_pwd_field,
+                            self.web_new_pwd_field,
+                            self.web_confirm_pwd_field,
+                        ], spacing=15),
+                        ft.Row([
+                            ft.FilledTonalButton(
+                                "修改密码",
+                                icon=LOCK_ROUNDED,
+                                on_click=self._change_password,
+                            ),
+                            ft.OutlinedButton(
+                                "关闭密码保护",
+                                icon=BLOCK,
+                                on_click=self._clear_password,
+                            ),
+                        ], spacing=10),
+                    ], spacing=10),
+                    padding=10,
+                ),
+            ]),
+        )
+
         # 保存按钮
         save_btn = create_gradient_button(
             text="保存所有更改",
@@ -359,6 +436,8 @@ class SettingsPage:
                     self.link_section,
                     ft.Divider(height=10, color="transparent"),
                     self.auto_section,
+                    ft.Divider(height=10, color="transparent"),
+                    self.security_section,
                     ft.Divider(height=10, color="transparent"),
                     # 底部：版本与保存
                     ft.Row([
@@ -388,6 +467,7 @@ class SettingsPage:
             "network": self.network_section,
             "link": self.link_section,
             "auto": self.auto_section,
+            "security": self.security_section,
         }
         section = section_map.get(key)
         if section and hasattr(section, 'key'):
@@ -529,6 +609,69 @@ class SettingsPage:
         })
 
         self._show_snackbar("配置已同步至核心数据库", "success")
+
+    async def _change_password(self, e):
+        """修改 Web 访问密码"""
+        old_pwd = self.web_old_pwd_field.value.strip() if self.web_old_pwd_field.value else ""
+        new_pwd = self.web_new_pwd_field.value.strip() if self.web_new_pwd_field.value else ""
+        confirm = self.web_confirm_pwd_field.value.strip() if self.web_confirm_pwd_field.value else ""
+
+        pwd_set = await is_password_set(self.db)
+
+        # 如果已设置密码，需要验证旧密码
+        if pwd_set:
+            if not old_pwd:
+                self._show_snackbar("请输入当前密码", "error")
+                return
+            if not await check_password(self.db, old_pwd):
+                self._show_snackbar("当前密码错误", "error")
+                return
+
+        if not new_pwd:
+            self._show_snackbar("请输入新密码", "error")
+            return
+
+        if len(new_pwd) < 4:
+            self._show_snackbar("新密码长度至少 4 位", "error")
+            return
+
+        if new_pwd != confirm:
+            self._show_snackbar("两次输入的新密码不一致", "error")
+            return
+
+        await set_password(self.db, new_pwd)
+        self._settings["web_password_set"] = True
+        self.web_password_status.value = "已启用"
+        self.web_password_status.color = COLORS.GREEN
+        self.web_old_pwd_field.value = ""
+        self.web_new_pwd_field.value = ""
+        self.web_confirm_pwd_field.value = ""
+        self.page.update()
+        self._show_snackbar("密码修改成功", "success")
+
+    async def _clear_password(self, e):
+        """关闭密码保护"""
+        pwd_set = await is_password_set(self.db)
+        if not pwd_set:
+            self._show_snackbar("当前未设置密码", "info")
+            return
+
+        old_pwd = self.web_old_pwd_field.value.strip() if self.web_old_pwd_field.value else ""
+        if not old_pwd:
+            self._show_snackbar("请输入当前密码以确认关闭", "error")
+            return
+
+        if not await check_password(self.db, old_pwd):
+            self._show_snackbar("密码错误", "error")
+            return
+
+        await clear_password(self.db)
+        self._settings["web_password_set"] = False
+        self.web_password_status.value = "未设置"
+        self.web_password_status.color = COLORS.AMBER
+        self.web_old_pwd_field.value = ""
+        self.page.update()
+        self._show_snackbar("密码保护已关闭", "success")
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)
