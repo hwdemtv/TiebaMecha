@@ -86,7 +86,7 @@ class SignPage:
                     raw = str(await self.db.get_setting(key, default))
                     try:
                         return str(int(float(raw))) if float(raw).is_integer() else raw
-                    except: return raw
+                    except (ValueError, TypeError): return raw
 
                 self.delay_min_input.value = await _get_fmt_val("sign_delay_min", "5")
                 self.delay_max_input.value = await _get_fmt_val("sign_delay_max", "15")
@@ -522,7 +522,10 @@ class SignPage:
             await self._do_sign_matrix()
 
     async def _do_sign_single(self):
-        if self._is_signing or (self._stats['total'] - self._stats['success']) == 0: return
+        if self._is_signing: return
+        if self._stats['total'] == 0 or (self._stats['total'] - self._stats['success']) == 0:
+            self._show_snackbar("没有需要签到的贴吧", "info")
+            return
         
         self._is_signing = True
         self._stop_requested = False
@@ -535,12 +538,12 @@ class SignPage:
         self.page.update()
 
         # 修复：分母应为队列中所有贴吧的总数，因为 sign_all_forums 会遍历所有贴吧
-        total = self._stats['total']
+        total = max(self._stats['total'], 1)
         current = 0
         try:
             d_min = float(self.delay_min_input.value)
             d_max = float(self.delay_max_input.value)
-        except:
+        except (ValueError, TypeError):
             d_min, d_max = 5.0, 15.0
 
         try:
@@ -550,12 +553,12 @@ class SignPage:
                     break
                     
                 current += 1
-                self.progress_bar.value = current / total
+                self.progress_bar.value = min(current / total, 1.0)
                 self.status_text.value = f"正在签到: {result.fname} ({current}/{total})"
                 
                 # --- 方案 A: 跨页面进度广播 ---
                 self.page.pubsub.send_all_on_topic("sign_progress", {
-                    "value": current / total,
+                    "value": min(current / total, 1.0),
                     "text": f"正在签到: {result.fname} ({current}/{total})",
                     "status": "running"
                 })
@@ -582,7 +585,10 @@ class SignPage:
         await self.load_data()
 
     async def _do_sign_matrix(self):
-        if self._is_signing or not self._accounts: return
+        if self._is_signing: return
+        if not self._accounts or not self._matrix_tasks:
+            self._show_snackbar("矩阵中没有需要签到的贴吧", "info")
+            return
         
         self._is_signing = True
         self._stop_requested = False
@@ -599,11 +605,11 @@ class SignPage:
             d_max = float(self.delay_max_input.value)
             ad_min = float(self.acc_delay_min_input.value)
             ad_max = float(self.acc_delay_max_input.value)
-        except:
+        except (ValueError, TypeError):
             d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
-        # 修复：矩阵模式下分母应为全矩阵任务总数，进度应按贴吧任务计数
-        total_tasks = len(self._matrix_tasks)
+        # 矩阵模式：以 _matrix_tasks 作为预估总数，实际进度按 yield 结果计数
+        total_est = max(len(self._matrix_tasks), 1)
         current_task_idx = 0
 
         try:
@@ -611,19 +617,20 @@ class SignPage:
                 if self._stop_requested:
                     self._show_snackbar("矩阵签到流已由用户手动中止", "warning")
                     break
-                    
+
                 current_task_idx += 1
-                    
-                self.progress_bar.value = current_task_idx / total_tasks
-                self.status_text.value = f"[{current_task_idx}/{total_tasks}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
-                
+                progress = min(current_task_idx / total_est, 1.0)
+
+                self.progress_bar.value = progress
+                self.status_text.value = f"[{current_task_idx}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
+
                 # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
                 self.page.pubsub.send_all_on_topic("sign_progress", {
-                    "value": current_task_idx / total_tasks,
+                    "value": progress,
                     "text": f"正在矩阵签到: {result.get('fname')}",
                     "status": "running"
                 })
-                
+
                 self.page.update()
             
             if not self._stop_requested:

@@ -6,10 +6,9 @@ from ..db.crud import Database
 
 class SmartLinkConnector:
     """连接到 smart-link-manager 的官方 REST API 连接器 (带本地持久化缓存)"""
-    
+
     def __init__(self, db: Database):
         self.db = db
-        self.client = httpx.AsyncClient(timeout=10.0)
 
     async def _get_config(self) -> Dict[str, str]:
         """从 TiebaMecha 设置中获取 API 配置"""
@@ -113,6 +112,3 @@ class SmartLinkConnector:
             })
         
         return result
-
-    async def close(self):
-        await self.client.aclose()

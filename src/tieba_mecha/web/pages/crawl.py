@@ -205,7 +205,7 @@ class CrawlPage:
             if is_threads:
                 try:
                     pages = int(self.pages_count.value)
-                except:
+                except (ValueError, TypeError):
                     pages = 5
 
                 async for p in crawl_threads(self.db, target, pages=pages):

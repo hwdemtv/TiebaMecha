@@ -305,9 +305,6 @@ async def add_thread(
     title: str,
     content: str,
 ) -> tuple[bool, str, int]:
-    from .obfuscator import Obfuscator
-    import httpx
-    import asyncio
     """
     发帖
 
@@ -320,6 +317,8 @@ async def add_thread(
     Returns:
         (是否成功, 消息, tid)
     """
+    from .obfuscator import Obfuscator
+    import httpx
     creds = await get_account_credentials(db)
     if not creds:
         return False, "未找到账号凭证", 0
@@ -328,7 +327,6 @@ async def add_thread(
 
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         try:
-            import httpx
             # 通过 aiotieba 获取包含 fid 和 tbs 在内的上下文环境
             await client.get_self_info()
             if not getattr(client.account, 'tbs', None):
@@ -369,6 +367,9 @@ async def add_thread(
             # 【核心层】反风控干扰触发 (仅混淆中文字符防抽，保留原意)
             safe_title = Obfuscator.inject_zero_width_chars(title, density=0.2)
             safe_content = Obfuscator.humanize_spacing(Obfuscator.inject_zero_width_chars(content, density=0.3))
+
+            # 贴吧API需要\r\n作为换行符，而不是\n
+            safe_content = safe_content.replace('\n', '\r\n')
 
             data = {
                 "ie": "utf-8",

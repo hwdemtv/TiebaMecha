@@ -31,6 +31,8 @@ class AccountsPage:
         self._matrix_selected_fnames: set[str] = set()
         self._matrix_banned_filter = False  # 封禁筛选开关
         self._matrix_deleted_filter = False  # 被删筛选开关
+        self._banned_forum_details = []
+        self._banned_forum_map: dict[str, list[dict]] = {}
         self._active_tab_index = 0
         
         # 存活分析数据
@@ -57,7 +59,11 @@ class AccountsPage:
         # 加载存活统计数据
         self._survival_stats = await self.db.get_survival_stats()
         self._survival_by_account = await self.db.get_survival_by_account()
-        
+
+        # [Fix 2] 预加载异常事件数据，避免首次进入 tab 时空白
+        if hasattr(self, "exception_list"):
+            await self._load_exception_events()
+
         self.refresh_ui()
 
     async def _refresh_matrix_stats(self):
@@ -100,11 +106,10 @@ class AccountsPage:
                 self.page.update()
         
         # 存活分析
-        if hasattr(self, "survival_list"):
+        if hasattr(self, "survival_list") and current_tab == 2:
             self.survival_list.controls = self._build_survival_items()
             self._update_survival_header()
-            if current_tab == 2:
-                self.page.update()
+            self.page.update()
         
         # 异常记录
         if hasattr(self, "exception_list") and current_tab == 3:
@@ -1524,7 +1529,7 @@ class AccountsPage:
                                 ], spacing=8),
                                 ft.Row([
                                     ft.Icon(icons.FINGERPRINT, size=12, color="onSurfaceVariant"),
-                                    ft.Text(f"UID: {acc.user_id}", color="onSurfaceVariant", size=11),
+                                    ft.Text(f"UID: {acc.user_id or '待验证'}", color="onSurfaceVariant" if acc.user_id else "error", size=11),
                                     ft.Container(width=10),
                                     ft.Icon(icons.PHONELINK_LOCK_ROUNDED, size=12, color="onSurfaceVariant"),
                                     ft.Text(f"标识: {getattr(acc, 'cuid', '')[:8]}...", color="onSurfaceVariant", size=11, tooltip=f"完整指纹: {getattr(acc, 'cuid', '')}"),

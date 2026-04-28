@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from ..components import create_gradient_button
 from ..utils import with_opacity
-from ...core.ai_optimizer import AIOptimizer
+from ...core.ai_optimizer import AIOptimizer, _decrypt_api_key, _encrypt_api_key
 from ...core.link_manager import SmartLinkConnector
 from ...core.auth import get_auth_manager, AuthStatus
 from ..components.icons import (
@@ -26,13 +26,16 @@ class SettingsPage:
         self.db = db
         self.on_navigate = on_navigate
         self._settings = {}
+        self._ai_key_was_encrypted = False  # 跟踪加载时 API Key 是否已加密
 
     async def load_data(self):
         """同步数据库中的配置项"""
         if not self.db: return
         
-        # 加载核心配置
-        self._settings["ai_api_key"] = await self.db.get_setting("ai_api_key")
+        # 加载核心配置（API Key 需解密显示）
+        raw_key = await self.db.get_setting("ai_api_key", "")
+        self._ai_key_was_encrypted = bool(raw_key)
+        self._settings["ai_api_key"] = _decrypt_api_key(raw_key)
         self._settings["ai_base_url"] = await self.db.get_setting("ai_base_url", "https://open.bigmodel.cn/api/paas/v4/")
         self._settings["ai_model"] = await self.db.get_setting("ai_model", "glm-4-flash")
         self._settings["ai_system_prompt"] = await self.db.get_setting("ai_system_prompt", "")
@@ -404,8 +407,8 @@ class SettingsPage:
         )
         
         if success:
-            # 自动保存成功的配置
-            await self.db.set_setting("ai_api_key", self.ai_key_field.value)
+            # 自动保存成功的配置（API Key 加密存储）
+            await self.db.set_setting("ai_api_key", _encrypt_api_key(self.ai_key_field.value))
             await self.db.set_setting("ai_base_url", self.ai_url_field.value)
             await self.db.set_setting("ai_model", self.ai_model_field.value)
             await self.db.set_setting("ai_system_prompt", self.ai_prompt_field.value)
@@ -464,8 +467,8 @@ class SettingsPage:
     async def _do_save(self, e):
         if not self.db: return
         
-        # 同步各字段到数据库
-        await self.db.set_setting("ai_api_key", self.ai_key_field.value)
+        # 同步各字段到数据库（API Key 加密存储）
+        await self.db.set_setting("ai_api_key", _encrypt_api_key(self.ai_key_field.value))
         await self.db.set_setting("ai_base_url", self.ai_url_field.value)
         await self.db.set_setting("ai_model", self.ai_model_field.value)
         await self.db.set_setting("ai_system_prompt", self.ai_prompt_field.value)

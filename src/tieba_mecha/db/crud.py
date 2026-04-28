@@ -107,7 +107,13 @@ class Database:
             batch_migrations = [
                 ("fnames_json", "TEXT DEFAULT '[]'"),
                 ("strategy", "VARCHAR(20) DEFAULT 'round_robin'"),
+                ("pairing_mode", "VARCHAR(20) DEFAULT 'random'"),
                 ("ai_persona", "VARCHAR(50) DEFAULT 'normal'"),
+                ("schedule_type", "VARCHAR(20) DEFAULT 'once'"),
+                ("interval_hours", "INTEGER DEFAULT 0"),
+                ("schedule_day_of_week", "INTEGER DEFAULT NULL"),
+                ("reset_strategy", "VARCHAR(20) DEFAULT 'new_only'"),
+                ("cycle_count", "INTEGER DEFAULT 0"),
             ]
             for col_name, col_type in batch_migrations:
                 await self._safe_add_column(conn, "batch_post_tasks", col_name, col_type, batch_cols)
@@ -131,6 +137,7 @@ class Database:
                 ("bump_account_ids", "TEXT DEFAULT NULL"),
                 ("bump_account_index", "INTEGER DEFAULT 0"),
                 ("bump_last_date", "DATE DEFAULT NULL"),
+                ("task_id", "VARCHAR(50) DEFAULT NULL"),
             ]
             for col_name, col_type in material_migrations:
                 await self._safe_add_column(conn, "material_pool", col_name, col_type, material_cols)
@@ -489,15 +496,18 @@ class Database:
             await session.refresh(forum)
             return forum
 
-    async def get_forums(self, account_id: int | None = None) -> list[Forum]:
+    async def get_forums(self, account_id: int | None = None, *, include_hidden: bool = False) -> list[Forum]:
         """获取贴吧列表"""
         async with self.async_session() as session:
-            if account_id:
-                result = await session.execute(
-                    select(Forum).where(Forum.account_id == account_id).order_by(Forum.fname)
-                )
-            else:
-                result = await session.execute(select(Forum).order_by(Forum.fname))
+            conditions = []
+            if account_id is not None:
+                conditions.append(Forum.account_id == account_id)
+            if not include_hidden:
+                conditions.append(Forum.is_hidden == False)
+            stmt = select(Forum)
+            if conditions:
+                stmt = stmt.where(*conditions)
+            result = await session.execute(stmt.order_by(Forum.fname))
             return list(result.scalars().all())
 
     async def get_all_unique_fnames(self) -> list[str]:
@@ -653,6 +663,33 @@ class Database:
                 # 被封后自动关闭发帖许可，防止调度器再次选中
                 forum.is_post_target = False
                 await session.commit()
+
+    async def unban_forum(self, account_id: int, fname: str) -> bool:
+        """解除账号在该贴吧的封禁状态，恢复发帖许可"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Forum).where(Forum.account_id == account_id, Forum.fname == fname)
+            )
+            forum = result.scalar_one_or_none()
+            if forum and forum.is_banned:
+                forum.is_banned = False
+                forum.ban_reason = ""
+                forum.is_post_target = True
+                await session.commit()
+                return True
+            return False
+
+    async def unban_forum_globally(self, fname: str) -> int:
+        """解除所有账号在指定贴吧的封禁状态"""
+        from sqlalchemy import update as sa_update
+        async with self.async_session() as session:
+            result = await session.execute(
+                sa_update(Forum)
+                .where(Forum.fname == fname, Forum.is_banned == True)
+                .values(is_banned=False, ban_reason="", is_post_target=True)
+            )
+            await session.commit()
+            return result.rowcount or 0
 
     async def delete_forum_by_name(self, account_id: int, fname: str) -> bool:
         """根据贴吧名删除指定账号的贴吧记录"""
@@ -1047,6 +1084,53 @@ class Database:
             )
             return list(result.scalars().all())
 
+    async def reset_materials_for_task(self, strategy: str = "reuse", restore_original: bool = False, task_id: str | None = None) -> int:
+        """
+        为循环任务重置物料状态。
+
+        Args:
+            strategy: "reuse"=重置复用
+            restore_original: 是否恢复原始内容（AI改写场景下，下次发帖会重新改写）
+            task_id: 可选，限定只重置该任务关联的物料。为 None 时重置所有物料（向后兼容）
+
+        Returns:
+            重置的物料数量
+        """
+        async with self.async_session() as session:
+            values = {
+                "status": "pending",
+                "last_error": "",
+            }
+            if restore_original:
+                # 恢复原始内容，标记待改写；下次发帖时 AI 会重新改写
+                values["ai_status"] = "none"
+
+            where_conditions = [MaterialPool.status.in_(["success", "failed"])]
+            if task_id:
+                where_conditions.append(MaterialPool.task_id == task_id)
+
+            result = await session.execute(
+                update(MaterialPool).where(*where_conditions).values(**values)
+            )
+            # 恢复原文：将 original_title/original_content 写回 title/content
+            if restore_original:
+                restore_conditions = [
+                    MaterialPool.status == "pending",
+                    MaterialPool.original_title != None,
+                ]
+                if task_id:
+                    restore_conditions.append(MaterialPool.task_id == task_id)
+                materials = await session.execute(
+                    select(MaterialPool).where(*restore_conditions)
+                )
+                for m in materials.scalars().all():
+                    if m.original_title:
+                        m.title = m.original_title
+                    if m.original_content:
+                        m.content = m.original_content
+            await session.commit()
+            return result.rowcount
+
     async def update_batch_task(self, task_id: int, **kwargs) -> None:
         """更新任务状态及进度"""
         async with self.async_session() as session:
@@ -1109,17 +1193,39 @@ class Database:
     # ========== MaterialPool CRUD ==========
     async def add_materials_bulk(self, pairs: list[tuple[str, str]]) -> int:
         """批量添加物料，返回添加成功的条数，执行基于内容的去重逻辑"""
+        if not pairs:
+            return 0
+
         added = 0
         async with self.async_session() as session:
-            result = await session.execute(select(MaterialPool.content))
-            existing_contents = set(result.scalars().all())
+            # 分批查询现有内容，避免一次性加载全部到内存
+            # 每批查询1000条，使用内容的前100字符进行快速匹配
+            batch_size = 1000
+            existing_contents = set()
 
+            # 提取所有待添加内容的前缀用于快速匹配
+            content_prefixes = {c[:100] for _, c in pairs}
+
+            # 分批查询数据库
+            for prefix_batch_start in range(0, len(content_prefixes), batch_size):
+                prefix_batch = list(content_prefixes)[prefix_batch_start:prefix_batch_start + batch_size]
+                if prefix_batch:
+                    # 使用 LIKE 查询可能匹配的记录
+                    from sqlalchemy import or_
+                    conditions = [MaterialPool.content.like(f"{p}%") for p in prefix_batch]
+                    result = await session.execute(
+                        select(MaterialPool.content).where(or_(*conditions))
+                    )
+                    existing_contents.update(result.scalars().all())
+
+            # 添加新物料
             for t, c in pairs:
                 if c not in existing_contents:
                     material = MaterialPool(title=t, content=c)
                     session.add(material)
                     existing_contents.add(c)
                     added += 1
+
             if added > 0:
                 await session.commit()
         return added
@@ -1414,14 +1520,15 @@ class Database:
             return False
 
     async def update_material_status(
-        self, 
-        material_id: int, 
-        status: str, 
-        last_error: str | None = None, 
-        posted_fname: str | None = None, 
+        self,
+        material_id: int,
+        status: str,
+        last_error: str | None = None,
+        posted_fname: str | None = None,
         posted_tid: int | None = None,
         posted_account_id: int | None = None,
-        posted_time: datetime | None = None
+        posted_time: datetime | None = None,
+        task_id: str | None = None
     ) -> None:
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
@@ -1430,16 +1537,17 @@ class Database:
                 m.last_used_at = datetime.now()
                 if posted_time is not None:
                     m.posted_time = posted_time
-                
+
                 # [修复] 状态重置为 pending 时清空自顶计数与记录；成功发帖时保留历史自顶数据
                 if status == "pending":
                     m.bump_count = 0
                     m.last_bumped_at = None
-                
+
                 if last_error is not None: m.last_error = last_error
                 if posted_fname is not None: m.posted_fname = posted_fname
                 if posted_tid is not None: m.posted_tid = posted_tid
                 if posted_account_id is not None: m.posted_account_id = posted_account_id
+                if task_id is not None: m.task_id = task_id
                 await session.commit()
 
     async def update_material_survival_status(self, material_id: int, status: str, death_reason: str = "") -> None:
@@ -1479,15 +1587,12 @@ class Database:
                             forum_obj.ban_reason = ban_reason
                             forum_obj.is_post_target = False
                     else:
-                        import random
-                        session.add(Forum(
-                            fid=random.randint(1, 2**31 - 1),
-                            fname=m.posted_fname,
-                            account_id=m.posted_account_id,
-                            is_banned=True,
-                            ban_reason=ban_reason,
-                            is_post_target=False,
-                        ))
+                        # 不创建虚假的Forum记录，仅记录封禁信息到日志
+                        # 避免使用随机FID导致数据冲突
+                        logger.warning(
+                            f"物料 {material_id} 封禁记录：账号 {m.posted_account_id} 在 {m.posted_fname} 被封禁，"
+                            f"原因: {ban_reason}。未创建Forum记录（需要真实的FID）。"
+                        )
 
                 await session.commit()
 
@@ -1547,11 +1652,12 @@ class Database:
 
     async def auto_sync_post_target(self) -> int:
         """根据 is_banned 和 deleted_count 自动同步 is_post_target 字段。
-        
-        自动判定规则：
-        - 安全 (is_post_target=True): 未被封禁 且 无被吧务删帖记录
-        - 不安全 (is_post_target=False): 被封禁 或 有被吧务删帖记录
-        
+
+        自动判定规则（只关闭，不自动打开，避免覆盖用户手动设置）：
+        - 被封禁 → is_post_target=False
+        - 有被吧务删帖记录 → is_post_target=False
+        - 安全状态不自动恢复，需用户手动在 UI 中重新开启
+
         Returns: 更新的记录数
         """
         from sqlalchemy import func, update as sa_update
@@ -1570,7 +1676,7 @@ class Database:
             )
             dead_result = await session.execute(dead_stmt)
             deleted_fnames = {row.posted_fname for row in dead_result.all()}
-            
+
             updated = 0
             # 1. 封禁的贴吧 → is_post_target=False
             ban_result = await session.execute(
@@ -1579,7 +1685,7 @@ class Database:
                 .values(is_post_target=False)
             )
             updated += ban_result.rowcount
-            
+
             # 2. 有被删帖记录的贴吧 → is_post_target=False
             if deleted_fnames:
                 del_result = await session.execute(
@@ -1588,17 +1694,10 @@ class Database:
                     .values(is_post_target=False)
                 )
                 updated += del_result.rowcount
-            
-            # 3. 未被封禁且无删帖记录的贴吧 → is_post_target=True
-            safe_stmt = sa_update(Forum).where(
-                Forum.is_banned == False,
-                Forum.is_post_target == False,
-            )
-            if deleted_fnames:
-                safe_stmt = safe_stmt.where(Forum.fname.notin_(deleted_fnames))
-            safe_result = await session.execute(safe_stmt.values(is_post_target=True))
-            updated += safe_result.rowcount
-            
+
+            # 不再自动恢复 is_post_target=True，避免覆盖用户手动设置
+            # 用户可通过 UI 的"批量切换火力"或单贴吧开关手动重新开启
+
             await session.commit()
             return updated
 
@@ -1957,8 +2056,8 @@ class Database:
 
             if is_success:
                 pool.fail_count = 0  # 成功 → 清零连续失败
-                pool.success_count = (pool.success_count or 0) + 1  # 实时累加命中数
-                logger.info(f"[靶场] {fname}: 发帖成功, fail_count 归零, 击穿数={pool.success_count}")
+                # success_count 由 backfill_success_count() 从 BatchPostLog 统计，不在此递增
+                logger.info(f"[靶场] {fname}: 发帖成功, fail_count 归零")
             else:
                 pool.fail_count = (pool.fail_count or 0) + 1
                 pool.last_fail_reason = error_reason
@@ -2030,14 +2129,33 @@ class Database:
             await session.commit()
             return len(fnames)
 
-    async def toggle_forum_post_target(self, fid: int, is_post_target: bool) -> None:
-        """切换本号某个特定贴吧的发帖许可状态"""
+    async def toggle_forum_post_target(self, forum_id: int, is_post_target: bool) -> None:
+        """切换贴吧的发帖许可状态（按 fname 级联，多号同开同关）"""
         async with self.async_session() as session:
-            result = await session.execute(select(Forum).where(Forum.fid == fid))
-            # 级联更新该 fid 绑定的所有记录（如果多号关注同一个吧，同开同关）
-            for f in result.scalars().all():
+            # 先通过 PK 找到记录，获取 fname，再按 fname 级联更新
+            result = await session.execute(select(Forum).where(Forum.id == forum_id))
+            forum = result.scalar_one_or_none()
+            if not forum:
+                return
+            # 级联更新同一贴吧名的所有记录
+            cascade_result = await session.execute(
+                select(Forum).where(Forum.fname == forum.fname)
+            )
+            for f in cascade_result.scalars().all():
                 f.is_post_target = is_post_target
             await session.commit()
+
+    async def toggle_forum_post_target_by_fname(self, fname: str, is_post_target: bool) -> int:
+        """按贴吧名切换所有账号的发帖许可状态，返回更新的记录数"""
+        from sqlalchemy import update as sa_update
+        async with self.async_session() as session:
+            result = await session.execute(
+                sa_update(Forum)
+                .where(Forum.fname == fname)
+                .values(is_post_target=is_post_target)
+            )
+            await session.commit()
+            return result.rowcount or 0
 
     # ========== Notification CRUD ==========
 

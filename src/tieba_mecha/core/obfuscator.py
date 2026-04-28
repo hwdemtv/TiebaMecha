@@ -42,7 +42,8 @@ class Obfuscator:
         
         # 按单个字符迭代（但需要避开 http/https 块）
         # 简单策略：利用正则寻找完整的 URL 并先替换为占位符，处理完再换回来。
-        url_pattern = re.compile(r'(https?://[^\s]+|[a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+\.?)')
+        # 仅匹配完整的URL（以http/https开头），避免误匹配普通域名文本
+        url_pattern = re.compile(r'https?://[^\s<>"\')\]，。、！]+')
         urls = url_pattern.findall(text)
         
         # 提取真实的网址字符串

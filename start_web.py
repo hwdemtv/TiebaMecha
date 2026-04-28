@@ -20,7 +20,12 @@ if _src_dir not in os.environ.get("PYTHONPATH", ""):
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
-os.environ["FLET_SECRET_KEY"] = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY") or "cyber_mecha_secret_777"
+import secrets as _secrets
+_flet_key = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY")
+if not _flet_key:
+    _flet_key = _secrets.token_hex(32)
+    print("[WARN] 未设置 TIEBA_MECHA_SECRET_KEY，已生成随机密钥（重启后失效，建议配置 .env）")
+os.environ["FLET_SECRET_KEY"] = _flet_key
 
 import uvicorn.config as _uvc
 _orig_configure_logging = _uvc.Config.configure_logging
@@ -85,11 +90,14 @@ def run_app(port: int = 9006):
     upload_dir = os.path.abspath("uploads")
     os.makedirs(upload_dir, exist_ok=True)
 
-    # 获取用于 Web 上传加密的密钥 (优先从环境变量读取)
-    secret_key = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY") or "fallback_secret_key"
+    # 获取用于 Web 上传加密的密钥 (优先从环境变量读取，已在模块加载时设置)
+    secret_key = os.getenv("FLET_SECRET_KEY") or os.getenv("TIEBA_MECHA_SECRET_KEY")
+    if not secret_key:
+        import secrets as _secrets2
+        secret_key = _secrets2.token_hex(32)
+        print("[WARN] 未设置 TIEBA_MECHA_SECRET_KEY，已生成随机密钥（重启后失效）")
 
     # 显式注入 Flet 要求的环境变量，这是解决 Web 上传报错最可靠的方法
-    # 注意：旧版 Flet 只通过环境变量读取 secret_key，不接受参数传递
     os.environ["FLET_SECRET_KEY"] = secret_key
     os.environ["FLET_UPLOAD_DIR"] = upload_dir
 

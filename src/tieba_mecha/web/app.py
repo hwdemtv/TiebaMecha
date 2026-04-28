@@ -210,7 +210,7 @@ class TiebaMechaApp:
 
         # 启动后台任务
         self.page.run_task(self._account_heartbeat)
-        self.page.run_task(self._batch_scheduler)
+        # 注：批量发帖调度已统一由 daemon.py 的 do_batch_post_tasks() 处理，不再此处重复调度
         self.page.run_task(self._proxy_monitor) # 挂载代理智能监控
         self.page.run_task(self._notification_sync)  # 通知同步
         self.page.run_task(self._update_checker)  # 更新检测
@@ -294,95 +294,6 @@ class TiebaMechaApp:
             except Exception as e:
                 await log_error(f"心跳任务异常: {str(e)}")
                 await asyncio.sleep(300) # 出错后 5 分钟重试
-
-    async def _batch_scheduler(self):
-        """批量任务后台扫描调度引擎"""
-        from ..core.logger import log_info, log_warn, log_error
-        from ..core.batch_post import BatchPostManager, BatchPostTask
-        manager = BatchPostManager(self.db)
-        import json
-        
-        while True:
-            try:
-                pending_tasks = await self.db.get_pending_batch_tasks()
-                if pending_tasks:
-                    await log_info(f"发现 {len(pending_tasks)} 个可执行定时任务")
-                    
-                    for t in pending_tasks:
-                        # 解析组合的 strategy 参数 (e.g. "round_robin:strict")
-                        strategy_parts = t.strategy.split(":")
-                        real_strategy = strategy_parts[0]
-                        pairing_mode = strategy_parts[1] if len(strategy_parts) > 1 else "random"
-
-                        # 构造核心逻辑所需的任务对象
-                        fnames_list = json.loads(t.fnames_json) if getattr(t, 'fnames_json', None) and t.fnames_json != "[]" else [t.fname]
-                        core_task = BatchPostTask(
-                            id=str(t.id),
-                            fname=t.fname,
-                            fnames=fnames_list,
-                            accounts=json.loads(t.accounts_json),
-                            strategy=real_strategy,
-                            pairing_mode=pairing_mode,
-                            delay_min=t.delay_min,
-                            delay_max=t.delay_max,
-                            use_ai=t.use_ai,
-                            total=t.total
-                        )
-                        
-                        # 设置为运行中，防止重复拾取
-                        await self.db.update_batch_task(t.id, status="running")
-                        
-                        # 开启异步发帖协程
-                        async def run_and_update(origin_t, c_task):
-                            has_error = False
-                            async for update in manager.execute_task(c_task):
-                                # 同步进度到数据库
-                                task_status = "running"
-                                if update["status"] != "success":
-                                    task_status = "failed"
-                                    has_error = True
-                                    
-                                await self.db.update_batch_task(
-                                    origin_t.id, 
-                                    progress=update.get("progress", 0),
-                                    status=task_status
-                                )
-                            
-                            # 最终完成状态界定
-                            final_status = "failed" if has_error else "completed"
-                            await self.db.update_batch_task(origin_t.id, status=final_status)
-                            
-                            # 🚨 定时重复派生机制
-                            if getattr(origin_t, 'interval_hours', 0) > 0:
-                                from datetime import timedelta, datetime
-                                next_time = datetime.now() + timedelta(hours=origin_t.interval_hours)
-                                
-                                await log_info(f"任务周期重复触发: {origin_t.interval_hours} 小时后执行下一班次 ({next_time.strftime('%m-%d %H:%M')})")
-                                
-                                await self.db.add_batch_task(
-                                    fname=origin_t.fname,
-                                    fnames_json=origin_t.fnames_json,
-                                    titles_json=origin_t.titles_json,
-                                    contents_json=origin_t.contents_json,
-                                    accounts_json=origin_t.accounts_json,
-                                    strategy=origin_t.strategy,
-                                    total=origin_t.total,
-                                    delay_min=origin_t.delay_min,
-                                    delay_max=origin_t.delay_max,
-                                    use_ai=origin_t.use_ai,
-                                    interval_hours=origin_t.interval_hours,
-                                    schedule_time=next_time,
-                                    status="pending"
-                                )
-                        
-                        self.page.run_task(run_and_update, t, core_task)
-                
-                await asyncio.sleep(60) # 每分钟扫描一次
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                await log_error(f"调度器运行时异常: {str(e)}")
-                await asyncio.sleep(300)
 
     async def _proxy_monitor(self):
         """代理池智能监控与自动维护引擎（含账号联动挂起/恢复）"""

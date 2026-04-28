@@ -37,6 +37,32 @@ class ForumInfo:
     level: int = 0
 
 
+# 错误码常量
+ERR_ALREADY_SIGNED = 160002
+ERR_FORUM_INVALID = (340006, 340001)
+ERR_FORUM_BANNED = 3250004
+
+
+def _parse_sign_result(result_raw):
+    """
+    解析贴吧签到 API 返回值，统一判定成功/已签/失败/无效。
+
+    Returns:
+        (success: bool, message: str, is_already_signed: bool, is_forum_invalid: bool, err_code: int)
+    """
+    err = getattr(result_raw, 'err', None)
+    err_code = err.code if err else 0
+
+    is_already_signed = err and err_code == ERR_ALREADY_SIGNED
+    is_forum_invalid = err and err_code in (*ERR_FORUM_INVALID, ERR_FORUM_BANNED)
+
+    if result_raw or is_already_signed:
+        return True, "今日已签到" if is_already_signed else "签到成功", is_already_signed, is_forum_invalid, err_code
+    if is_forum_invalid:
+        return False, f"贴吧已失效 ({err_code})", is_already_signed, is_forum_invalid, err_code
+    return False, str(err) if err else "签到失败", is_already_signed, is_forum_invalid, err_code
+
+
 async def get_follow_forums(db: Database, account_id: int | None = None) -> list[ForumInfo]:
     creds = await get_account_credentials(db, account_id)
     if not creds:
@@ -63,8 +89,17 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
                 user_info = await client.get_self_info()
                 if user_info: break
             except Exception as e:
-                if attempt == max_retries - 1: raise
-                wait = (attempt + 1) * 2
+                # 区分可重试异常和不可重试异常
+                error_msg = str(e).lower()
+                # 不可重试的异常：认证错误、权限错误等
+                non_retryable = any(keyword in error_msg for keyword in [
+                    "auth", "token", "credential", "permission", "denied",
+                    "登录", "认证", "权限", "cookie", "bduss"
+                ])
+                if non_retryable or attempt == max_retries - 1:
+                    raise
+                # 指数退避：2s, 4s, 8s...
+                wait = (2 ** attempt) * 2
                 await log_warn(f"获取用户信息失败 (尝试 {attempt+1}/{max_retries})，{wait}s 后重试: {e}")
                 await asyncio.sleep(wait)
 
@@ -81,7 +116,8 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
                     if not result.err: break
                 except Exception as e:
                     if attempt == max_retries - 1: break
-                    wait = (attempt + 1) * 2
+                    # 指数退避：2s, 4s, 8s...
+                    wait = (2 ** attempt) * 2
                     await log_warn(f"获取贴吧列表失败 (第 {pn} 页, 尝试 {attempt+1}/{max_retries})，{wait}s 后重试: {e}")
                     await asyncio.sleep(wait)
 
@@ -112,6 +148,7 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
 async def sync_forums_to_db(db: Database) -> int:
     """
     同步全域贴吧：遍历所有矩阵账号，将所有关注贴吧推入数据库
+    仅新增和更新，不删除已失效贴吧（保留签到历史数据）。
     """
     accounts = await db.get_matrix_accounts()
     if not accounts:
@@ -125,9 +162,9 @@ async def sync_forums_to_db(db: Database) -> int:
             # 获取服务器最新的关注列表
             forums = await get_follow_forums(db, account.id)
             server_fids = {f.fid for f in forums}
-            
-            # 获取本地数据库已有的贴吧
-            existing = await db.get_forums(account.id)
+
+            # 获取本地数据库已有的贴吧 (含已隐藏的，用于对比检测取消关注)
+            existing = await db.get_forums(account.id, include_hidden=True)
             existing_fids = {f.fid for f in existing}
 
             # 1. 处理新增与更新
@@ -149,15 +186,24 @@ async def sync_forums_to_db(db: Database) -> int:
                         account_id=account.id,
                         level=forum.level,
                     )
-            
-            # 2. 处理删除 (逻辑镜像同步)：移除已经不再关注的贴吧
+
+            # 2. 标记已不再关注的贴吧为隐藏（保留历史数据，不自动删除）
             stale_fids = existing_fids - server_fids
             if stale_fids:
-                await db.delete_forums_by_fids(account.id, list(stale_fids))
-                await log_info(f"账号 [{account.name}] 清理了 {len(stale_fids)} 个失效贴吧")
-            
+                from ..db.models import Forum
+                async with db.async_session() as session:
+                    from sqlalchemy import select, update as sa_update
+                    stmt = (
+                        sa_update(Forum)
+                        .where(Forum.account_id == account.id, Forum.fid.in_(list(stale_fids)))
+                        .values(is_hidden=True)
+                    )
+                    await session.execute(stmt)
+                    await session.commit()
+                await log_info(f"账号 [{account.name}] 标记了 {len(stale_fids)} 个已取消关注的贴吧（历史数据已保留）")
+
             total_added += added
-            await log_info(f"账号 [{account.name}] 同博完毕 | 新增 {added} 个")
+            await log_info(f"账号 [{account.name}] 同步完毕 | 新增 {added} 个")
         except Exception as e:
             await log_error(f"同步账号 [{account.name}] 时发生异常: {str(e)}")
 
@@ -184,23 +230,12 @@ async def sign_forum(db: Database, fname: str) -> SignResult:
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         result = await client.sign_forum(fname)
 
-        # 160002 为"已签到"，在业务逻辑上视为成功
-        is_already_signed = hasattr(result, 'err') and result.err and result.err.code == 160002
-        # 340006/340001 表示贴吧已删除/封禁；3250004 表示账号在本项目被封禁
-        is_forum_invalid = hasattr(result, 'err') and result.err and result.err.code in (340006, 340001, 3250004)
+        success, msg, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(result)
 
-        if result or is_already_signed:
-            msg = "签到成功" if not is_already_signed else "今日已签到"
-            success = True
+        if success:
             await log_info(f"手动签到成功: {fname} ({msg})")
-        elif is_forum_invalid:
-            msg = f"贴吧已失效 ({result.err.code})"
-            success = False
-            await log_warn(f"手动签到失败: {fname} | {msg}")
         else:
-            msg = str(result.err) if hasattr(result, 'err') else "未知错误"
-            success = False
-            await log_warn(f"手动签到失败: {fname} | 原因: {msg}")
+            await log_warn(f"手动签到失败: {fname} | {msg}")
 
         # 更新数据库状态
         account = await db.get_active_account()
@@ -209,8 +244,7 @@ async def sign_forum(db: Database, fname: str) -> SignResult:
             forum = next((f for f in forums if f.fname == fname), None)
             if forum:
                 if is_forum_invalid:
-                    err_code = result.err.code if hasattr(result, 'err') else 0
-                    if err_code == 3250004:
+                    if err_code == ERR_FORUM_BANNED:
                         await db.mark_forum_banned(account.id, fname, reason="智能签到检测到吧务封禁 (3250004)")
                         await db.update_target_pool_status(fname, is_success=False, error_reason="签到检测吧务封禁")
                         await log_warn(f"[{fname}] 检测到吧务封禁，已转入熔断模式（仍保留在列表中）")
@@ -267,14 +301,10 @@ async def sign_all_forums(
                 except Exception:
                     await asyncio.sleep(1)
                     sign_res = await client.sign_forum(forum.fname)
-                
-                # 特殊逻辑：160002 代表已签到，在自动化任务中应视作成功
-                is_already_signed = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code == 160002
-                # 340006/340001 表示贴吧已删除/封禁；3250004 表示账号再该吧被封禁
-                is_forum_invalid = hasattr(sign_res, 'err') and sign_res.err and sign_res.err.code in (340006, 340001, 3250004)
 
-                if sign_res or is_already_signed:
-                    msg = "签到成功" if not is_already_signed else "今日已签到"
+                success, msg, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(sign_res)
+
+                if success:
                     result = SignResult(
                         fname=forum.fname,
                         success=True,
@@ -282,11 +312,9 @@ async def sign_all_forums(
                         sign_count=forum.sign_count + (0 if is_already_signed else 1)
                     )
                 elif is_forum_invalid:
-                    err_code = sign_res.err.code if hasattr(sign_res, 'err') else 0
-                    msg = f"贴吧已失效 ({err_code})"
                     result = SignResult(fname=forum.fname, success=False, message=msg)
-                    
-                    if err_code == 3250004:
+
+                    if err_code == ERR_FORUM_BANNED:
                         await db.mark_forum_banned(account.id, forum.fname, reason="自动全扫检测到吧务封禁 (3250004)")
                         await db.update_target_pool_status(forum.fname, is_success=False, error_reason="全扫检测吧务封禁")
                         await log_warn(f"[{forum.fname}] 检测到吧务封禁，已转入熔断模式")
@@ -295,8 +323,7 @@ async def sign_all_forums(
                         await db.delete_forum(forum.id)
                         await log_warn(f"[{forum.fname}] 贴吧已失效，已自动从数据库移除")
                 else:
-                    err_msg = str(sign_res.err) if hasattr(sign_res, 'err') else "请求被拒或未命中判定"
-                    result = SignResult(fname=forum.fname, success=False, message=err_msg)
+                    result = SignResult(fname=forum.fname, success=False, message=msg)
             except TiebaServerError as e:
                 await log_warn(f"[{forum.fname}] 触发风控或 API 阻隔 ({e.code})，系统静默退避休眠 60 秒...")
                 await asyncio.sleep(60)
@@ -382,6 +409,8 @@ async def sign_all_accounts(
         }
     """
     import random
+    import concurrent.futures
+    from aiotieba.exception import TiebaServerError
 
     # 获取所有矩阵可用账号（跳过 suspended_proxy 状态）
     accounts = await db.get_matrix_accounts()
@@ -432,79 +461,88 @@ async def sign_all_accounts(
             await log_warn(f"账号 [{account.name}] 无关注贴吧，跳过")
             continue
 
-        for forum in forums:
-            try:
-                # 使用指定账号签到
-                creds = await get_account_credentials(db, account.id)
-                if not creds:
-                    continue
+        # 使用指定账号凭证（每个账号只获取一次）
+        creds = await get_account_credentials(db, account.id)
+        if not creds:
+            await log_warn(f"账号 [{account.name}] 凭证获取失败，跳过")
+            continue
 
-                _, bduss, stoken, proxy_id, cuid, ua = creds
-                async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
-                    result_raw = await client.sign_forum(forum.fname)
+        _, bduss, stoken, proxy_id, cuid, ua = creds
 
-                # 判定逻辑：支持 160002 已签到状态，检测无效贴吧
-                is_already_signed = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code == 160002
-                is_forum_invalid = hasattr(result_raw, 'err') and result_raw.err and result_raw.err.code in (340006, 340001, 3250004)
-                success = bool(result_raw) or is_already_signed
+        # 每个账号使用单一持久化连接，避免重复创建客户端
+        async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
+            for forum in forums:
+                try:
+                    # 针对底层网络抖动增加一次自动重试
+                    try:
+                        result_raw = await client.sign_forum(forum.fname)
+                    except Exception:
+                        await asyncio.sleep(1)
+                        result_raw = await client.sign_forum(forum.fname)
 
-                if is_forum_invalid:
-                    err_code = result_raw.err.code if hasattr(result_raw, 'err') else 0
-                    success = False
-                    
-                    if err_code == 3250004:
-                        await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
-                        await db.update_target_pool_status(forum.fname, is_success=False, error_reason="矩阵全扫检测吧务封禁")
-                        message = f"贴吧已封禁 (3250004)"
-                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
+                    success, message, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(result_raw)
+
+                    if is_forum_invalid:
+                        if err_code == ERR_FORUM_BANNED:
+                            await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
+                            await db.update_target_pool_status(forum.fname, is_success=False, error_reason="矩阵全扫检测吧务封禁")
+                            message = f"贴吧已封禁 (3250004)"
+                            await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
+                        else:
+                            # 自动删除无效贴吧
+                            await db.delete_forum(forum.id)
+                            message = f"贴吧已失效 ({err_code})，已自动移除"
+                            await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
+
+                    # 写入日志与数据库
+                    await db.add_sign_log(
+                        forum_id=forum.id,
+                        fname=forum.fname,
+                        success=success,
+                        message=message,
+                    )
+                    await db.update_forum_sign(forum.id, success)
+
+                    if success:
+                        await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: 成功")
                     else:
-                        # 自动删除无效贴吧
-                        await db.delete_forum(forum.id)
-                        message = f"贴吧已失效 ({err_code})，已自动移除"
                         await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
-                elif is_already_signed:
-                    message = "今日已签到"
-                elif success:
-                    message = "签到成功"
-                else:
-                    message = str(result_raw.err) if hasattr(result_raw, 'err') else "签到失败"
 
-                # 写入日志与数据库
-                await db.add_sign_log(
-                    forum_id=forum.id,
-                    fname=forum.fname,
-                    success=success,
-                    message=message,
-                )
-                await db.update_forum_sign(forum.id, success)
+                    yield {
+                        "account_id": account.id,
+                        "account_name": account.name,
+                        "fname": forum.fname,
+                        "success": success,
+                        "message": message,
+                        "proxy_status": proxy_status,
+                    }
 
-                if success:
-                    await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: 成功")
-                else:
-                    await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
+                    # 吧间延迟（人性化行为模拟）
+                    await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-                yield {
-                    "account_id": account.id,
-                    "account_name": account.name,
-                    "fname": forum.fname,
-                    "success": success,
-                    "message": message,
-                    "proxy_status": proxy_status,
-                }
-
-                # 吧间延迟（人性化行为模拟）
-                await asyncio.sleep(random.uniform(delay_min, delay_max))
-
-            except Exception as e:
-                await log_error(f"矩阵签到异常 [{account.name}] → {forum.fname}: {str(e)}")
-                yield {
-                    "account_id": account.id,
-                    "account_name": account.name,
-                    "fname": forum.fname,
-                    "success": False,
-                    "message": str(e),
-                    "proxy_status": proxy_status,
-                }
+                except TiebaServerError as e:
+                    await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 触发风控或 API 阻隔 ({e.code})，退避 60s...")
+                    await asyncio.sleep(60)
+                    yield {
+                        "account_id": account.id,
+                        "account_name": account.name,
+                        "fname": forum.fname,
+                        "success": False,
+                        "message": f"被风控限流: {e.msg}",
+                        "proxy_status": proxy_status,
+                    }
+                except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                    raise
+                except Exception as e:
+                    await log_error(f"矩阵签到异常 [{account.name}] → {forum.fname}: {str(e)}")
+                    yield {
+                        "account_id": account.id,
+                        "account_name": account.name,
+                        "fname": forum.fname,
+                        "success": False,
+                        "message": str(e),
+                        "proxy_status": proxy_status,
+                    }
 
         # 账号切换延迟（防关联核心防线）
         if acc_idx < len(accounts) - 1:
