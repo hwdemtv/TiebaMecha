@@ -765,13 +765,13 @@ class AccountsPage:
             self._matrix_search_field.value = ""
         self.refresh_ui()
 
-    async def _on_matrix_prev_page(self, e):
+    async def _on_matrix_prev_page(self, e=None):
         """吧库分页 - 上一页"""
         if self._matrix_current_page > 1:
             self._matrix_current_page -= 1
             self.refresh_ui()
 
-    async def _on_matrix_next_page(self, e):
+    async def _on_matrix_next_page(self, e=None):
         """吧库分页 - 下一页"""
         total_pages = max(1, (self._matrix_filtered_count + self._matrix_page_size - 1) // self._matrix_page_size)
         if self._matrix_current_page < total_pages:
@@ -807,20 +807,6 @@ class AccountsPage:
 
     def _show_follow_forum_dialog(self, e):
         """显示关注贴吧弹窗"""
-        forum_input = ft.TextField(
-            hint_text="输入要关注的贴吧名称",
-            border_radius=10,
-            text_size=13,
-            autofocus=True,
-            on_submit=lambda ev: self.page.run_task(self._on_follow_forum, ev),
-        )
-
-        hint_text = ft.Text(
-            "💡 支持批量关注，多个贴吧用逗号或换行分隔",
-            size=11,
-            color="onSurfaceVariant"
-        )
-
         async def on_follow(ev):
             forum_input.disabled = True
             submit_btn.disabled = True
@@ -881,6 +867,20 @@ class AccountsPage:
                 submit_btn.disabled = False
                 submit_btn.text = "确认关注"
                 self.page.update()
+
+        forum_input = ft.TextField(
+            hint_text="输入要关注的贴吧名称",
+            border_radius=10,
+            text_size=13,
+            autofocus=True,
+            on_submit=lambda ev: self.page.run_task(on_follow, ev),
+        )
+
+        hint_text = ft.Text(
+            "💡 支持批量关注，多个贴吧用逗号或换行分隔",
+            size=11,
+            color="onSurfaceVariant"
+        )
 
         submit_btn = ft.FilledButton("确认关注", icon=icons.CHECK, on_click=lambda ev: self.page.run_task(on_follow, ev))
 

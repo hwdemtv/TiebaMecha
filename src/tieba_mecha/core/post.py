@@ -365,8 +365,9 @@ async def add_thread(
                     proxy_url = f"{scheme}://{h}:{p}"
             
             # 【核心层】反风控干扰触发 (仅混淆中文字符防抽，保留原意)
-            safe_title = Obfuscator.inject_zero_width_chars(title, density=0.2)
-            safe_content = Obfuscator.humanize_spacing(Obfuscator.inject_zero_width_chars(content, density=0.3))
+            obf = await Obfuscator.from_db(db)
+            safe_title = obf.inject_zero_width_chars(title, density=0.2)
+            safe_content = obf.obfuscate_all(content)
 
             # 贴吧API需要\r\n作为换行符，而不是\n
             safe_content = safe_content.replace('\n', '\r\n')

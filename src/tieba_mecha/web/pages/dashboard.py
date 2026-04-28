@@ -6,6 +6,8 @@ import logging
 import flet as ft
 from typing import List, Optional
 
+from ... import __version__
+
 logger = logging.getLogger(__name__)
 
 from ..components import (
@@ -40,7 +42,7 @@ class DashboardPage:
         self.db = db
         self.on_navigate = on_navigate
         self._stats = {"total": 0, "success": 0, "failure": 0}
-        self._sys_stats = {"accounts": 0, "active_proxies": 0, "pending_batch": 0}
+        self._sys_stats = {"accounts": 0, "active_proxies": 0, "pending_batch": 0, "active_jobs": 0}
         self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._recent_forums = []
         self._ai_api_key_set = False  # AI API Key 是否已配置
@@ -69,6 +71,11 @@ class DashboardPage:
         
         # 加载存活统计数据
         self._survival_stats = await self.db.get_survival_stats()
+
+        # 加载守护进程状态
+        from ...core.daemon import daemon_instance
+        active_jobs = [j for j in daemon_instance.scheduler.get_jobs() if j.next_run_time]
+        self._sys_stats["active_jobs"] = len(active_jobs)
         
         # 加载最近贴吧
         account = await self.db.get_active_account()
@@ -206,7 +213,7 @@ class DashboardPage:
                 ft.Column(
                     controls=[
                         ft.Text("SYSTEM OVERVIEW", size=24, weight=ft.FontWeight.BOLD, color="primary", font_family="Consolas"),
-                        ft.Text("TIEBA MECHA CONTROL PANEL v1.1.1", size=11, color="onSurfaceVariant"),
+                        ft.Text(f"TIEBA MECHA CONTROL PANEL v{__version__}", size=11, color="onSurfaceVariant"),
                     ],
                     spacing=0,
                 ),
@@ -306,7 +313,7 @@ class DashboardPage:
 
 
         tiles = TileGrid(
-            columns=2,
+            columns=3,
             tiles=[
                 {
                     "title": "账号列表",
@@ -335,6 +342,20 @@ class DashboardPage:
                     "subtitle": "DATA PROBE",
                     "tooltip": "采集目标贴吧数据，探测竞品或提取目标用户。",
                     "on_click": lambda e: self._navigate("crawl"),
+                },
+                {
+                    "title": "守护任务",
+                    "icon": ft.icons.AUTO_MODE_ROUNDED,
+                    "subtitle": f"ACTIVE: {self._sys_stats['active_jobs']}",
+                    "tooltip": "监控后台定时任务及全域签到进程状态。",
+                    "on_click": lambda e: (self.page.session.set("settings_tab_index", 2), self._navigate("settings")),
+                },
+                {
+                    "title": "养号中心",
+                    "icon": ft.icons.SHIELD_MOON_OUTLINED,
+                    "subtitle": "BIOWARMING",
+                    "tooltip": "配置账号模拟行为参数与查看养号日志。",
+                    "on_click": lambda e: (self.page.session.set("settings_tab_index", 1), self._navigate("settings")),
                 },
             ],
         )

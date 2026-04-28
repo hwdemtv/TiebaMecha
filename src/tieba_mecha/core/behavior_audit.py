@@ -121,9 +121,11 @@ class BehaviorAuditor:
                 sign_stmt = select(
                     func.count(SignLog.id).label("total"),
                     func.sum(case((SignLog.success == True, 1), else_=0)).label("success")
+                ).join(
+                    Forum, SignLog.forum_id == Forum.id
                 ).where(
-                    SignLog.account_id == account_id,
-                    SignLog.created_at >= cutoff
+                    Forum.account_id == account_id,
+                    SignLog.signed_at >= cutoff
                 )
                 sign_result = await session.execute(sign_stmt)
                 row = sign_result.one_or_none()

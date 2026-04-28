@@ -905,7 +905,7 @@ class SurvivalPage:
         if self._active_tab == "audit":
             return ft.Container(
                 content=self._build_audit_list(),
-                padding=ft.padding.only(left=20, right=20, top=10),
+                padding=ft.padding.only(left=20, right=20, top=0),
                 expand=True,
             )
         else:
@@ -933,7 +933,7 @@ class SurvivalPage:
         # 创建统计卡片容器（保存引用以便后续更新）
         self._stat_cards_container = ft.Container(
             content=ft.Row(self._build_stat_cards(), spacing=10),
-            padding=ft.padding.only(top=15, left=20, right=20),
+            padding=ft.padding.only(top=5, left=20, right=20),
         )
         header = ft.Row(
             controls=[
@@ -977,7 +977,7 @@ class SurvivalPage:
                 ),
             ],
             on_change=self._on_tab_change,
-            expand=True,
+            expand=False,
         )
 
         return ft.Container(
@@ -987,7 +987,7 @@ class SurvivalPage:
                 tabs,
                 self._tab_panel,
             ], spacing=0, expand=True),
-            padding=15,
+            padding=10,
             expand=True,
         )
 
