@@ -1034,6 +1034,9 @@ class BatchPostManager:
                 return
             task.accounts = [active_acc.id]
 
+        # 预加载混淆器配置
+        obf = await Obfuscator.from_db(self.db)
+
         # 预构建权重列表（避免每次循环都查数据库）
         # 同时复用此查询结果构建 account_map，避免重复查询
         all_accounts = await self.db.get_accounts()
@@ -1185,12 +1188,8 @@ class BatchPostManager:
                     except Exception as ai_err:
                         await log_warn(f"AI改写失败，使用原文: {ai_err}")
                 
-                # [关键强化] 注入随机符号/表情，打破内容 Hash
-                content = Obfuscator.inject_random_symbols(content)
-                
-                # 零宽字符与间距混淆
-                content = Obfuscator.inject_zero_width_chars(content, density=0.15)
-                safe_content = Obfuscator.humanize_spacing(content)
+                # [关键强化] 集成动态风控混淆 (注入随机符号、零宽字符、拟人化间距、语义乱序)
+                safe_content = obf.obfuscate_all(content)
                 
                 # 重复度熔断
                 passed, _ = await similarity_detector.check(title, safe_content)
@@ -1390,7 +1389,8 @@ class BatchPostManager:
             await client.get_self_info()
             if not getattr(client.account, 'tbs', None): return False
             
-            safe_content = Obfuscator.inject_zero_width_chars(content, density=0.1)
+            obf = await Obfuscator.from_db(self.db)
+            safe_content = obf.obfuscate_all(content)
             try:
                 await client.add_post(fname, tid, safe_content)
                 return True

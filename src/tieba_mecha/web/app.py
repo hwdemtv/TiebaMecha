@@ -1,4 +1,4 @@
-"""Main Flet application - TiebaMecha Cyber-Mecha v1.1.1"""
+"""Main Flet application - TiebaMecha"""
 
 from __future__ import annotations
 

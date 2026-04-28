@@ -5,6 +5,7 @@ from ..flet_compat import COLORS
 import asyncio
 from ..utils import with_opacity
 from ..components import icons
+from ... import __version__
 from ...core.account import verify_account, add_account as core_add_account
 
 class WelcomePage:
@@ -37,7 +38,7 @@ class WelcomePage:
         return ft.Container(
             content=ft.Column([
                 ft.Icon(icons.SHIELD_ROUNDED, size=80, color="primary"),
-                ft.Text("欢迎使用 TIEBAMECHA v1.1.1", size=24, weight=ft.FontWeight.BOLD),
+                ft.Text(f"欢迎使用 TIEBAMECHA v{__version__}", size=24, weight=ft.FontWeight.BOLD),
                 ft.Text("INITIALIZATION REQUIRED / 需要初始化", size=12, color="primary", weight=ft.FontWeight.W_300),
                 ft.Divider(height=40, color="transparent"),
                 ft.Container(
