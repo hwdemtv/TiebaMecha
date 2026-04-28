@@ -1,12 +1,16 @@
-"""存活分析页面 - 查看物料存活状态，支持筛选和分页"""
+"""存活分析页面 - 查看物料存活状态，支持筛选和分页，集成行为审计"""
 
+import asyncio
 import flet as ft
 from ..flet_compat import COLORS
 from ..utils import with_opacity
 from ..components.icons import (
     ARROW_BACK_IOS_NEW, ANALYTICS_OUTLINED, CHECK_CIRCLE,
     ERROR, REMOVE_CIRCLE_OUTLINED, OPEN_IN_NEW, INFO_OUTLINED,
-    DELETE_OUTLINE
+    DELETE_OUTLINE, SHIELD_ROUNDED, WARNING_AMBER_ROUNDED,
+    VERIFIED_ROUNDED, SPEED_ROUNDED, SCHEDULE_ROUNDED,
+    MEMORY_ROUNDED, VPN_KEY_ROUNDED, TRENDING_UP_ROUNDED,
+    MONITOR_HEART_ROUNDED
 )
 
 # 删帖原因英文代码 → 中文友好显示
@@ -45,6 +49,8 @@ class SurvivalPage:
         self._page_size = 15
         self._total = 0
         self._materials = []
+        self._audit_reports = []  # 行为审计报告
+        self._active_tab = "survival"  # 当前标签页
 
     async def load_data(self):
         """加载数据"""
@@ -68,9 +74,27 @@ class SurvivalPage:
                 ft.dropdown.Option(r, _death_reason_display(r)) for r in reasons
             ]
             await self._load_page(1)
+            # 加载行为审计数据
+            await self._load_audit_data()
         except Exception as e:
             import traceback
             traceback.print_exc()
+
+    async def _load_audit_data(self):
+        """加载行为审计报告"""
+        try:
+            from ...core.behavior_audit import audit_all_accounts
+            self._audit_reports = await audit_all_accounts(self.db, days=7)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"加载行为审计数据失败: {e}")
+            self._audit_reports = []
+
+    async def _on_tab_change(self, e):
+        """切换标签页"""
+        self._active_tab = "audit" if e.control.selected_index == 1 else "survival"
+        self._tab_panel.content = self._build_active_tab_content()
+        self.page.update()
 
     async def _load_page(self, page: int):
         """加载指定页"""
@@ -494,6 +518,348 @@ class SurvivalPage:
         self._next_btn.disabled = self._current_page >= total_pages
         self.page.update()
 
+    # ========== 行为审计 ==========
+
+    def _build_audit_overview(self) -> ft.Control:
+        """构建审计概览区（总风险评分 + 高危统计）"""
+        reports = self._audit_reports
+        if not reports:
+            return ft.Container(
+                content=ft.Column([
+                    ft.Icon(MONITOR_HEART_ROUNDED, size=48, color="onSurfaceVariant"),
+                    ft.Text("暂无审计数据", size=14, color="onSurfaceVariant"),
+                    ft.Text("需要账号有近 7 天的操作记录才能生成审计报告", size=11, color="onSurfaceVariant"),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                alignment=ft.alignment.center,
+                padding=40,
+            )
+
+        # 统计汇总
+        high_risk = sum(1 for r in reports if r.get("risk_score", 0) >= 5)
+        medium_risk = sum(1 for r in reports if 2.5 <= r.get("risk_score", 0) < 5)
+        low_risk = sum(1 for r in reports if r.get("risk_score", 0) < 2.5)
+        avg_score = sum(r.get("risk_score", 0) for r in reports) / len(reports)
+
+        # 总体评分色
+        if avg_score >= 5:
+            score_color = COLORS.ERROR if hasattr(COLORS, 'ERROR') else "#F44336"
+        elif avg_score >= 2.5:
+            score_color = COLORS.AMBER if hasattr(COLORS, 'AMBER') else "#FF9800"
+        else:
+            score_color = COLORS.GREEN
+
+        overview_cards = ft.Row([
+            # 综合风险评分
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([ft.Icon(SHIELD_ROUNDED, color=score_color, size=20), ft.Text("综合风险 / RISK SCORE", size=11, color="onSurfaceVariant")], spacing=5),
+                    ft.Text(f"{avg_score:.1f}", size=36, weight=ft.FontWeight.BOLD, color=score_color),
+                    ft.Text("/ 10", size=14, color="onSurfaceVariant"),
+                ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=15,
+                bgcolor=with_opacity(0.05, score_color),
+                border=ft.border.all(1, with_opacity(0.2, score_color)),
+                border_radius=10,
+                expand=1,
+                alignment=ft.alignment.center,
+            ),
+            # 高危
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([ft.Icon(WARNING_AMBER_ROUNDED, color="#F44336", size=20), ft.Text("高危 / HIGH", size=11, color="onSurfaceVariant")], spacing=5),
+                    ft.Text(str(high_risk), size=36, weight=ft.FontWeight.BOLD, color="#F44336"),
+                ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=15,
+                bgcolor=with_opacity(0.05, "#F44336"),
+                border=ft.border.all(1, with_opacity(0.2, "#F44336")),
+                border_radius=10,
+                expand=1,
+                alignment=ft.alignment.center,
+            ),
+            # 中危
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([ft.Icon(INFO_OUTLINED, color="#FF9800", size=20), ft.Text("中危 / MEDIUM", size=11, color="onSurfaceVariant")], spacing=5),
+                    ft.Text(str(medium_risk), size=36, weight=ft.FontWeight.BOLD, color="#FF9800"),
+                ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=15,
+                bgcolor=with_opacity(0.05, "#FF9800"),
+                border=ft.border.all(1, with_opacity(0.2, "#FF9800")),
+                border_radius=10,
+                expand=1,
+                alignment=ft.alignment.center,
+            ),
+            # 低危
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([ft.Icon(VERIFIED_ROUNDED, color="#4CAF50", size=20), ft.Text("低危 / LOW", size=11, color="onSurfaceVariant")], spacing=5),
+                    ft.Text(str(low_risk), size=36, weight=ft.FontWeight.BOLD, color="#4CAF50"),
+                ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=15,
+                bgcolor=with_opacity(0.05, "#4CAF50"),
+                border=ft.border.all(1, with_opacity(0.2, "#4CAF50")),
+                border_radius=10,
+                expand=1,
+                alignment=ft.alignment.center,
+            ),
+        ], spacing=10)
+
+        return overview_cards
+
+    def _build_audit_report_card(self, report: dict) -> ft.Control:
+        """构建单个账号审计报告卡片"""
+        score = report.get("risk_score", 0)
+        alerts = report.get("alerts", [])
+        recommendations = report.get("recommendations", [])
+        stats = report.get("stats", {})
+        name = report.get("account_name", "未知")
+
+        # 风险等级色
+        if score >= 5:
+            risk_color = "#F44336"
+            risk_label = "高危"
+            risk_icon = WARNING_AMBER_ROUNDED
+        elif score >= 2.5:
+            risk_color = "#FF9800"
+            risk_label = "中危"
+            risk_icon = INFO_OUTLINED
+        else:
+            risk_color = "#4CAF50"
+            risk_label = "低危"
+            risk_icon = VERIFIED_ROUNDED
+
+        # 风险评分进度条
+        bar_width = max(4, min(120, score / 10 * 120))
+
+        # 指标徽章
+        badges = []
+        sign_rate = stats.get("sign_rate", 0)
+        if sign_rate > 0:
+            badges.append(self._mini_badge("签到率", f"{sign_rate:.0%}",
+                          "#4CAF50" if 0.3 <= sign_rate <= 0.95 else "#FF9800"))
+
+        content_variety = stats.get("content_unique_ratio", 1.0)
+        badges.append(self._mini_badge("内容多样性", f"{content_variety:.0%}",
+                      "#4CAF50" if content_variety >= 0.8 else "#FF9800"))
+
+        avg_interval = stats.get("avg_post_interval_minutes", 0)
+        if avg_interval > 0:
+            badges.append(self._mini_badge("发帖间隔", f"{avg_interval:.0f}分",
+                          "#4CAF50" if avg_interval >= 5 else "#FF9800"))
+
+        proxy_fails = stats.get("proxy_fail_count", 0)
+        if proxy_fails > 0:
+            badges.append(self._mini_badge("代理失败", str(proxy_fails),
+                          "#F44336" if proxy_fails > 5 else "#FF9800"))
+
+        # 告警列表（折叠显示前 2 条）
+        alert_controls = []
+        for i, alert in enumerate(alerts[:3]):
+            alert_controls.append(ft.Row([
+                ft.Icon(WARNING_AMBER_ROUNDED, size=14, color="#FF9800"),
+                ft.Text(alert, size=12, color="onSurface", expand=True),
+            ], spacing=5))
+        if len(alerts) > 3:
+            alert_controls.append(ft.Text(f"... 还有 {len(alerts) - 3} 条告警", size=11, color="onSurfaceVariant", italic=True))
+
+        # 建议列表
+        rec_controls = []
+        for i, rec in enumerate(recommendations[:2]):
+            rec_controls.append(ft.Row([
+                ft.Icon(TRENDING_UP_ROUNDED, size=14, color="#4CAF50"),
+                ft.Text(rec, size=12, color="onSurface", expand=True),
+            ], spacing=5))
+
+        card = ft.Container(
+            content=ft.Column([
+                # 头行：账号名 + 风险评分
+                ft.Row([
+                    ft.Icon(risk_icon, color=risk_color, size=20),
+                    ft.Text(name, size=14, weight=ft.FontWeight.BOLD, expand=True),
+                    ft.Text(f"{score}", size=22, weight=ft.FontWeight.BOLD, color=risk_color),
+                    ft.Text(f"/10 {risk_label}", size=12, color=risk_color),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                # 进度条
+                ft.Container(
+                    content=ft.Stack([
+                        ft.Container(width=bar_width, height=6, bgcolor=risk_color, border_radius=3),
+                        ft.Container(height=6, bgcolor=with_opacity(0.15, "onSurface"), border_radius=3),
+                    ]),
+                    width=120,
+                ),
+                # 指标徽章
+                ft.Row(badges, spacing=8, wrap=True) if badges else ft.Container(),
+                # 告警
+                *alert_controls,
+                # 建议
+                *rec_controls,
+            ], spacing=6),
+            bgcolor=with_opacity(0.02, risk_color),
+            border=ft.border.all(1, with_opacity(0.15, risk_color)),
+            border_radius=10,
+            padding=ft.padding.symmetric(horizontal=16, vertical=12),
+            on_click=lambda e, r=report: self._show_audit_detail(r),
+            ink=True,
+        )
+        return card
+
+    def _mini_badge(self, label: str, value: str, color: str) -> ft.Control:
+        """构建指标小徽章"""
+        return ft.Container(
+            content=ft.Row([
+                ft.Text(label, size=10, color="onSurfaceVariant"),
+                ft.Text(value, size=11, weight=ft.FontWeight.W_600, color=color),
+            ], spacing=3),
+            bgcolor=with_opacity(0.08, color),
+            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+            border_radius=6,
+        )
+
+    def _show_audit_detail(self, report: dict):
+        """展示账号审计详情弹窗"""
+        score = report.get("risk_score", 0)
+        alerts = report.get("alerts", [])
+        recommendations = report.get("recommendations", [])
+        stats = report.get("stats", {})
+        name = report.get("account_name", "未知")
+
+        if score >= 5:
+            risk_color = "#F44336"
+            risk_label = "高危"
+        elif score >= 2.5:
+            risk_color = "#FF9800"
+            risk_label = "中危"
+        else:
+            risk_color = "#4CAF50"
+            risk_label = "低危"
+
+        items = [
+            ft.Row([
+                ft.Icon(SHIELD_ROUNDED, color=risk_color, size=20),
+                ft.Text(f"{name} — 行为审计报告", size=16, weight=ft.FontWeight.BOLD),
+            ]),
+            ft.Divider(height=1),
+            ft.Row([
+                ft.Text("风险评分:", size=13, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
+                ft.Text(f"{score}/10", size=20, weight=ft.FontWeight.BOLD, color=risk_color),
+                ft.Container(expand=True),
+                ft.Container(
+                    content=ft.Text(risk_label, size=13, weight=ft.FontWeight.BOLD, color=risk_color),
+                    bgcolor=with_opacity(0.1, risk_color),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=4),
+                    border_radius=6,
+                ),
+            ]),
+            ft.Divider(height=1),
+        ]
+
+        # 详细指标
+        metrics = [
+            ("签到率", f"{stats.get('sign_rate', 0):.0%}", stats.get('sign_rate', 0) > 0),
+            ("总签到数", str(stats.get('total_signs', 0)), stats.get('total_signs', 0) > 0),
+            ("总发帖数", str(stats.get('total_posts', 0)), stats.get('total_posts', 0) > 0),
+            ("内容多样性", f"{stats.get('content_unique_ratio', 1.0):.0%}", True),
+            ("平均发帖间隔", f"{stats.get('avg_post_interval_minutes', 0):.1f} 分钟", stats.get('avg_post_interval_minutes', 0) > 0),
+            ("代理失败次数", str(stats.get('proxy_fail_count', 0)), stats.get('proxy_fail_count', 0) > 0),
+        ]
+        for label, value, show in metrics:
+            if show:
+                items.append(ft.Row([
+                    ft.Text(f"{label}:", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant", width=110),
+                    ft.Text(value, size=12, expand=True),
+                ]))
+
+        # 发帖时间分布
+        hour_dist = stats.get("post_hour_distribution", {})
+        if hour_dist:
+            items.append(ft.Divider(height=1))
+            items.append(ft.Text("发帖时间分布:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"))
+            bars = []
+            for h in range(24):
+                h_str = str(h)
+                count = hour_dist.get(h_str, 0)
+                bar_h = min(40, count * 4) if count > 0 else 2
+                bars.append(ft.Column([
+                    ft.Container(
+                        width=14, height=max(2, bar_h), bgcolor=COLORS.PRIMARY if count > 0 else with_opacity(0.1, "onSurface"),
+                        border_radius=2, alignment=ft.alignment.bottom_center,
+                    ),
+                    ft.Text(f"{h}", size=8, color="onSurfaceVariant", text_align=ft.TextAlign.CENTER),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2))
+            items.append(ft.Row(bars, spacing=1, alignment=ft.MainAxisAlignment.CENTER))
+
+        # 告警
+        if alerts:
+            items.append(ft.Divider(height=1))
+            items.append(ft.Row([ft.Icon(WARNING_AMBER_ROUNDED, color="#FF9800", size=16), ft.Text("风险告警", size=13, weight=ft.FontWeight.BOLD, color="#FF9800")], spacing=5))
+            for alert in alerts:
+                items.append(ft.Row([
+                    ft.Container(width=16),
+                    ft.Text(f"• {alert}", size=12, expand=True),
+                ]))
+
+        # 建议
+        if recommendations:
+            items.append(ft.Divider(height=1))
+            items.append(ft.Row([ft.Icon(TRENDING_UP_ROUNDED, color="#4CAF50", size=16), ft.Text("改进建议", size=13, weight=ft.FontWeight.BOLD, color="#4CAF50")], spacing=5))
+            for rec in recommendations:
+                items.append(ft.Row([
+                    ft.Container(width=16),
+                    ft.Text(f"• {rec}", size=12, expand=True),
+                ]))
+
+        dialog = ft.AlertDialog(
+            title=ft.Text("行为审计详情"),
+            content=ft.Container(
+                content=ft.Column(items, spacing=8, scroll=ft.ScrollMode.AUTO),
+                width=560,
+                height=550,
+            ),
+            actions=[
+                ft.TextButton("关闭", on_click=lambda e: self.page.close(dialog)),
+            ],
+        )
+        self.page.open(dialog)
+
+    def _build_audit_list(self) -> ft.Control:
+        """构建审计报告列表"""
+        if not self._audit_reports:
+            return self._build_audit_overview()
+
+        cards = [self._build_audit_report_card(r) for r in self._audit_reports]
+        return ft.Column([
+            self._build_audit_overview(),
+            ft.Divider(height=10, color="transparent"),
+            ft.Text("账号审计报告 / ACCOUNT AUDITS", size=13, weight=ft.FontWeight.W_500, color="primary"),
+            ft.Column(cards, spacing=8, scroll=ft.ScrollMode.AUTO, expand=True),
+        ], spacing=10, expand=True)
+
+    def _build_active_tab_content(self) -> ft.Control:
+        """根据当前标签页返回对应内容"""
+        if self._active_tab == "audit":
+            return ft.Container(
+                content=self._build_audit_list(),
+                padding=ft.padding.only(left=20, right=20, top=10),
+                expand=True,
+            )
+        else:
+            return ft.Column([
+                self._stat_cards_container,
+                ft.Divider(height=10, color="transparent"),
+                ft.Container(
+                    content=self._build_filter_bar(),
+                    padding=ft.padding.only(left=0, right=0),
+                ),
+                ft.Container(
+                    content=self._build_card_list(),
+                    padding=ft.padding.only(top=10),
+                    expand=True,
+                ),
+                ft.Container(
+                    content=self._build_pagination(),
+                ),
+            ], spacing=10, expand=True)
+
     # ========== 页面构建 ==========
 
     def build(self) -> ft.Control:
@@ -521,26 +887,40 @@ class SurvivalPage:
             ],
         )
 
+        # 标签页：存活分析 / 行为审计
+        self._tab_panel = ft.Container(
+            content=self._build_active_tab_content(),
+            expand=True,
+        )
+
+        tabs = ft.Tabs(
+            selected_index=0,
+            animation_duration=200,
+            label_color=COLORS.PRIMARY,
+            unselected_label_color="onSurfaceVariant",
+            indicator_color=COLORS.PRIMARY,
+            indicator_tab_size=True,
+            tabs=[
+                ft.Tab(
+                    icon=ANALYTICS_OUTLINED,
+                    text="存活监控",
+                ),
+                ft.Tab(
+                    icon=SHIELD_ROUNDED,
+                    text="行为审计",
+                ),
+            ],
+            on_change=self._on_tab_change,
+            expand=True,
+        )
+
         return ft.Container(
             content=ft.Column([
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
-                self._stat_cards_container,
-                ft.Divider(height=10, color="transparent"),
-                ft.Container(
-                    content=self._build_filter_bar(),
-                    padding=ft.padding.only(left=20, right=20),
-                ),
-                ft.Container(
-                    content=self._build_card_list(),
-                    padding=ft.padding.only(left=20, right=20, top=10),
-                    expand=True,
-                ),
-                ft.Container(
-                    content=self._build_pagination(),
-                    padding=15,
-                ),
-            ], spacing=10, expand=True),
+                tabs,
+                self._tab_panel,
+            ], spacing=0, expand=True),
             padding=15,
             expand=True,
         )
