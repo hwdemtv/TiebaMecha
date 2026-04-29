@@ -11,6 +11,7 @@ class MechaClient(aiotieba.Client):
     def __init__(self, *args, ua: str = "", **kwargs):
         # 拦截并在调用父类前移除 connector，防止 TypeError
         self.custom_connector = kwargs.pop("connector", None)
+        self._replacement_sessions: list[aiohttp.ClientSession] = []
         super().__init__(*args, **kwargs)
         self.custom_ua = ua
 
@@ -45,6 +46,7 @@ class MechaClient(aiotieba.Client):
                     )
                     # 替换
                     container.session = new_session
+                    self._replacement_sessions.append(new_session)
                     # 关闭旧 session 释放连接池，防止 "Unclosed client session" 警告
                     try:
                         await old_session.close()
@@ -52,6 +54,17 @@ class MechaClient(aiotieba.Client):
                         pass
                     
         return self
+
+    async def __aexit__(self, exc_type=None, exc_val=None, exc_tb=None) -> None:
+        # 先关闭自定义替换的 session，避免其连接池泄漏
+        while self._replacement_sessions:
+            session = self._replacement_sessions.pop()
+            try:
+                await session.close()
+            except Exception:
+                pass
+
+        await super().__aexit__(exc_type, exc_val, exc_tb)
 
 async def create_client(db: Database, bduss: str, stoken: str = "", proxy_id: int | None = None, cuid: str = "", ua: str = "") -> aiotieba.Client:
     """

@@ -91,6 +91,12 @@ class AIOptimizer:
             await self._session.close()
             self._session = None
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type=None, exc_val=None, exc_tb=None):
+        await self.close()
+
     async def _wait_for_rate_limit(self):
         """在 AI 调用前自动等待，确保两次调用之间有 1~3 秒间隔，避免 API 限流"""
         global _last_ai_call_time

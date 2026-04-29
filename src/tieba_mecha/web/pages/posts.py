@@ -260,8 +260,11 @@ class PostsPage:
         
         async def optimize():
             optimizer = AIOptimizer(self.db)
-            success, opt_title, opt_content, err = await optimizer.optimize_post(title, content)
-            
+            try:
+                success, opt_title, opt_content, err = await optimizer.optimize_post(title, content)
+            finally:
+                await optimizer.close()
+
             if not success:
                 self._show_snackbar(err, "error")
                 return
@@ -369,13 +372,15 @@ class PostsPage:
         
         optimizer = AIOptimizer(self.db)
         results = []
-        
-        for i, t in enumerate(threads_to_opt):
-            self.loading_indicator.value = (i + 1) / len(threads_to_opt)
-            self.page.update()
-            success, opt_t, opt_c, err = await optimizer.optimize_post(t.title, t.text or "")
-            if success:
-                results.append((t.title, opt_t, opt_c))
+        try:
+            for i, t in enumerate(threads_to_opt):
+                self.loading_indicator.value = (i + 1) / len(threads_to_opt)
+                self.page.update()
+                success, opt_t, opt_c, err = await optimizer.optimize_post(t.title, t.text or "")
+                if success:
+                    results.append((t.title, opt_t, opt_c))
+        finally:
+            await optimizer.close()
 
         self.loading_indicator.visible = False
         
