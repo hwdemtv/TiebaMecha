@@ -1179,14 +1179,19 @@ class BatchPostManager:
                 
                 # AI 改写
                 if task.use_ai:
+                    optimizer = AIOptimizer(self.db)
                     try:
-                        optimizer = AIOptimizer(self.db)
-                        s_ai, opt_t, opt_c, _ = await asyncio.wait_for(optimizer.optimize_post(title, content, persona=task.ai_persona), timeout=30.0)
-                        if s_ai: 
+                        s_ai, opt_t, opt_c, _ = await asyncio.wait_for(
+                            optimizer.optimize_post(title, content, persona=task.ai_persona),
+                            timeout=30.0
+                        )
+                        if s_ai:
                             title, content = opt_t, opt_c
                             await self.db.update_material_ai(current_material.id, title, content)
                     except Exception as ai_err:
                         await log_warn(f"AI改写失败，使用原文: {ai_err}")
+                    finally:
+                        await optimizer.close()
                 
                 # [关键强化] 集成动态风控混淆 (注入随机符号、零宽字符、拟人化间距、语义乱序)
                 safe_content = obf.obfuscate_all(content)
@@ -1939,121 +1944,121 @@ class AutoBumpManager:
             # 预加载 AI 人格化设定和优化器（None = 自动按时段轮换）
             ai_persona = await self.db.get_setting("ai_persona", None)
             from .ai_optimizer import AIOptimizer
-            optimizer = AIOptimizer(self.db)
+            async with AIOptimizer(self.db) as optimizer:
 
-            for material in candidates:
-                bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
-                
-                # --- 账号选取策略 ---
-                target_account_id = None
-                
-                if bump_mode == "matrix_loop":
-                    # 矩阵轮换模式
-                    target_account_id = self._select_account_for_bump(material, matrix_pool)
-                elif bump_matrix_enabled and matrix_pool:
-                    # 矩阵模式
-                    target_account_id = self._select_account_for_bump(material, matrix_pool)
-                else:
-                    # 未开启矩阵模式时，同号自顶风险极高
-                    await log_warn(
-                        f"物料 [{material.id}] 跳过自顶：未开启矩阵协同模式。同号自顶极易触发风控导致封号，请在「自顶配置」中开启「矩阵协同模式」。"
-                    )
-                    continue
-                
-                if not target_account_id:
-                    await log_warn(f"物料 [{material.id}] 跳过自顶：无可用账号")
-                    continue
-                
-                # 检查动态黑名单
-                if (target_account_id, material.posted_fname) in banned_pairs:
-                    continue
-
-                # --- 自顶内容生成 ---
-                if bump_ai_content_enabled:
-                    # AI 生成模式
-                    try:
-                        ai_success, ai_content, ai_err = await optimizer.generate_bump_content(
-                            material.title or "", ai_persona
-                        )
-                        if ai_success and ai_content:
-                            bump_content = ai_content
-                            await log_info(f"物料 [{material.id}] AI生成自顶内容: {bump_content}")
-                        else:
-                            # AI生成失败时使用兜底模板
-                            templates = [
-                                "路过", "看了", "点赞", "顶", "收藏",
-                                "不错的", "可以", "好贴", "来了", "路过~",
-                                "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
-                                "内容不错，赞", "有意思", "帮顶一下", "可以可以",
-                                "这个确实可以", "路过支持", "mark一下", "看看再说",
-                                "内容挺充实的", "感谢分享", "不错的帖子",
-                                "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
-                                "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
-                                "👍", "✨👍", "好帖", "顶", "已阅", "mark",
-                            ]
-                            emojis = ["[赞]", "✨", "👍", "👍👍", ""]
-                            base_text = random.choice(templates)
-                            if random.random() < 0.2:
-                                keyword = (material.title or "")[:8]
-                                base_text = f"{keyword} 还行，{base_text}"
-                            bump_content = f"{base_text} {random.choice(emojis)}"
-                            await log_warn(f"物料 [{material.id}] AI生成失败，使用模板: {ai_err}")
-                    except Exception as gen_err:
-                        await log_error(f"自顶内容生成异常: {gen_err}")
-                        bump_content = "路过，看了下挺好的"
-                else:
-                    # 固定模板模式
-                    templates = [
-                        "路过", "看了", "点赞", "顶", "收藏",
-                        "不错的", "可以", "好贴", "来了", "路过~",
-                        "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
-                        "内容不错，赞", "有意思", "帮顶一下", "可以可以",
-                        "这个确实可以", "路过支持", "mark一下", "看看再说",
-                        "内容挺充实的", "感谢分享", "不错的帖子",
-                        "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
-                        "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
-                        "👍", "✨👍", "好帖", "顶", "已阅", "mark",
-                    ]
-                    emojis = ["[赞]", "✨", "👍", "👍👍", ""]
-                    base_text = random.choice(templates)
-                    if random.random() < 0.2:
-                        keyword = (material.title or "")[:8]
-                        base_text = f"{keyword} 还行，{base_text}"
-                    bump_content = f"{base_text} {random.choice(emojis)}"
-
-                success = await self.post_manager.reply_to_thread(
-                    target_account_id, 
-                    material.posted_fname, 
-                    material.posted_tid, 
-                    bump_content
-                )
-                
-                today = date.today()
-                if success:
-                    # 更新 bump_count 和轮换信息
-                    async with self.db.async_session() as upd_session:
-                        from ..db.models import MaterialPool
-                        mat = await upd_session.get(MaterialPool, material.id)
-                        if mat:
-                            mat.bump_count = (mat.bump_count or 0) + 1
-                            mat.last_bumped_at = datetime.now()
-                            mat.last_date = today
-                            
-                            # 矩阵轮换模式：更新账号索引
-                            if bump_mode == "matrix_loop":
-                                account_ids_json = getattr(mat, 'bump_account_ids', None) or "[]"
-                                try:
-                                    account_ids = json.loads(account_ids_json)
-                                    if account_ids:
-                                        mat.bump_account_index = ((mat.bump_account_index or 0) + 1) % len(account_ids)
-                                except (json.JSONDecodeError, TypeError):
-                                    pass
-                            
-                            await upd_session.commit()
+                for material in candidates:
+                    bump_mode = getattr(material, 'bump_mode', 'once') or 'once'
                     
-                    await log_info(f"物料 [{material.id}] 自顶成功 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')} | TID:{material.posted_tid} | 累计:{material.bump_count + 1}次)")
-                    await asyncio.sleep(random.uniform(15, 45))
-                else:
-                    banned_pairs.add((target_account_id, material.posted_fname))
-                    await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')})")
+                    # --- 账号选取策略 ---
+                    target_account_id = None
+                
+                    if bump_mode == "matrix_loop":
+                        # 矩阵轮换模式
+                        target_account_id = self._select_account_for_bump(material, matrix_pool)
+                    elif bump_matrix_enabled and matrix_pool:
+                        # 矩阵模式
+                        target_account_id = self._select_account_for_bump(material, matrix_pool)
+                    else:
+                        # 未开启矩阵模式时，同号自顶风险极高
+                        await log_warn(
+                            f"物料 [{material.id}] 跳过自顶：未开启矩阵协同模式。同号自顶极易触发风控导致封号，请在「自顶配置」中开启「矩阵协同模式」。"
+                        )
+                        continue
+                    
+                    if not target_account_id:
+                        await log_warn(f"物料 [{material.id}] 跳过自顶：无可用账号")
+                        continue
+                    
+                    # 检查动态黑名单
+                    if (target_account_id, material.posted_fname) in banned_pairs:
+                        continue
+
+                    # --- 自顶内容生成 ---
+                    if bump_ai_content_enabled:
+                        # AI 生成模式
+                        try:
+                            ai_success, ai_content, ai_err = await optimizer.generate_bump_content(
+                                material.title or "", ai_persona
+                            )
+                            if ai_success and ai_content:
+                                bump_content = ai_content
+                                await log_info(f"物料 [{material.id}] AI生成自顶内容: {bump_content}")
+                            else:
+                                # AI生成失败时使用兜底模板
+                                templates = [
+                                    "路过", "看了", "点赞", "顶", "收藏",
+                                    "不错的", "可以", "好贴", "来了", "路过~",
+                                    "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
+                                    "内容不错，赞", "有意思", "帮顶一下", "可以可以",
+                                    "这个确实可以", "路过支持", "mark一下", "看看再说",
+                                    "内容挺充实的", "感谢分享", "不错的帖子",
+                                    "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
+                                    "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
+                                    "👍", "✨👍", "好帖", "顶", "已阅", "mark",
+                                ]
+                                emojis = ["[赞]", "✨", "👍", "👍👍", ""]
+                                base_text = random.choice(templates)
+                                if random.random() < 0.2:
+                                    keyword = (material.title or "")[:8]
+                                    base_text = f"{keyword} 还行，{base_text}"
+                                bump_content = f"{base_text} {random.choice(emojis)}"
+                                await log_warn(f"物料 [{material.id}] AI生成失败，使用模板: {ai_err}")
+                        except Exception as gen_err:
+                            await log_error(f"自顶内容生成异常: {gen_err}")
+                            bump_content = "路过，看了下挺好的"
+                    else:
+                        # 固定模板模式
+                        templates = [
+                            "路过", "看了", "点赞", "顶", "收藏",
+                            "不错的", "可以", "好贴", "来了", "路过~",
+                            "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
+                            "内容不错，赞", "有意思", "帮顶一下", "可以可以",
+                            "这个确实可以", "路过支持", "mark一下", "看看再说",
+                            "内容挺充实的", "感谢分享", "不错的帖子",
+                            "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
+                            "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
+                            "👍", "✨👍", "好帖", "顶", "已阅", "mark",
+                        ]
+                        emojis = ["[赞]", "✨", "👍", "👍👍", ""]
+                        base_text = random.choice(templates)
+                        if random.random() < 0.2:
+                            keyword = (material.title or "")[:8]
+                            base_text = f"{keyword} 还行，{base_text}"
+                        bump_content = f"{base_text} {random.choice(emojis)}"
+
+                    success = await self.post_manager.reply_to_thread(
+                        target_account_id, 
+                        material.posted_fname, 
+                        material.posted_tid, 
+                        bump_content
+                    )
+                
+                    today = date.today()
+                    if success:
+                        # 更新 bump_count 和轮换信息
+                        async with self.db.async_session() as upd_session:
+                            from ..db.models import MaterialPool
+                            mat = await upd_session.get(MaterialPool, material.id)
+                            if mat:
+                                mat.bump_count = (mat.bump_count or 0) + 1
+                                mat.last_bumped_at = datetime.now()
+                                mat.last_date = today
+                                
+                                # 矩阵轮换模式：更新账号索引
+                                if bump_mode == "matrix_loop":
+                                    account_ids_json = getattr(mat, 'bump_account_ids', None) or "[]"
+                                    try:
+                                        account_ids = json.loads(account_ids_json)
+                                        if account_ids:
+                                            mat.bump_account_index = ((mat.bump_account_index or 0) + 1) % len(account_ids)
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                
+                                await upd_session.commit()
+                        
+                        await log_info(f"物料 [{material.id}] 自顶成功 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')} | TID:{material.posted_tid} | 累计:{material.bump_count + 1}次)")
+                        await asyncio.sleep(random.uniform(15, 45))
+                    else:
+                        banned_pairs.add((target_account_id, material.posted_fname))
+                        await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')})")
 

@@ -1485,28 +1485,30 @@ class BatchPostPage:
             optimizer = AIOptimizer(self.db)
             total = len(pending_m)
             success_count = 0
-            
-            for i, m in enumerate(pending_m):
-                # 检查对话框是否还开着（是否被手动关闭取消）
-                if not dialog.open: break
-                
-                status_text.value = f"正在改写第 {i+1}/{total} 条: {m.title[:15]}..."
-                self.page.update()
-                
-                # 调用 AI
-                try:
-                    persona = self.ai_persona_dropdown.value or "normal"
-                    success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content, persona=persona)
-                    if success:
-                        await self.db.update_material_ai(m.id, opt_title, opt_content)
-                        success_count += 1
-                except Exception as ex:
-                    from ...core.logger import log_error
-                    await log_error(f"AI Batch error on ID {m.id}: {ex}")
-                
-                progress_bar.value = (i + 1) / total
-                self.page.update()
-            
+            try:
+                for i, m in enumerate(pending_m):
+                    # 检查对话框是否还开着（是否被手动关闭取消）
+                    if not dialog.open: break
+
+                    status_text.value = f"正在改写第 {i+1}/{total} 条: {m.title[:15]}..."
+                    self.page.update()
+
+                    # 调用 AI
+                    try:
+                        persona = self.ai_persona_dropdown.value or "normal"
+                        success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content, persona=persona)
+                        if success:
+                            await self.db.update_material_ai(m.id, opt_title, opt_content)
+                            success_count += 1
+                    except Exception as ex:
+                        from ...core.logger import log_error
+                        await log_error(f"AI Batch error on ID {m.id}: {ex}")
+
+                    progress_bar.value = (i + 1) / total
+                    self.page.update()
+            finally:
+                await optimizer.close()
+
             self.page.close(dialog)
             await self._refresh_material_table()
             self._show_snackbar(f"AI 批量改写完成！成功优化 {success_count}/{total} 条文案", "success" if success_count > 0 else "error")
@@ -1525,8 +1527,11 @@ class BatchPostPage:
         
         optimizer = AIOptimizer(self.db)
         persona = self.ai_persona_dropdown.value or "normal"
-        success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content, persona=persona)
-        
+        try:
+            success, opt_title, opt_content, err = await optimizer.optimize_post(m.title, m.content, persona=persona)
+        finally:
+            await optimizer.close()
+
         if success:
             await self.db.update_material_ai(mid, opt_title, opt_content)
             await self._refresh_material_table()
