@@ -1436,7 +1436,7 @@ class BatchPostManager:
         # ---- 反风控组件初始化 ----
         rate_limiter = PerAccountRateLimiter(rpm=8)
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
-        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, cooldown_minutes=60)
+        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60)
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
         # 1. 识别受影响的账号
@@ -1585,7 +1585,7 @@ class BatchPostManager:
         # ---- 反风控组件初始化 ----
         rate_limiter = PerAccountRateLimiter(rpm=8)           # 每账号8次/分
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
-        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, cooldown_minutes=60)
+        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60)
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
         # 1. 确定要操作的账号
