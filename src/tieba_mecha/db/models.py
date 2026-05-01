@@ -231,6 +231,8 @@ class BatchPostTask(Base):
     reset_strategy: Mapped[str] = mapped_column(String(20), default="new_only", comment="物料重置策略: new_only/reuse")
     # 循环轮次计数
     cycle_count: Mapped[int] = mapped_column(Integer, default=0, comment="已执行循环轮次数")
+    # 循环轮询起点偏移量（下次发帖从 fnames[offset % len(fnames)] 开始）
+    forum_offset: Mapped[int] = mapped_column(Integer, default=0, comment="循环发帖轮询偏移量")
     # --- 通用字段 ---
     status: Mapped[str] = mapped_column(String(20), default="pending", comment="pending/running/completed/failed")
     progress: Mapped[int] = mapped_column(Integer, default=0)

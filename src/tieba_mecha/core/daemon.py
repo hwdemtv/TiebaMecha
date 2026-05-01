@@ -127,6 +127,7 @@ async def do_batch_post_tasks():
             delay_max=task.delay_max,
             use_ai=task.use_ai,
             ai_persona=getattr(task, 'ai_persona', 'normal') or 'normal',
+            forum_offset=getattr(task, 'cycle_count', 0) or 0,
             total=task.total
         )
 

@@ -724,6 +724,8 @@ class BatchPostTask:
     delay_max: float = 600.0  # 保守值：降低被检测风险
     use_ai: bool = False
     ai_persona: str = None  # AI 人格选择（None = 自动按时段轮换）
+    # 循环模式下贴吧轮询偏移量：每轮循环从不同贴吧开始，避免总是同一贴吧先发
+    forum_offset: int = 0
     status: str = "pending"
     progress: int = 0
     total: int = 0
@@ -1089,7 +1091,8 @@ class BatchPostManager:
             # --- [Step 0: 阵地轮替与账号精准匹配] ---
             # strict 模式：物料索引与贴吧索引严格绑定（1对1精准匹配，不允许阵地跳转）
             # random 模式：物料索引轮替贴吧（负载均衡，允许冷却时动态跳转）
-            base_target_fname = fnames[material_ptr % len(fnames)]
+            # 循环偏移：每轮循环从不同贴吧开始，避免同一贴吧总是先发
+            base_target_fname = fnames[(material_ptr + task.forum_offset) % len(fnames)]
             
             # [死锁检测] 检查是否还有任何账号可用（非熔断、非封禁、非暂停代理）
             available_account_ids = [

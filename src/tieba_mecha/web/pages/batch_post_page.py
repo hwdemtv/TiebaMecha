@@ -95,6 +95,9 @@ class BatchPostPage:
         try:
             self._tasks = await self.db.get_all_batch_tasks()
             self._accounts = await self.db.get_matrix_accounts()
+            # 全量账号映射（用于任务队列显示账号名称，包含已封禁/停用账号）
+            _all_accs = await self.db.get_accounts()
+            self._account_name_map = {a.id: (a.user_name or a.name) for a in _all_accs if a}
             # 双擎靶位缓存
             self._native_forums = await self.db.get_native_post_targets()
             self._target_groups = await self.db.get_target_pool_groups()
@@ -3001,6 +3004,7 @@ class BatchPostPage:
             columns=[
                 ft.DataColumn(ft.Text("序号")),
                 ft.DataColumn(ft.Text("贴吧")),
+                ft.DataColumn(ft.Text("账号")),
                 ft.DataColumn(ft.Text("AI")),
                 ft.DataColumn(ft.Text("策略")),
                 ft.DataColumn(ft.Text("计划时间")),
@@ -3048,9 +3052,25 @@ class BatchPostPage:
             fnames_disp_short = fnames_disp
         tooltip_text = t.fnames_json if hasattr(t, "fnames_json") and t.fnames_json else fnames_disp
 
+        # 账号信息显示：将 accounts_json ID 列表转为可读名称
+        try:
+            account_ids = json.loads(t.accounts_json) if hasattr(t, "accounts_json") and t.accounts_json else []
+            if account_ids and hasattr(self, "_account_name_map"):
+                acc_names = [self._account_name_map.get(aid, f"#{aid}") for aid in account_ids]
+                if len(acc_names) > 2:
+                    accounts_disp = f"{acc_names[0]}, {acc_names[1]} 等 {len(acc_names)} 号"
+                else:
+                    accounts_disp = ", ".join(acc_names) if acc_names else "-"
+            else:
+                accounts_disp = f"{len(account_ids)} 号" if account_ids else "-"
+        except Exception:
+            accounts_disp = "-"
+        accounts_tooltip = t.accounts_json if hasattr(t, "accounts_json") and t.accounts_json else ""
+
         return ft.DataRow(cells=[
             ft.DataCell(ft.Text(str(index + 1))),
             ft.DataCell(ft.Text(fnames_disp_short, size=11, tooltip=tooltip_text)),
+            ft.DataCell(ft.Text(accounts_disp, size=11, tooltip=accounts_tooltip)),
             ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(_format_schedule_display(t))),
