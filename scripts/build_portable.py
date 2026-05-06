@@ -12,10 +12,16 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import argparse
+
 # --- 项目配置 ---
-PROJECT_NAME = "TiebaMecha_Portable"
+PROJECT_NAME_BASE = "TiebaMecha_Portable"
 PYTHON_VERSION = "3.11.9"
-PYTHON_ZIP_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="TiebaMecha 便携版打包工具")
+    parser.add_argument("--version", type=str, help="指定版本号 (例如 1.3.0)")
+    return parser.parse_args()
 
 def get_root():
     return Path(__file__).parent.parent.absolute()
@@ -24,14 +30,18 @@ def get_root():
 PYTHON_MIRRORS = [
     f"https://mirrors.huaweicloud.com/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip",
     f"https://pypi.tuna.tsinghua.edu.cn/python-ftp/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip",
-    "https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip" 
+    f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip" 
 ]
 PIP_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 def build_portable():
+    args = parse_args()
+    version_suffix = f"_v{args.version}" if args.version else ""
+    project_name = f"{PROJECT_NAME_BASE}{version_suffix}"
+    
     root = get_root()
     dist_dir = root / "dist"
-    portable_dir = dist_dir / PROJECT_NAME
+    portable_dir = dist_dir / project_name
     runtime_dir = portable_dir / "_runtime"
     
     # 1. 清理环境
