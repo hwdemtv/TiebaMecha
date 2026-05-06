@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.0] - 2026-05-06
 
+### Fixed
+- **UI & 布局优化**
+  - 修复登录与设置密码页面在小窗口下底部按钮无法点击的问题（支持自动滚动与响应式布局）。
+  - 优化初始化引导页面的垂直间距，提升小屏幕适配度。
+
 ### Changed
 - **版本升级 (Version Bump)**
   - 更新基础版本号至 1.3.0。

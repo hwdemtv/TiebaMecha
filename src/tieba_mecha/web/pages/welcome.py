@@ -40,7 +40,7 @@ class WelcomePage:
                 ft.Icon(icons.SHIELD_ROUNDED, size=80, color="primary"),
                 ft.Text(f"欢迎使用 TIEBAMECHA v{__version__}", size=24, weight=ft.FontWeight.BOLD),
                 ft.Text("INITIALIZATION REQUIRED / 需要初始化", size=12, color="primary", weight=ft.FontWeight.W_300),
-                ft.Divider(height=40, color="transparent"),
+                ft.Divider(height=30, color="transparent"),
                 ft.Container(
                     content=ft.Column([
                         ft.Text("第一步：获取登录凭据", size=14, weight=ft.FontWeight.BOLD),
@@ -55,14 +55,19 @@ class WelcomePage:
                     bgcolor=with_opacity(0.03, "onSurface"),
                     border_radius=10,
                 ),
-                ft.Divider(height=20, color="transparent"),
+                ft.Divider(height=15, color="transparent"),
                 self.cookie_input,
                 self.status,
                 ft.Container(height=10),
                 self.verify_btn,
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            ], 
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER, 
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO,
+            ),
             alignment=ft.alignment.center,
-            padding=50,
+            padding=ft.padding.only(top=20, bottom=20, left=50, right=50),
             expand=True,
         )
 

@@ -119,7 +119,7 @@ class LoginPage:
                     ft.Icon(icons.LOCK_ROUNDED, size=80, color="primary"),
                     self.title_text,
                     self.subtitle_text,
-                    ft.Divider(height=40, color="transparent"),
+                    ft.Divider(height=30, color="transparent"),
                     ft.Container(
                         content=ft.Column(
                             controls=[
@@ -137,7 +137,7 @@ class LoginPage:
                         border_radius=10,
                         width=320,
                     ),
-                    ft.Divider(height=20, color="transparent"),
+                    ft.Divider(height=15, color="transparent"),
                     self.hint_text,
                     self.password_field,
                     self.confirm_field,
@@ -147,10 +147,12 @@ class LoginPage:
                     self.skip_btn,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
                 spacing=10,
+                scroll=ft.ScrollMode.AUTO,
             ),
             alignment=ft.alignment.center,
-            padding=50,
+            padding=ft.padding.only(top=20, bottom=20, left=50, right=50),
             expand=True,
         )
 
