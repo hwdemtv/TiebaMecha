@@ -13,8 +13,8 @@ from .. import __version__
 @dataclass
 class ReleaseInfo:
     """发布版本信息"""
-    version: str           # 版本号 "1.2.0"
-    tag_name: str          # Git Tag "v1.2.0"
+    version: str           # 版本号 "1.3.0"
+    tag_name: str          # Git Tag "v1.3.0"
     published_at: datetime # 发布时间
     body: str              # 更新说明
     assets: List[dict]     # 下载资源列表
