@@ -3065,7 +3065,7 @@ class BatchPostPage:
                 accounts_disp = f"{len(account_ids)} 号" if account_ids else "-"
         except Exception:
             accounts_disp = "-"
-        accounts_tooltip = t.accounts_json if hasattr(t, "accounts_json") and t.accounts_json else ""
+        accounts_tooltip = "\n".join(acc_names) if account_ids and hasattr(self, "_account_name_map") else ""
 
         return ft.DataRow(cells=[
             ft.DataCell(ft.Text(str(index + 1))),

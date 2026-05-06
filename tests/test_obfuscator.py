@@ -69,6 +69,23 @@ class TestObfuscator:
         assert "World" in result
         assert "123" in result
 
+    def test_normalize_line_endings(self):
+        """Test normalize_line_endings converts CRLF and CR to LF."""
+        text = "段落一\r\n段落二\r段落三\n段落四"
+        result = Obfuscator.normalize_line_endings(text)
+
+        assert "\r" not in result
+        assert result == "段落一\n段落二\n段落三\n段落四"
+
+    def test_humanize_spacing_preserves_crlf(self):
+        """Test humanize_spacing handles CRLF and preserves paragraph content."""
+        text = "段落一\r\n\r\n段落二\r\n"
+        result = Obfuscator.humanize_spacing(text)
+
+        assert "\r" not in result
+        assert "段落一" in result
+        assert "段落二" in result
+
     def test_inject_zero_width_chars_mixed_content(self):
         """Test inject_zero_width_chars with mixed Chinese and English."""
         text = "这是中文English混合content"

@@ -18,6 +18,13 @@ class Obfuscator:
         self.config = config or {}
 
     @staticmethod
+    def normalize_line_endings(text: str) -> str:
+        """Normalize all line endings to LF for consistent processing."""
+        if text is None:
+            return text
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    @staticmethod
     async def from_db(db) -> 'Obfuscator':
         """从数据库加载配置并初始化混淆器"""
         config = {
@@ -32,6 +39,8 @@ class Obfuscator:
         """根据配置执行全流程混淆"""
         if not text:
             return text
+
+        text = self.normalize_line_endings(text)
         
         # 1. 语义乱序
         if self.config.get("use_shuffling", True):
@@ -86,6 +95,7 @@ class Obfuscator:
         """随机插入换行和空格，改变整体段落签名的 Hash"""
         if not text:
             return text
+        text = Obfuscator.normalize_line_endings(text)
         paragraphs = text.split('\n')
         new_paragraphs = []
         for p in paragraphs:
@@ -116,6 +126,7 @@ class Obfuscator:
         if not text:
             return text
 
+        text = Obfuscator.normalize_line_endings(text)
         connectors = {'因此', '所以', '但是', '然而', '另外', '此外', '而且', '不过', '总之', '于是', '否则', '接着'}
         paragraphs = text.split('\n')
         result = []

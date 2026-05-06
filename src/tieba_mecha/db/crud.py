@@ -727,8 +727,11 @@ class Database:
                         forum.last_sign_status = "pending"
                         has_changes = True
                     
-                    # 2. 断签检测：如果距离最后一次签到的日期已经早于“昨天”，说明断签了，清零连续天数
+                    # 2. 断签检测：如果昨天签到失败，说明连续签到已经断开，清零连续天数
                     if last_date < yesterday and forum.sign_count > 0:
+                        forum.sign_count = 0
+                        has_changes = True
+                    elif last_date == yesterday and forum.last_sign_status != "success" and forum.sign_count > 0:
                         forum.sign_count = 0
                         has_changes = True
 
