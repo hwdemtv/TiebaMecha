@@ -332,6 +332,9 @@ class TiebaMechaDaemon:
             await self.reload(db)
             
             self.scheduler.start()
+        except asyncio.CancelledError:
+            print("[DAEMON] 启动过程被取消")
+            return
         except Exception as e:
             # 捕获已启动错误等竞态异常
             if "already running" not in str(e).lower():

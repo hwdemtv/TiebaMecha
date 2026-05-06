@@ -65,15 +65,21 @@ def _patched_run_task(self, handler, *args, **kwargs):
     future = _asyncio.run_coroutine_threadsafe(handler(*args, **kwargs), self._Page__loop)
 
     def _safe_on_completion(f):
-        if f.cancelled():
-            return  # Future 已取消，静默忽略
+        import concurrent.futures
         try:
+            if f.cancelled():
+                return
             exc = f.exception()
-        except _asyncio.CancelledError:
-            return  # CancelledError 也静默忽略
-        if exc:
+            if exc:
+                import logging as _log
+                _log.getLogger(__name__).error(f"run_task coroutine raised: {exc}", exc_info=exc)
+        except (_asyncio.CancelledError, concurrent.futures.CancelledError):
+            pass
+        except Exception as e:
+            if "CancelledError" in type(e).__name__:
+                return
             import logging as _log
-            _log.getLogger(__name__).error(f"run_task coroutine raised: {exc}", exc_info=exc)
+            _log.getLogger(__name__).error(f"run_task callback error: {e}", exc_info=e)
 
     future.add_done_callback(_safe_on_completion)
     return future
