@@ -286,6 +286,27 @@ class TestForumCRUD:
         forums = await db.get_forums()
         assert all(not f.is_sign_today for f in forums)
 
+    async def test_check_and_reset_daily_sign_clears_streak_after_yesterday_failure(self, db):
+        """Test that yesterday failure clears continuous streak."""
+        from datetime import datetime, timedelta
+        from tieba_mecha.db.models import Forum
+
+        acc = await db.add_account(name="test", bduss="bduss")
+        forum = await db.add_forum(fid=1, fname="forum", account_id=acc.id, sign_count=5)
+
+        # Simulate yesterday's failed sign attempt
+        yesterday = datetime.now() - timedelta(days=1)
+        async with db.async_session() as session:
+            db_forum = await session.get(Forum, forum.id)
+            db_forum.last_sign_date = yesterday
+            db_forum.last_sign_status = "failure"
+            await session.commit()
+
+        await db.check_and_reset_daily_sign()
+
+        forums = await db.get_forums()
+        assert forums[0].sign_count == 0
+
     async def test_delete_forum(self, db):
         """Test deleting a forum."""
         acc = await db.add_account(name="test", bduss="bduss")

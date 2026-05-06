@@ -1257,17 +1257,17 @@ class BatchPostManager:
                             except Exception as _e: logging.debug(f"预热浏览非关键失败: {_e}")
                                 
                             forum_info = await client.get_forum(current_target_fname)
-                            # 贴吧API需要\r\n作为换行符，而不是\n
+                            # 统一将所有 CR/CRLF 规范化为 LF，再转换为 Tieba 要求的 CRLF
+                            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n')
                             safe_content_tieba = safe_content.replace('\n', '\r\n')
                             data = {
                                 "ie": "utf-8", "kw": current_target_fname, "fid": getattr(forum_info, 'fid', 0),
                                 "tbs": client.account.tbs, "title": title, "content": safe_content_tieba, "anonymous": 0
                             }
-                            body_content = urllib.parse.urlencode(data).encode('utf-8')
                             
                             res = await http_client.post(
                                 "https://tieba.baidu.com/f/commit/thread/add",
-                                headers=headers, content=body_content, timeout=25.0
+                                headers=headers, data=data, timeout=25.0
                             )
                             res_json = res.json()
                             err_code = res_json.get("err_code", 0)

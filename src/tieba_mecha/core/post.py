@@ -369,7 +369,8 @@ async def add_thread(
             safe_title = obf.inject_zero_width_chars(title, density=0.2)
             safe_content = obf.obfuscate_all(content)
 
-            # 贴吧API需要\r\n作为换行符，而不是\n
+            # 统一将所有 CR/CRLF 规范化为 LF，再转换为 Tieba 要求的 CRLF
+            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n')
             safe_content = safe_content.replace('\n', '\r\n')
 
             data = {
@@ -396,13 +397,10 @@ async def add_thread(
                     await log_warn(f"[{fname}] 预读失败: {str(e)}")
                     
                 # 【第二步防封】实际提交流程
-                # [终极加固] 手动将数据编码为 UTF-8 字节流，避免 httpx 在 ASCII 环境下自动转换失效
-                body_content = urllib.parse.urlencode(data).encode('utf-8')
-                
                 res = await http_client.post(
                     "https://tieba.baidu.com/f/commit/thread/add",
                     headers=headers,
-                    content=body_content,
+                    data=data,
                     timeout=15.0
                 )
                 
