@@ -22,7 +22,7 @@
 2.  **检查生成结果**：
     脚本执行完成后，会在 **`dist/TiebaMecha_Portable`** 目录下生成完整环境。
 3.  **打包分发**：
-    将该目录压缩为 `.zip` 文件（例如：`TiebaMecha_v1.2.0_Portable.zip`）即可分发给用户。
+    将该目录压缩为 `.zip` 文件（例如：`TiebaMecha_v1.3.0_Portable.zip`）即可分发给用户。
 
 ---
 
@@ -40,7 +40,7 @@ flet pack start_web.py `
     --icon "src/tieba_mecha/assets/icon.png" `
     --add-data "src;src" `
     --product-name "TiebaMecha 贴吧机甲" `
-    --product-version "1.2.0" `
+    --product-version "1.3.0" `
     --file-description "赛博机甲风格的百度贴吧自动化管理工具" `
     --copyright "Copyright 2026 Cyber-Mecha" `
     --company-name "Cyber-Mecha" `

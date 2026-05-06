@@ -378,7 +378,7 @@ import shutil
 @dataclass
 class ReleaseInfo:
     """发布版本信息"""
-    version: str           # 版本号 "v1.2.0"
+    version: str           # 版本号 "v1.3.0"
     tag_name: str          # Git Tag
     published_at: datetime # 发布时间
     body: str              # 更新说明
