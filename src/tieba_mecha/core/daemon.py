@@ -321,14 +321,15 @@ async def do_maintenance_task():
     except Exception:
         acc_delay_min, acc_delay_max = 300.0, 900.0
 
-    print(f"[{datetime.now()}] [DAEMON] 启动全域 BioWarming 养号周期，覆盖 {len(maint_accounts)} 个终端...")
+    from .logger import log_info, log_error
+    await log_info(f"[BioWarming] 启动全域养号周期，覆盖 {len(maint_accounts)} 个终端...")
     for acc in maint_accounts:
         try:
             await manager.run_maint_cycle(acc.id)
             # 账号间增加长随机延迟，防止 IP 行为重合
             await asyncio.sleep(random.uniform(acc_delay_min, acc_delay_max))
         except Exception as e:
-            print(f"[DAEMON] 账号 {acc.name} 维护异常: {e}")
+            await log_error(f"[BioWarming] 账号 {acc.name} 维护异常: {e}")
 
 async def do_auth_check_task():
     """执行在线授权静默探测的内部包裹"""

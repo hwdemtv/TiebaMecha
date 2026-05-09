@@ -278,9 +278,23 @@ class SettingsPage:
         maint_tab = ft.Column([
             ft.Divider(height=10, color="transparent"),
             self._create_section_title("养号行为引擎 / BIOWARMING", ft.icons.SHIELD_MOON_OUTLINED),
-            ft.Row([self.maint_fields["maint_interval_hours"], self.maint_fields["maint_acc_delay_min"], self.maint_fields["maint_acc_delay_max"]], spacing=10),
-            ft.Text("执行日志:", size=14, weight=ft.FontWeight.W_500),
-            ft.Container(content=self.maint_log_list, height=300, border=ft.border.all(1, with_opacity(0.1, "onSurface")), border_radius=10),
+            ft.Row([
+                self.maint_fields["maint_interval_hours"], 
+                self.maint_fields["maint_acc_delay_min"], 
+                self.maint_fields["maint_acc_delay_max"]
+            ], spacing=10),
+            ft.Row([
+                ft.Text("执行日志:", size=14, weight=ft.FontWeight.W_500),
+                ft.Container(expand=True),
+                ft.TextButton("立即执行一次养号周期", icon=ft.icons.PLAY_CIRCLE_FILL_ROUNDED, on_click=self._trigger_maint_now),
+            ]),
+            ft.Container(
+                content=self.maint_log_list, 
+                height=350, 
+                border=ft.border.all(1, with_opacity(0.1, "onSurface")), 
+                border_radius=10,
+                bgcolor=with_opacity(0.02, "onSurface")
+            ),
         ], spacing=15, scroll=ft.ScrollMode.AUTO)
 
         # --- 6. 守护任务 (New) ---
@@ -339,6 +353,7 @@ class SettingsPage:
         self.proxy_fallback_switch = ft.Switch(label="代理容灾", value=True)
         self.slm_api_url_field = ft.TextField(label="短链 API 地址", expand=True)
         self.slm_api_key_field = ft.TextField(label="短链 API Key", password=True, can_reveal_password=True, expand=True)
+        self._init_general_sec_fields()
 
     def _init_auth_fields(self):
         self.auth_badge = ft.Chip(label=ft.Text("..."))
@@ -352,7 +367,12 @@ class SettingsPage:
         self.current_version_text = ft.Text("...", size=14)
         self.check_update_btn = ft.FilledTonalButton("检查更新", icon=ft.icons.SYNC_ROUNDED, on_click=self._manual_check_update)
         self.latest_version_info = ft.Text("...", size=13, color="onSurfaceVariant")
-        self.changelog_area = ft.Markdown("", selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)
+        self.changelog_area = ft.Markdown(
+            "", 
+            selectable=True, 
+            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+            on_tap_link=lambda e: self.page.launch_url(e.data)
+        )
 
     def _init_obf_fields(self):
         self.obf_density_slider = ft.Slider(min=0, max=0.5, divisions=10, label="{value}", expand=True)
@@ -373,23 +393,6 @@ class SettingsPage:
         self.web_old_pwd_field = ft.TextField(label="当前密码", password=True, can_reveal_password=True, expand=True)
         self.web_new_pwd_field = ft.TextField(label="新密码", password=True, can_reveal_password=True, expand=True)
         self.web_confirm_pwd_field = ft.TextField(label="确认新密码", password=True, can_reveal_password=True, expand=True)
-    
-    # 修改 build 中引用的安全字段初始化
-    def _init_general_fields(self):
-        # 之前的逻辑合并
-        self.ai_key_field = ft.TextField(label="AI API KEY", password=True, can_reveal_password=True, expand=True)
-        self.ai_url_field = ft.TextField(label="Base URL", expand=True)
-        self.ai_model_field = ft.TextField(label="Model", width=150)
-        self.ai_prompt_field = ft.TextField(label="System Prompt", multiline=True, min_lines=3, max_lines=6, text_size=12)
-        self.delay_min_field = ft.TextField(label="签到延迟Min", expand=True)
-        self.delay_max_field = ft.TextField(label="签到延迟Max", expand=True)
-        self.heartbeat_field = ft.TextField(label="检测间隔(h)", expand=True)
-        self.quiet_start_field = ft.TextField(label="静默开始", expand=True)
-        self.quiet_end_field = ft.TextField(label="静默结束", expand=True)
-        self.proxy_fallback_switch = ft.Switch(label="代理容灾", value=True)
-        self.slm_api_url_field = ft.TextField(label="短链 API 地址", expand=True)
-        self.slm_api_key_field = ft.TextField(label="短链 API Key", password=True, can_reveal_password=True, expand=True)
-        self._init_general_sec_fields()
 
     def _create_section_title(self, title: str, icon: str):
         return ft.Row([ft.Icon(icon, color="primary", size=18), ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color="primary")], spacing=10)
@@ -432,6 +435,11 @@ class SettingsPage:
             )
             cards.append(card)
         return cards
+
+    async def _trigger_maint_now(self, e):
+        """手动触发一次养号周期"""
+        self._show_snackbar("正在手动启动全域养号维护...")
+        self.page.run_task(do_maintenance_task)
 
     async def _trigger_daemon_job(self, job_id: str):
         func = self.JOB_FUNCS.get(job_id)
