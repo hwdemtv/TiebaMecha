@@ -369,9 +369,8 @@ async def add_thread(
             safe_title = obf.inject_zero_width_chars(title, density=0.2)
             safe_content = obf.obfuscate_all(content)
 
-            # 统一将所有 CR/CRLF 规范化为 LF，再转换为 Tieba 要求的 CRLF
+            # 统一将所有 CR/CRLF 规范化为 LF（Web 表单 API 用 LF 换行）
             safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n')
-            safe_content = safe_content.replace('\n', '\r\n')
 
             data = {
                 "ie": "utf-8",

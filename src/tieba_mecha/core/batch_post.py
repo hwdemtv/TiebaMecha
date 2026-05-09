@@ -1261,12 +1261,11 @@ class BatchPostManager:
                             except Exception as _e: logging.debug(f"预热浏览非关键失败: {_e}")
                                 
                             forum_info = await client.get_forum(current_target_fname)
-                            # 统一将所有 CR/CRLF 规范化为 LF，再转换为 Tieba 要求的 CRLF
+                            # 统一将所有 CR/CRLF 规范化为 LF（Web 表单 API 用 LF 换行）
                             safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n')
-                            safe_content_tieba = safe_content.replace('\n', '\r\n')
                             data = {
                                 "ie": "utf-8", "kw": current_target_fname, "fid": getattr(forum_info, 'fid', 0),
-                                "tbs": client.account.tbs, "title": title, "content": safe_content_tieba, "anonymous": 0
+                                "tbs": client.account.tbs, "title": title, "content": safe_content, "anonymous": 0
                             }
                             
                             res = await http_client.post(

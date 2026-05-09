@@ -3351,7 +3351,7 @@ class BatchPostPage:
                 else:
                     st = now + timedelta(hours=1)
 
-                await self.db.add_batch_task(
+                new_task = await self.db.add_batch_task(
                     fname=fnames[0], # 保留以作向下兼容
                     fnames_json=json.dumps(fnames, ensure_ascii=False),
                     titles_json="[]",
@@ -3371,6 +3371,13 @@ class BatchPostPage:
                     schedule_time=st,
                     status="pending"
                 )
+                # [精确调度] once 类型任务注册 APScheduler date 触发器，精确到分钟执行
+                if schedule_type == "once":
+                    try:
+                        from ...core.daemon import daemon_instance
+                        daemon_instance.schedule_once_task(str(new_task.id), st)
+                    except Exception as _sched_err:
+                        print(f"[SCHED] once 精度调度注册失败（将由 30min 轮询兜底）: {_sched_err}")
                 # 生成提示
                 type_labels = {"once": "单次", "daily": "每天", "weekly": "每周", "interval": f"每{self.interval_hours.value}小时"}
                 self._show_snackbar(f"{type_labels.get(schedule_type, '')}矩阵任务已加入全域队列", "success")
