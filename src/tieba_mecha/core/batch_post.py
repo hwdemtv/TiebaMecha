@@ -939,6 +939,8 @@ class BatchPostManager:
                     candidate = task.accounts[(step + offset) % n]
                     if candidate in native_accounts:
                         return candidate
+                # 轮询模式下，如果找不到匹配的原生账号，继续轮询而非随机选择
+                return task.accounts[step % len(task.accounts)]
             elif task.strategy == "weighted":
                 filtered = [(a, w) for a, w in weights if a in native_accounts]
                 if filtered:
@@ -954,6 +956,8 @@ class BatchPostManager:
                     candidate = task.accounts[(step + offset) % n]
                     if candidate in available_accounts:
                         return candidate
+                # 轮询模式下，如果找不到匹配的关注账号，继续轮询而非随机选择
+                return task.accounts[step % len(task.accounts)]
             elif task.strategy == "weighted":
                 filtered = [(a, w) for a, w in weights if a in available_accounts]
                 if filtered:

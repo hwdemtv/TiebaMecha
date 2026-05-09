@@ -3053,6 +3053,8 @@ class BatchPostPage:
         tooltip_text = t.fnames_json if hasattr(t, "fnames_json") and t.fnames_json else fnames_disp
 
         # 账号信息显示：将 accounts_json ID 列表转为可读名称
+        acc_names = []
+        account_ids = []
         try:
             account_ids = json.loads(t.accounts_json) if hasattr(t, "accounts_json") and t.accounts_json else []
             if account_ids and hasattr(self, "_account_name_map"):
@@ -3065,7 +3067,7 @@ class BatchPostPage:
                 accounts_disp = f"{len(account_ids)} 号" if account_ids else "-"
         except Exception:
             accounts_disp = "-"
-        accounts_tooltip = "\n".join(acc_names) if account_ids and hasattr(self, "_account_name_map") else ""
+        accounts_tooltip = "\n".join(acc_names) if acc_names else ""
 
         return ft.DataRow(cells=[
             ft.DataCell(ft.Text(str(index + 1))),
@@ -3439,10 +3441,27 @@ class BatchPostPage:
         except Exception:
             pass  # 持久化失败不阻塞执行
 
+        # 获取刚保存的数据库任务 ID，用于后续更新状态
+        db_task_id = None
+        try:
+            _latest_tasks = await self.db.get_all_batch_tasks()
+            for _t in _latest_tasks:
+                if getattr(_t, "schedule_type", None) == "once" and getattr(_t, "status", None) == "running":
+                    db_task_id = _t.id
+                    break
+        except Exception:
+            pass
+
         try:
             async for update in self.manager.execute_task(task):
                 if not self._is_running:
                     self._add_log("！任务已被人工干预中止")
+                    # 更新数据库状态为 stopped
+                    if db_task_id:
+                        try:
+                            await self.db.update_batch_task(db_task_id, status="stopped", progress=task.progress)
+                        except Exception:
+                            pass
                     break
 
                 if update["status"] == "success":
@@ -3458,10 +3477,27 @@ class BatchPostPage:
                     self.progress_bar.update()
                 except Exception:
                     pass
+            else:
+                # 循环正常结束（未 break），更新数据库状态为 completed
+                if db_task_id:
+                    try:
+                        await self.db.update_batch_task(db_task_id, status="completed", progress=task.progress)
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             self._add_log("！任务已被系统强制回收")
+            if db_task_id:
+                try:
+                    await self.db.update_batch_task(db_task_id, status="failed", progress=task.progress)
+                except Exception:
+                    pass
         except Exception as ex:
             self._add_log(f"CRITICAL ERROR: {str(ex)}", "error")
+            if db_task_id:
+                try:
+                    await self.db.update_batch_task(db_task_id, status="failed", progress=task.progress)
+                except Exception:
+                    pass
         finally:
             self._is_running = False
             self.start_btn.text = "制定矩阵任务"
