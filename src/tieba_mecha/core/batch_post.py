@@ -1261,16 +1261,19 @@ class BatchPostManager:
                             except Exception as _e: logging.debug(f"预热浏览非关键失败: {_e}")
                                 
                             forum_info = await client.get_forum(current_target_fname)
-                            # 统一将所有 CR/CRLF 规范化为 LF（Web 表单 API 用 LF 换行）
-                            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n')
+                            # 规范化换行 → 统一 LF → 转换为 [br] BBCode（贴吧 Web 表单 API 用 [br] 换行）
+                            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '[br]')
                             data = {
                                 "ie": "utf-8", "kw": current_target_fname, "fid": getattr(forum_info, 'fid', 0),
-                                "tbs": client.account.tbs, "title": title, "content": safe_content, "anonymous": 0
+                                "tbs": client.account.tbs, "title": title, "content": safe_content,
+                                "anonymous": 0, "rich_text": "1",
                             }
-                            
+                            # 手动 URL 编码并以原始字节发送，避免 httpx 对 <> 等字符的过度百分号编码
+                            post_body = urllib.parse.urlencode(data, encoding='utf-8').encode('utf-8')
+
                             res = await http_client.post(
                                 "https://tieba.baidu.com/f/commit/thread/add",
-                                headers=headers, data=data, timeout=25.0
+                                headers=headers, content=post_body, timeout=25.0
                             )
                             res_json = res.json()
                             err_code = res_json.get("err_code", 0)
