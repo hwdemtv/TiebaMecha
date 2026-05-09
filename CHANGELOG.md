@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-05-09
+
+### Added
+- **网络容灾增强 (Network Resilience)**
+  - 增加 GitHub API 更新检测备用节点 (`git.hubinwei.top`)，支持主备自动切换，提升国内环境下的更新检测成功率。
+
 ## [1.3.1] - 2026-05-09
 
 ### Added
