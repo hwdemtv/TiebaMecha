@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-05-09
+
+### Added
+- **精确调度引擎 (Precise Scheduling)**
+  - 针对 `once` 类型任务实现分钟级精确触发逻辑，由 APScheduler 实时守护。
+- **UI 状态实时同步**
+  - 发帖成功后自动更新本地数据库并刷新监控列表。
+  - 矩阵任务执行状态（成功/停止/失败）与本地数据库实时挂钩。
+
+### Fixed
+- **发帖排版修复**
+  - 修正内容换行符处理，引入 `[br]` 标签确保贴吧网页端显示正常。
+  - 优化请求编码逻辑，避免特殊混淆字符被过度转义导致的发帖失败。
+- **稳定性增强**
+  - 修复 Flet 在高并发异步任务下的 Event Loop 检索与回调稳定性。
+  - 修正矩阵任务轮询策略，提升账号切换的平滑度。
+
 ## [1.3.0] - 2026-05-06
 
 ### Fixed
