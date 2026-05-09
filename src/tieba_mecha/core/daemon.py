@@ -79,6 +79,78 @@ async def do_auto_monitor_task():
             except Exception as e:
                 print(f"[DAEMON] 监控 {fname} 失败: {e}")
 
+async def _execute_once_task(task_id: str):
+    """
+    精确执行 once 类型批量发帖任务（由 APScheduler date 触发器调用）。
+    与 do_batch_post_tasks 中的轮询逻辑共享核心执行代码。
+    """
+    db = await get_db()
+    # 从数据库获取任务
+    from ..db.models import BatchPostTask as BatchPostTaskModel
+    from sqlalchemy import select
+    async with db.async_session() as session:
+        result = await session.execute(
+            select(BatchPostTaskModel).where(BatchPostTaskModel.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+    if not task:
+        print(f"[DAEMON] once 任务 {task_id} 不存在，跳过")
+        return
+
+    # 只执行 status=pending 的任务（防止重复触发）
+    if task.status != "pending":
+        print(f"[DAEMON] once 任务 {task_id} 状态为 {task.status}，跳过")
+        return
+
+    print(f"[{datetime.now()}] [DAEMON] once 精确触发: ID={task.id} 贴吧={task.fname}")
+
+    manager = BatchPostManager(db)
+
+    # 转换数据库模型为 Core 任务对象
+    task_pairing = getattr(task, 'pairing_mode', None)
+    if not task_pairing and ":" in task.strategy:
+        task_pairing = task.strategy.split(":")[1]
+    else:
+        task_pairing = task_pairing or "random"
+
+    core_task = CoreBatchPostTask(
+        id=str(task.id),
+        fname=task.fname,
+        fnames=json.loads(task.fnames_json),
+        accounts=json.loads(task.accounts_json),
+        strategy=task.strategy.split(":")[0] if ":" in task.strategy else task.strategy,
+        pairing_mode=task_pairing,
+        delay_min=task.delay_min,
+        delay_max=task.delay_max,
+        use_ai=task.use_ai,
+        ai_persona=getattr(task, 'ai_persona', 'normal') or 'normal',
+        forum_offset=getattr(task, 'cycle_count', 0) or 0,
+        total=task.total
+    )
+
+    # 更新任务状态为 running
+    await db.update_batch_task(task.id, status="running")
+
+    try:
+        async for update in manager.execute_task(core_task):
+            update_status = update.get("status", "running")
+            if update_status in ("error", "failed"):
+                print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 单条失败: {update.get('msg', update)}")
+            await db.update_batch_task(
+                task.id,
+                progress=update.get("progress", 0),
+                status="running"
+            )
+
+        # once 类型执行完毕
+        await db.update_batch_task(task.id, status="completed")
+        print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 执行完成")
+    except Exception as e:
+        print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 执行异常: {e}")
+        await db.update_batch_task(task.id, status="failed")
+
+
 async def do_batch_post_tasks():
     """执行到期的批量发帖任务（支持 daily/weekly/interval 循环调度）"""
     db = await get_db()
@@ -370,6 +442,39 @@ class TiebaMechaDaemon:
                 print(f"[DAEMON] 解析配置签到时间出错: {e}")
         else:
             print("[DAEMON] 已重载热更新: 守护签到已禁用")
+
+    def schedule_once_task(self, task_id: str, schedule_time: datetime):
+        """
+        为 once 类型任务注册精确调度（使用 APScheduler date 触发器）。
+        任务会在 schedule_time 精确触发，不再依赖 30 分钟轮询。
+
+        Args:
+            task_id: 任务 ID（数据库主键）
+            schedule_time: 计划执行时间
+        """
+        job_id = f"once_batch_{task_id}"
+        # 移除旧的（如果存在）
+        if self.scheduler.get_job(job_id):
+            self.scheduler.remove_job(self.scheduler.get_job(job_id))
+
+        self.scheduler.add_job(
+            _execute_once_task,
+            'date',
+            run_date=schedule_time,
+            args=[task_id],
+            id=job_id,
+            replace_existing=True,
+            misfire_grace_time=300,  # 5分钟容错窗口
+        )
+        print(f"[DAEMON] 已注册 once 精确调度: 任务 {task_id} 将在 {schedule_time} 执行")
+
+    def cancel_once_task(self, task_id: str):
+        """取消已注册的 once 精确调度任务"""
+        job_id = f"once_batch_{task_id}"
+        job = self.scheduler.get_job(job_id)
+        if job:
+            self.scheduler.remove_job(job)
+            print(f"[DAEMON] 已取消 once 调度: 任务 {task_id}")
 
     def stop(self):
         if self._started:
