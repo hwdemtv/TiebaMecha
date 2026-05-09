@@ -59,13 +59,22 @@ _orig_run_task = _fpage.Page.run_task
 def _patched_run_task(self, handler, *args, **kwargs):
     """修复：在 _on_completion 回调中安全处理已取消的 Future"""
     import asyncio as _asyncio
+    import concurrent.futures
     _fpage._session_page.set(self)
     assert _asyncio.iscoroutinefunction(handler)
 
-    future = _asyncio.run_coroutine_threadsafe(handler(*args, **kwargs), self._Page__loop)
+    # 获取 Page 的事件循环（考虑混淆后的名称）
+    loop = getattr(self, "_Page__loop", None) or getattr(self, "__loop", None)
+    if not loop:
+        # 尝试从私有属性获取
+        for attr in dir(self):
+            if attr.endswith("__loop"):
+                loop = getattr(self, attr)
+                break
+    
+    future = _asyncio.run_coroutine_threadsafe(handler(*args, **kwargs), loop)
 
     def _safe_on_completion(f):
-        import concurrent.futures
         try:
             if f.cancelled():
                 return
@@ -76,13 +85,19 @@ def _patched_run_task(self, handler, *args, **kwargs):
         except (_asyncio.CancelledError, concurrent.futures.CancelledError):
             pass
         except Exception as e:
+            # 这里的异常会触发 "exception calling callback"
+            # 必须绝对保证这里不抛出异常
             if "CancelledError" in type(e).__name__:
                 return
-            import logging as _log
-            _log.getLogger(__name__).error(f"run_task callback error: {e}", exc_info=e)
+            try:
+                import logging as _log
+                _log.getLogger(__name__).debug(f"Silent suppression of run_task callback error: {e}")
+            except:
+                pass
 
     future.add_done_callback(_safe_on_completion)
     return future
+
 _fpage.Page.run_task = _patched_run_task
 
 import flet_core.pubsub.pubsub_hub as _psh
