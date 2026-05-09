@@ -522,6 +522,32 @@ class PostsPage:
                         posted_time=datetime.now()
                     )
                     break
+            # 保存帖子记录到本地数据库，以便在列表中显示
+            account = await self.db.get_active_account()
+            await self.db.upsert_thread_records([{
+                "tid": tid,
+                "title": title,
+                "author_name": account.user_name if account else "",
+                "author_id": account.id if account else 0,
+                "reply_num": 0,
+                "text": content,
+                "fname": fname,
+                "is_good": False,
+            }])
+            # 将新帖子添加到本地列表并刷新显示
+            class ThreadData:
+                pass
+            t = ThreadData()
+            t.tid = int(tid)
+            t.title = title
+            t.author_name = account.user_name if account else ""
+            t.reply_num = 0
+            t.text = content
+            t.fname = fname
+            t.is_good = False
+            self._threads.insert(0, t)
+            self.thread_list.controls = self._build_thread_items()
+            self._update_toolbar_label(f"监控列表 (共 {len(self._threads)} 条)")
             self._show_snackbar(f"发帖成功! TID: {tid}", "success")
             self.post_title.value = ""
             self.post_content.value = ""
