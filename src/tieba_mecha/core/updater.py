@@ -26,6 +26,7 @@ class UpdateManager:
     """应用更新管理器"""
 
     GITHUB_API = "https://api.github.com/repos/hwdemtv/TiebaMecha"
+    GITHUB_API_BACKUP = "https://git.hubinwei.top/repos/hwdemtv/TiebaMecha"
 
     def __init__(self, db=None):
         self.db = db
@@ -36,15 +37,24 @@ class UpdateManager:
         """获取当前版本号"""
         return self._current_version
 
+    async def _fetch_from_api(self, session, url, headers):
+        """内部辅助函数：从指定 API URL 获取发布信息"""
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
+        except Exception as e:
+            print(f"[UpdateManager] Failed to fetch from {url}: {e}")
+            return None
+
     async def check_update(self, include_prerelease: bool = False) -> Optional[ReleaseInfo]:
         """
-        检查是否有新版本
-
-        Args:
-            include_prerelease: 是否包含预发布版本
-
-        Returns:
-            如果有新版本返回 ReleaseInfo，否则返回 None
+        检查是否有新版本（支持备用节点自动切换）
         """
         try:
             async with aiohttp.ClientSession() as session:
@@ -53,29 +63,26 @@ class UpdateManager:
                     "User-Agent": f"TiebaMecha/{self._current_version}",
                 }
 
-                if include_prerelease:
-                    # 获取所有发布版本（包含预发布）
-                    async with session.get(
-                        f"{self.GITHUB_API}/releases",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as resp:
-                        if resp.status != 200:
-                            return None
-                        releases = await resp.json()
-                        if not releases:
-                            return None
-                        latest = releases[0]
-                else:
-                    # 只获取最新正式版本
-                    async with session.get(
-                        f"{self.GITHUB_API}/releases/latest",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as resp:
-                        if resp.status != 200:
-                            return None
-                        latest = await resp.json()
+                latest = None
+                # 尝试主节点和备用节点
+                endpoints = [self.GITHUB_API, self.GITHUB_API_BACKUP]
+                
+                for api_root in endpoints:
+                    url = f"{api_root}/releases" if include_prerelease else f"{api_root}/releases/latest"
+                    data = await self._fetch_from_api(session, url, headers)
+                    
+                    if data:
+                        if include_prerelease and isinstance(data, list) and len(data) > 0:
+                            latest = data[0]
+                        elif not include_prerelease and isinstance(data, dict):
+                            latest = data
+                        
+                        if latest:
+                            print(f"[UpdateManager] Successfully fetched update info from: {api_root}")
+                            break
+
+                if not latest:
+                    return None
 
             release = ReleaseInfo(
                 version=latest["tag_name"].lstrip("v"),
