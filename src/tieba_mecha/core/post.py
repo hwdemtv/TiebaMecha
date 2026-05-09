@@ -369,8 +369,8 @@ async def add_thread(
             safe_title = obf.inject_zero_width_chars(title, density=0.2)
             safe_content = obf.obfuscate_all(content)
 
-            # 统一将所有 CR/CRLF 规范化为 LF（Web 表单 API 用 LF 换行）
-            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n')
+            # 规范化换行 → 统一 LF → 转换为 [br] BBCode（贴吧 Web 表单 API 用 [br] 换行）
+            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '[br]')
 
             data = {
                 "ie": "utf-8",
@@ -379,9 +379,13 @@ async def add_thread(
                 "tbs": client.account.tbs,
                 "title": safe_title,
                 "content": safe_content,
-                "anonymous": 0
+                "anonymous": 0,
+                "rich_text": "1",
             }
-            
+
+            # 手动 URL 编码并以原始字节发送，避免 httpx 对 <> 等字符的过度百分号编码
+            post_body = urllib.parse.urlencode(data, encoding='utf-8').encode('utf-8')
+
             async with httpx.AsyncClient(proxy=proxy_url) as http_client:
                 # 【诊断日志】确认新固件已加载
                 from .logger import log_info as diagnostic_log
@@ -399,7 +403,7 @@ async def add_thread(
                 res = await http_client.post(
                     "https://tieba.baidu.com/f/commit/thread/add",
                     headers=headers,
-                    data=data,
+                    content=post_body,
                     timeout=15.0
                 )
                 
