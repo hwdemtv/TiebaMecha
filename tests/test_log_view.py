@@ -74,7 +74,19 @@ class _FakePage:
 
 
 def _install_stubs():
-    """Install all required module stubs into sys.modules."""
+    """Install all required module stubs into sys.modules.
+
+    Records every sys.modules entry it creates/replaces so that
+    _restore_stubs() can put the originals back after the code under test
+    has been imported. Without the restore, these fake modules leak into
+    every test module imported afterwards (e.g. test_sign_page.py /
+    test_survival_page.py would receive stub page classes).
+    """
+    _REPLACED.clear()
+
+    def _set_module(name, module):
+        _REPLACED[name] = sys.modules.get(name)
+        sys.modules[name] = module
 
     flet = types.ModuleType("flet")
     for name in [
@@ -126,12 +138,12 @@ def _install_stubs():
     flet.ScrollMode = types.SimpleNamespace(ADAPTIVE="adaptive")
     flet.MainAxisAlignment = types.SimpleNamespace(START="start", SPACE_BETWEEN="space_between", CENTER="center", END="end")
     flet.dropdown = types.SimpleNamespace(Option=lambda *a, **kw: None)
-    sys.modules["flet"] = flet
+    _set_module("flet", flet)
 
     # ---- tieba_mecha.web.flet_compat ----
     m = types.ModuleType("tieba_mecha.web.flet_compat")
     m.COLORS = {}
-    sys.modules["tieba_mecha.web.flet_compat"] = m
+    _set_module("tieba_mecha.web.flet_compat", m)
 
     # ---- tieba_mecha.web.components ----
     class _IconsStub:
@@ -140,11 +152,11 @@ def _install_stubs():
     m.icons = _IconsStub()
     m.create_gradient_button = lambda *a, **kw: _FakeControl()
     m.create_snackbar = lambda *a, **kw: _FakeControl()
-    sys.modules["tieba_mecha.web.components"] = m
+    _set_module("tieba_mecha.web.components", m)
 
     m = types.ModuleType("tieba_mecha.web.components.icons")
     m.icons = _IconsStub()
-    sys.modules["tieba_mecha.web.components.icons"] = m
+    _set_module("tieba_mecha.web.components.icons", m)
 
     # ---- core modules ----
     _core_stubs = {
@@ -186,12 +198,12 @@ def _install_stubs():
             m = types.ModuleType(mod_name)
             for attr_name, attr_val in attrs.items():
                 setattr(m, attr_name, attr_val)
-            sys.modules[mod_name] = m
+            _set_module(mod_name, m)
 
     # ---- tieba_mecha.web.utils ----
     m = types.ModuleType("tieba_mecha.web.utils")
     m.with_opacity = lambda opacity, color: f"with_opacity({opacity},{color})"
-    sys.modules["tieba_mecha.web.utils"] = m
+    _set_module("tieba_mecha.web.utils", m)
 
     # ---- Stub the pages __init__.py to avoid importing AccountsPage etc ----
     # We need batch_post_page to be importable but NOT through __init__.py
@@ -199,7 +211,7 @@ def _install_stubs():
     pages_init = types.ModuleType("tieba_mecha.web.pages")
     pages_init.__path__ = [str(Path(_SRC) / "tieba_mecha" / "web" / "pages")]
     # Don't import other page modules from __init__
-    sys.modules["tieba_mecha.web.pages"] = pages_init
+    _set_module("tieba_mecha.web.pages", pages_init)
 
     # Stub other page modules that __init__.py might try to import
     for page_name in ["accounts", "dashboard", "sign", "survival", "settings", "notifications"]:
@@ -211,13 +223,31 @@ def _install_stubs():
             setattr(m, f"{page_name.title().replace('_', '')}Page", type(f"{page_name}Page", (), {
                 "__init__": lambda self, *a, **kw: None
             }))
-            sys.modules[full_name] = m
+            _set_module(full_name, m)
+
+
+def _restore_stubs():
+    """Undo _install_stubs(): restore original sys.modules entries and drop
+    stub entries that did not exist before. The already-imported code under
+    test keeps its references to the stub objects, so it is unaffected."""
+    for name, original in _REPLACED.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+
+
+_REPLACED: dict = {}
 
 
 _install_stubs()
 
 # Now import the code under test
 from tieba_mecha.web.pages.batch_post_page import BatchPostPage
+
+# Restore immediately: batch_post_page holds direct references to the stubs,
+# but sys.modules must be clean for every test module imported afterwards.
+_restore_stubs()
 
 
 # ---------------------------------------------------------------------------
