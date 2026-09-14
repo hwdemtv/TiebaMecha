@@ -54,8 +54,8 @@ def _parse_sign_result(result_raw):
     err = getattr(result_raw, 'err', None)
     err_code = err.code if err else 0
 
-    is_already_signed = err and err_code == ERR_ALREADY_SIGNED
-    is_forum_invalid = err and err_code in (*ERR_FORUM_INVALID, ERR_FORUM_BANNED)
+    is_already_signed = bool(err and err_code == ERR_ALREADY_SIGNED)
+    is_forum_invalid = bool(err and err_code in (*ERR_FORUM_INVALID, ERR_FORUM_BANNED))
 
     if result_raw or is_already_signed:
         return True, "今日已签到" if is_already_signed else "签到成功", is_already_signed, is_forum_invalid, err_code
@@ -548,6 +548,14 @@ async def sign_all_accounts(
                 except TiebaServerError as e:
                     await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 触发风控或 API 阻隔 ({e.code})，退避 60s...")
                     await asyncio.sleep(60)
+                    # 与单账号路径保持一致：风控失败同样落日志并更新贴吧状态
+                    await db.add_sign_log(
+                        forum_id=forum.id,
+                        fname=forum.fname,
+                        success=False,
+                        message=f"被风控限流: {e.msg}",
+                    )
+                    await db.update_forum_sign(forum.id, False)
                     yield {
                         "account_id": account.id,
                         "account_name": account.name,

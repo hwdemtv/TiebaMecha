@@ -719,19 +719,21 @@ class Database:
                 # 只处理有签到记录或者被标记为已签到的数据
                 if forum.last_sign_date:
                     last_date = forum.last_sign_date.date()
-                    
+                    # 断签判定必须基于昨日最终状态，须在跨天重置覆盖前留存
+                    original_status = forum.last_sign_status
+
                     # 1. 如果今天还没过完，没跨天，不需要重置签到状态
                     # 但是如果发现状态异常（比如之前某种错误导致没有重置），则以 last_date 为准
                     if last_date < today and forum.is_sign_today:
                         forum.is_sign_today = False
                         forum.last_sign_status = "pending"
                         has_changes = True
-                    
+
                     # 2. 断签检测：如果昨天签到失败，说明连续签到已经断开，清零连续天数
                     if last_date < yesterday and forum.sign_count > 0:
                         forum.sign_count = 0
                         has_changes = True
-                    elif last_date == yesterday and forum.last_sign_status != "success" and forum.sign_count > 0:
+                    elif last_date == yesterday and original_status != "success" and forum.sign_count > 0:
                         forum.sign_count = 0
                         has_changes = True
 

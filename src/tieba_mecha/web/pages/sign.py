@@ -444,7 +444,7 @@ class SignPage:
                 proxy_color = COLORS.RED_ACCENT_400
             else:
                 acc_name = f"{acc.name} [{acc.user_name}]" if acc.name and acc.user_name and acc.user_name != acc.name else (acc.name or acc.user_name)
-                is_acc_ready = acc.status == "ready"
+                is_acc_ready = acc.status == "active"
                 status_color = "primary" if is_acc_ready else "error"
                 acc_status = acc.status.upper()
                 proxy_info = f"代理:{acc.proxy_id}" if acc.proxy_id else "裸连"
@@ -663,9 +663,22 @@ class SignPage:
     async def _save_daemon_config(self, e):
         """保存并热部署后台调度器配置"""
         import json
+
+        # 校验触发时间格式，防止非法值导致守护进程静默失效 (reload 解析失败会移除旧任务)
+        time_str = (self.daemon_time.value or "").strip()
+        try:
+            hour_s, minute_s = time_str.split(":")
+            hour, minute = int(hour_s), int(minute_s)
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("时间超出范围")
+        except ValueError:
+            self._show_snackbar("❌ 触发时间格式无效，请使用 HH:MM (如 08:30)", "error")
+            self.page.update()
+            return
+
         schedule = {
             "enabled": self.daemon_switch.value,
-            "sign_time": self.daemon_time.value,
+            "sign_time": time_str,
             "mode": self._mode
         }
         await self.db.set_setting("schedule", json.dumps(schedule))
@@ -751,15 +764,9 @@ class SignPage:
                 width=350,
                 height=350,
             ),
-            actions=[ft.TextButton("关闭窗口", on_click=lambda e: self._close_dialog(dlg))],
+            actions=[ft.TextButton("关闭窗口", on_click=lambda e: self.page.close(dlg))],
             actions_alignment=ft.MainAxisAlignment.END,
             shape=ft.RoundedRectangleBorder(radius=12)
         )
-        self.page.dialog = dlg
-        dlg.open = True
-        self.page.update()
-        
-    def _close_dialog(self, dlg):
-        dlg.open = False
-        self.page.update()
+        self.page.open(dlg)
 
