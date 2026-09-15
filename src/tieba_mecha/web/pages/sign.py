@@ -16,7 +16,7 @@ from ..components.icons import (
     HEART_BROKEN, MORE_VERT_ROUNDED
 )
 from ..utils import with_opacity
-from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts
+from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts, sign_flow_lock
 
 
 class SignPage:
@@ -523,15 +523,18 @@ class SignPage:
 
     async def _do_sign_single(self):
         if self._is_signing: return
+        if sign_flow_lock.locked():
+            self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
+            return
         if self._stats['total'] == 0 or (self._stats['total'] - self._stats['success']) == 0:
             self._show_snackbar("没有需要签到的贴吧", "info")
             return
-        
+
         self._is_signing = True
         self._stop_requested = False
         self.progress_bar.visible = True
         self.progress_bar.value = 0
-        
+
         # UI 切换为停止状态
         self.sign_btn_icon.name = STOP_CIRCLE_ROUNDED
         self.sign_btn_text.value = "停止签到流"
@@ -547,26 +550,28 @@ class SignPage:
             d_min, d_max = 5.0, 15.0
 
         try:
-            async for result in sign_all_forums(self.db, delay_min=d_min, delay_max=d_max):
-                if self._stop_requested:
-                    self._show_snackbar("签到流已由用户手动中止", "warning")
-                    break
-                    
-                current += 1
-                self.progress_bar.value = min(current / total, 1.0)
-                self.status_text.value = f"正在签到: {result.fname} ({current}/{total})"
-                
-                # --- 方案 A: 跨页面进度广播 ---
-                self.page.pubsub.send_all_on_topic("sign_progress", {
-                    "value": min(current / total, 1.0),
-                    "text": f"正在签到: {result.fname} ({current}/{total})",
-                    "status": "running"
-                })
-                
-                self.page.update()
-            
-            if not self._stop_requested:
-                self._show_snackbar("所有签到指令已执行完毕", "success")
+            # 与定时守护签到互斥
+            async with sign_flow_lock:
+                async for result in sign_all_forums(self.db, delay_min=d_min, delay_max=d_max):
+                    if self._stop_requested:
+                        self._show_snackbar("签到流已由用户手动中止", "warning")
+                        break
+
+                    current += 1
+                    self.progress_bar.value = min(current / total, 1.0)
+                    self.status_text.value = f"正在签到: {result.fname} ({current}/{total})"
+
+                    # --- 方案 A: 跨页面进度广播 ---
+                    self.page.pubsub.send_all_on_topic("sign_progress", {
+                        "value": min(current / total, 1.0),
+                        "text": f"正在签到: {result.fname} ({current}/{total})",
+                        "status": "running"
+                    })
+
+                    self.page.update()
+
+                if not self._stop_requested:
+                    self._show_snackbar("所有签到指令已执行完毕", "success")
         except Exception as ex:
             self._show_snackbar(f"任务异常中止: {str(ex)}", "error")
         
@@ -586,7 +591,11 @@ class SignPage:
 
     async def _do_sign_matrix(self):
         if self._is_signing: return
-        if not self._accounts or not self._matrix_tasks:
+        if sign_flow_lock.locked():
+            self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
+            return
+        # 与签到队列口径一致：全部熔断/无可签贴吧时直接提示
+        if not self._accounts or not any(not f.is_banned for _, f in self._matrix_tasks):
             self._show_snackbar("矩阵中没有需要签到的贴吧", "info")
             return
         
@@ -609,32 +618,35 @@ class SignPage:
             d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
         # 矩阵模式：以 _matrix_tasks 作为预估总数，实际进度按 yield 结果计数
-        total_est = max(len(self._matrix_tasks), 1)
+        # (已熔断贴吧不在签到队列中，需从分母中剔除以保证进度能走满)
+        total_est = max(len([1 for _, f in self._matrix_tasks if not f.is_banned]), 1)
         current_task_idx = 0
 
         try:
-            async for result in sign_all_accounts(self.db, d_min, d_max, ad_min, ad_max):
-                if self._stop_requested:
-                    self._show_snackbar("矩阵签到流已由用户手动中止", "warning")
-                    break
+            # 与定时守护签到互斥
+            async with sign_flow_lock:
+                async for result in sign_all_accounts(self.db, d_min, d_max, ad_min, ad_max):
+                    if self._stop_requested:
+                        self._show_snackbar("矩阵签到流已由用户手动中止", "warning")
+                        break
 
-                current_task_idx += 1
-                progress = min(current_task_idx / total_est, 1.0)
+                    current_task_idx += 1
+                    progress = min(current_task_idx / total_est, 1.0)
 
-                self.progress_bar.value = progress
-                self.status_text.value = f"[{current_task_idx}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
+                    self.progress_bar.value = progress
+                    self.status_text.value = f"[{current_task_idx}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
 
-                # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
-                self.page.pubsub.send_all_on_topic("sign_progress", {
-                    "value": progress,
-                    "text": f"正在矩阵签到: {result.get('fname')}",
-                    "status": "running"
-                })
+                    # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
+                    self.page.pubsub.send_all_on_topic("sign_progress", {
+                        "value": progress,
+                        "text": f"正在矩阵签到: {result.get('fname')}",
+                        "status": "running"
+                    })
 
-                self.page.update()
-            
-            if not self._stop_requested:
-                self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
+                    self.page.update()
+
+                if not self._stop_requested:
+                    self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
         except Exception as ex:
             self._show_snackbar(f"矩阵任务异常中止: {str(ex)}", "error")
         

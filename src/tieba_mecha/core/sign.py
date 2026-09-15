@@ -43,6 +43,10 @@ ERR_ALREADY_SIGNED = 160002
 ERR_FORUM_INVALID = (340006, 340001)
 ERR_FORUM_BANNED = 3250004
 
+# 全局签到流互斥锁：防止守护进程定时签到与界面手动签到并发执行，
+# 双流并跑会令请求频率翻倍，破坏行为模拟节奏并加大风控风险
+sign_flow_lock = asyncio.Lock()
+
 
 def _parse_sign_result(result_raw):
     """
@@ -290,7 +294,8 @@ async def sign_all_forums(
         return
 
     _, bduss, stoken, proxy_id, cuid, ua = creds
-    forums = await db.get_forums(account.id)
+    # 已熔断 (吧务封禁) 的贴吧跳过，避免每天重撞 3250004
+    forums = await db.get_forums(account.id, include_banned=False)
 
     # N+1 优化: 在外层建立单一持久化连接池
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
@@ -382,7 +387,8 @@ async def get_sign_stats(db: Database) -> dict:
     if not account:
         return {"total": 0, "success": 0, "failure": 0}
 
-    forums = await db.get_forums(account.id)
+    # 统计口径与签到队列一致：排除已熔断的贴吧
+    forums = await db.get_forums(account.id, include_banned=False)
     total = len(forums)
     success = sum(1 for f in forums if f.last_sign_status == "success")
     failure = sum(1 for f in forums if f.last_sign_status == "failure")
@@ -468,8 +474,8 @@ async def sign_all_accounts(
             f"[{acc_idx + 1}/{len(accounts)}] 开始处理账号: {account.name}"
         )
 
-        # 获取该账号的贴吧列表
-        forums = await db.get_forums(account.id)
+        # 获取该账号的贴吧列表 (已熔断的吧务封禁贴吧跳过)
+        forums = await db.get_forums(account.id, include_banned=False)
         if not forums:
             await log_warn(f"账号 [{account.name}] 无关注贴吧，跳过")
             continue

@@ -356,6 +356,31 @@ class TestSignAllForumsErrorPaths:
         f = await self._get_forum(db, forum.id)
         assert f.last_sign_status == "failure"
 
+    async def test_pre_banned_forum_excluded_from_queue(self, db):
+        """回归: 已熔断贴吧不进入签到队列, 不再每天重撞 3250004"""
+        from tieba_mecha.core.sign import get_sign_stats
+
+        acc, forum = await self._setup(db)
+        await db.mark_forum_banned(acc.id, "scan_forum", reason="pre-banned")
+
+        client = make_client()
+        results = []
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                async for r in sign_all_forums(db, delay_min=0, delay_max=0):
+                    results.append(r)
+
+        assert results == [], "熔断贴吧应被跳过"
+        client.sign_forum.assert_not_called()
+
+        # 统计口径一致: 待签总数也不含熔断贴吧
+        stats = await get_sign_stats(db)
+        assert stats["total"] == 0
+
+        # 默认 get_forums 仍返回熔断记录 (UI 展示用)
+        visible = await db.get_forums(acc.id)
+        assert len(visible) == 1 and visible[0].is_banned is True
+
 
 # ========== sign_all_accounts 矩阵路径 ==========
 
@@ -430,6 +455,24 @@ class TestSignAllAccountsMatrix:
         forums = await db.get_forums(acc.id)
         assert forums and forums[0].is_banned is True
 
+    async def test_pre_banned_forum_skipped_in_matrix(self, db):
+        """回归: 矩阵全扫跳过已熔断贴吧, 不发起签到请求"""
+        acc = await self._add_account(db, "acc_skip")
+        await db.add_forum(fid=1, fname="melted_forum", account_id=acc.id)
+        await db.mark_forum_banned(acc.id, "melted_forum", reason="pre-banned")
+
+        client = make_client()
+        results = []
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                async for r in sign_all_accounts(db, 0, 0, 0, 0):
+                    results.append(r)
+
+        # 该账号无其他可签贴吧 -> 直接跳过, 不 yield 该贴吧结果
+        fnames = [r["fname"] for r in results]
+        assert "melted_forum" not in fnames
+        client.sign_forum.assert_not_called()
+
 
 # ========== sync_forums_to_db 隐藏标记 ==========
 
@@ -473,8 +516,8 @@ class TestDaemonReload:
         d.__init__()
         return d
 
-    async def test_invalid_time_removes_job(self, db):
-        """非法时间: 旧任务被移除且不注册新任务 (页面层负责拦截保存)"""
+    async def test_invalid_time_no_job_registered(self, db):
+        """非法时间且原本无任务: 不注册新任务 (页面层负责拦截保存)"""
         import json
 
         d = self._fresh_daemon()
@@ -482,6 +525,36 @@ class TestDaemonReload:
         await d.reload(db)
 
         assert d.scheduler.get_job(d.sign_job_id) is None
+
+    async def test_invalid_time_preserves_existing_job(self, db):
+        """回归: 非法时间不得移除已注册任务 -- 先删后建会在解析失败时静默丢失定时签到"""
+        import json
+
+        d = self._fresh_daemon()
+        await db.set_setting("schedule", json.dumps({"enabled": True, "sign_time": "08:30"}))
+        await d.reload(db)
+        assert d.scheduler.get_job(d.sign_job_id) is not None
+
+        # 写入非法时间后重载, 旧任务应原样保留
+        await db.set_setting("schedule", json.dumps({"enabled": True, "sign_time": "25:99"}))
+        await d.reload(db)
+
+        job = d.scheduler.get_job(d.sign_job_id)
+        assert job is not None, "解析失败时应保留原有任务"
+        assert str(job.trigger.fields[5]) == "8"  # Hour 仍为 08:30
+        assert str(job.trigger.fields[6]) == "30"
+
+    async def test_corrupted_schedule_json_preserves_existing_job(self, db):
+        """回归: schedule 为损坏 JSON 时跳过重载, 不影响现有任务"""
+        import json
+
+        d = self._fresh_daemon()
+        await db.set_setting("schedule", json.dumps({"enabled": True, "sign_time": "08:30"}))
+        await d.reload(db)
+
+        await db.set_setting("schedule", "{not-json")
+        await d.reload(db)
+        assert d.scheduler.get_job(d.sign_job_id) is not None
 
     async def test_valid_time_registers_job(self, db):
         import json

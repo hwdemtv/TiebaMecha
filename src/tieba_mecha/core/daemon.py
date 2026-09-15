@@ -5,7 +5,7 @@ import random
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .sign import sign_all_forums, sign_all_accounts
+from .sign import sign_all_forums, sign_all_accounts, sign_flow_lock
 from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
@@ -16,10 +16,19 @@ from ..db.crud import get_db
 async def do_sign_task():
     """执行定时签到任务的内部包裹（自适应模式）"""
     db = await get_db()
-    
+
+    # 跨天状态重置：守护进程路径无 UI 参与，若不在此处重置昨日的 is_sign_today，
+    # update_forum_sign 的按天去重门槛会永久冻结连续天数与成功/失败统计
+    if hasattr(db, "check_and_reset_daily_sign"):
+        await db.check_and_reset_daily_sign()
+
     # 1. 获取执行模式
     raw_sched = await db.get_setting("schedule", "{}")
-    schedule = json.loads(raw_sched)
+    try:
+        schedule = json.loads(raw_sched) if raw_sched else {}
+    except (ValueError, TypeError):
+        print(f"[DAEMON] schedule 配置损坏，按默认单账号模式执行")
+        schedule = {}
     mode = schedule.get("mode", "single")
     
     # 2. 获取行为频率参数
@@ -32,24 +41,31 @@ async def do_sign_task():
         d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
     print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: {mode.upper()} | 吧间延迟: {d_min}-{d_max}s")
-    
+
+    # 与手动签到互斥：定时触发不排队等待（一轮全扫可能长达数小时），
+    # 已有签到流在执行时直接放弃本次触发
+    if sign_flow_lock.locked():
+        print(f"[{datetime.now()}] [DAEMON] 检测到已有签到流在执行 (手动?)，跳过本次定时触发")
+        return
+
     success_count = 0
     fail_count = 0
 
-    if mode == "matrix":
-        print(f"[{datetime.now()}] [DAEMON] 正在执行全矩阵跨账号扫号...")
-        async for result in sign_all_accounts(db, d_min, d_max, ad_min, ad_max):
-            if result.get("success"):
-                success_count += 1
-            else:
-                fail_count += 1
-    else:
-        # 单账号模式
-        async for result in sign_all_forums(db, delay_min=d_min, delay_max=d_max):
-            if result.success:
-                success_count += 1
-            else:
-                fail_count += 1
+    async with sign_flow_lock:
+        if mode == "matrix":
+            print(f"[{datetime.now()}] [DAEMON] 正在执行全矩阵跨账号扫号...")
+            async for result in sign_all_accounts(db, d_min, d_max, ad_min, ad_max):
+                if result.get("success"):
+                    success_count += 1
+                else:
+                    fail_count += 1
+        else:
+            # 单账号模式
+            async for result in sign_all_forums(db, delay_min=d_min, delay_max=d_max):
+                if result.success:
+                    success_count += 1
+                else:
+                    fail_count += 1
 
     print(f"[{datetime.now()}] [DAEMON] 任务闭环 | 成功: {success_count} | 失败: {fail_count}")
 
@@ -416,33 +432,44 @@ class TiebaMechaDaemon:
     async def reload(self, db):
         """动态重载定时参数"""
         raw_data = await db.get_setting("schedule", "{}")
-        schedule = json.loads(raw_data) if raw_data else {}
-        
-        # 先清除现有任务
-        if self.scheduler.get_job(self.sign_job_id):
-            self.scheduler.remove_job(self.sign_job_id)
+        try:
+            schedule = json.loads(raw_data) if raw_data else {}
+        except (ValueError, TypeError):
+            print("[DAEMON] schedule 配置损坏，跳过本次重载（保留现有任务）")
+            return
+        if not isinstance(schedule, dict):
+            print("[DAEMON] schedule 配置格式异常，跳过本次重载（保留现有任务）")
+            return
 
-        # 检查是否开启
-        if schedule.get("enabled", False):
-            time_str = schedule.get("sign_time", "08:30")
-            try:
-                hour_s, minute_s = time_str.split(":")
-                hour = int(hour_s)
-                minute = int(minute_s)
-                
-                self.scheduler.add_job(
-                    do_sign_task, 
-                    'cron', 
-                    hour=hour, 
-                    minute=minute, 
-                    id=self.sign_job_id,
-                    replace_existing=True
-                )
-                print(f"[DAEMON] 已重载热更新: 每天 {hour:02d}:{minute:02d} 执行...")
-            except Exception as e:
-                print(f"[DAEMON] 解析配置签到时间出错: {e}")
-        else:
+        # 未启用时才移除现有任务；启用时依赖 add_job 的 replace_existing 原子替换，
+        # 避免先删后建在解析失败时把已注册的任务静默丢失
+        if not schedule.get("enabled", False):
+            if self.scheduler.get_job(self.sign_job_id):
+                self.scheduler.remove_job(self.sign_job_id)
             print("[DAEMON] 已重载热更新: 守护签到已禁用")
+            return
+
+        time_str = schedule.get("sign_time", "08:00")
+        try:
+            hour_s, minute_s = str(time_str).split(":")
+            hour = int(hour_s)
+            minute = int(minute_s)
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("时间超出范围")
+
+            self.scheduler.add_job(
+                do_sign_task,
+                'cron',
+                hour=hour,
+                minute=minute,
+                id=self.sign_job_id,
+                replace_existing=True,
+                misfire_grace_time=300,  # 事件循环被长任务阻塞时保留 5 分钟补触发窗口
+            )
+            print(f"[DAEMON] 已重载热更新: 每天 {hour:02d}:{minute:02d} 执行...")
+        except Exception as e:
+            # 解析失败时不动现有任务，避免定时签到静默失效
+            print(f"[DAEMON] 解析配置签到时间出错: {e} (已保留原有任务配置)")
 
     def schedule_once_task(self, task_id: str, schedule_time: datetime):
         """

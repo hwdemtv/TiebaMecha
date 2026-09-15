@@ -601,14 +601,26 @@ class Database:
             await session.refresh(forum)
             return forum
 
-    async def get_forums(self, account_id: int | None = None, *, include_hidden: bool = False) -> list[Forum]:
-        """获取贴吧列表"""
+    async def get_forums(
+        self,
+        account_id: int | None = None,
+        *,
+        include_hidden: bool = False,
+        include_banned: bool = True,
+    ) -> list[Forum]:
+        """获取贴吧列表
+
+        include_banned=False 时排除已熔断 (is_banned) 的贴吧，
+        供签到队列使用，避免每天重撞 3250004 封禁错误。
+        """
         async with self.async_session() as session:
             conditions = []
             if account_id is not None:
                 conditions.append(Forum.account_id == account_id)
             if not include_hidden:
                 conditions.append(Forum.is_hidden == False)
+            if not include_banned:
+                conditions.append(Forum.is_banned == False)
             stmt = select(Forum)
             if conditions:
                 stmt = stmt.where(*conditions)
