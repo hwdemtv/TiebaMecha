@@ -49,7 +49,12 @@ class TestProxyManagement:
         assert result is not None
 
     async def test_get_best_proxy_config_inactive_proxy_fallback(self, db):
-        """Test get_best_proxy_config falls back when specified proxy is inactive."""
+        """Test get_best_proxy_config falls back when specified proxy is inactive.
+
+        代理容灾是可选开关 (proxy_fallback, 默认关闭以防 IP 关联封号):
+        - 未开启时指定代理失效 -> 返回 None (不静默换 IP)
+        - 开启后才回退到其他可用代理
+        """
         from tieba_mecha.core.proxy import get_best_proxy_config
 
         # Create inactive proxy
@@ -61,6 +66,12 @@ class TestProxyManagement:
         # Create active proxy for fallback
         await db.add_proxy(host="127.0.0.2", port=7891)
 
+        # 默认未开启容灾: 不应静默切换到其他 IP
+        result = await get_best_proxy_config(db, proxy_id=proxy_inactive.id)
+        assert result is None
+
+        # 开启容灾后: 应回退到可用代理
+        await db.set_setting("proxy_fallback", "true")
         result = await get_best_proxy_config(db, proxy_id=proxy_inactive.id)
 
         # Should fall back to active proxy

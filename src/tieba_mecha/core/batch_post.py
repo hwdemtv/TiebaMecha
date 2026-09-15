@@ -679,8 +679,9 @@ class BionicDelay:
     """拟人化随机延迟驱动器 (基于高斯分布与生物钟权重)"""
     @staticmethod
     def get_delay(min_sec: float, max_sec: float) -> float:
-        min_sec = max(1, min_sec)
-        max_sec = max(min_sec, max_sec)
+        # float() 归一化: 退化区间 (min==max) 时 max() 会原样返回 int, 违反 -> float 契约
+        min_sec = max(1.0, float(min_sec))
+        max_sec = max(min_sec, float(max_sec))
         # 1. 基础高斯采样
         mean = (min_sec + max_sec) / 2
         sigma = (max_sec - min_sec) / 6

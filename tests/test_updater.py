@@ -115,7 +115,12 @@ class TestUpdateManager:
         with patch('aiohttp.ClientSession') as mock_session:
             mock_session.return_value.__aenter__ = AsyncMock(return_value=mock_session.return_value)
             mock_session.return_value.__aexit__ = AsyncMock(return_value=None)
-            mock_session.return_value.get = AsyncMock(return_value=mock_response)
+            # _fetch_from_api 使用 `async with session.get(...) as resp`,
+            # get() 需返回支持异步上下文协议的响应对象
+            resp_cm = MagicMock()
+            resp_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            resp_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_session.return_value.get = MagicMock(return_value=resp_cm)
 
             result = await manager.check_update()
 
@@ -143,7 +148,12 @@ class TestUpdateManager:
         with patch('aiohttp.ClientSession') as mock_session:
             mock_session.return_value.__aenter__ = AsyncMock(return_value=mock_session.return_value)
             mock_session.return_value.__aexit__ = AsyncMock(return_value=None)
-            mock_session.return_value.get = AsyncMock(return_value=mock_response)
+            # _fetch_from_api 使用 `async with session.get(...) as resp`,
+            # get() 需返回支持异步上下文协议的响应对象
+            resp_cm = MagicMock()
+            resp_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            resp_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_session.return_value.get = MagicMock(return_value=resp_cm)
 
             result = await manager.check_update()
 

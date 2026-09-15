@@ -89,7 +89,8 @@ class TestBioWarming(unittest.IsolatedAsyncioTestCase):
         # 验证 API 调用
         mock_client.get_self_info.assert_called_once()
         mock_client.get_follow_forums.assert_called_once()
-        mock_client.get_threads.assert_called_once()
+        # [行为演进] 模拟翻页浏览 (30% 概率) 会再次调用 get_threads, 首次浏览至少 1 次
+        self.assertGreaterEqual(mock_client.get_threads.call_count, 1)
         mock_client.get_posts.assert_called()
         mock_client.agree.assert_called_once_with(unittest.mock.ANY) # tid 是随机抽取的
 

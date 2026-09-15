@@ -36,22 +36,29 @@ class MaintManager:
             return False
 
         # 1. 获取账号凭证
-        creds = await get_account_credentials(self.db, account_id)
-        if not creds:
-            await log_warn(f"[BioWarming] 账号 {account_id} 凭证获取失败，跳过维护")
-            return False
-
-        acc_id, bduss, stoken, proxy_id, cuid, ua = creds
-        # 优化显示：获取实际账号名称而非仅显示 ID
-        acc = await self.db.get_account_by_id(acc_id)
-        account_name = acc.user_name or acc.name if acc else f"ID:{acc_id}"
-
-        # [Fix 9] 代理健康检查：绑定代理已失效时跳过，避免浪费时间在必然失败的操作上
-        if proxy_id:
-            proxy = await self.db.get_proxy(proxy_id)
-            if not proxy or not proxy.is_active:
-                await log_warn(f"[BioWarming] 账号 {account_name} 绑定代理已失效，跳过维护")
+        # [Fix] 准备段 (凭证/账号信息/代理检查) 纳入异常兜底, 保证函数契约: 始终返回 bool
+        # (此前该段在主 try 之外, 凭证获取抛异常会让异常直接冒泡到调用方)
+        account_name = f"ID:{account_id}"
+        try:
+            creds = await get_account_credentials(self.db, account_id)
+            if not creds:
+                await log_warn(f"[BioWarming] 账号 {account_id} 凭证获取失败，跳过维护")
                 return False
+
+            acc_id, bduss, stoken, proxy_id, cuid, ua = creds
+            # 优化显示：获取实际账号名称而非仅显示 ID
+            acc = await self.db.get_account_by_id(acc_id)
+            account_name = acc.user_name or acc.name if acc else f"ID:{acc_id}"
+
+            # [Fix 9] 代理健康检查：绑定代理已失效时跳过，避免浪费时间在必然失败的操作上
+            if proxy_id:
+                proxy = await self.db.get_proxy(proxy_id)
+                if not proxy or not proxy.is_active:
+                    await log_warn(f"[BioWarming] 账号 {account_name} 绑定代理已失效，跳过维护")
+                    return False
+        except Exception as e:
+            await log_error(f"[BioWarming] 账号 {account_name} 维护准备阶段异常: {type(e).__name__}: {str(e)}")
+            return False
 
         try:
             async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:

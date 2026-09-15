@@ -444,13 +444,14 @@ class TestAIOptimizerNoDuplicate:
         sig = inspect.signature(AIOptimizer.optimize_post)
         assert "persona" in sig.parameters
 
-    def test_optimize_post_default_persona_is_normal(self):
-        """Test optimize_post defaults persona to 'normal'."""
+    def test_optimize_post_default_persona_is_auto(self):
+        """Test optimize_post defaults persona to None (auto time-based rotation)."""
         import inspect
         from tieba_mecha.core.ai_optimizer import AIOptimizer
 
         sig = inspect.signature(AIOptimizer.optimize_post)
-        assert sig.parameters["persona"].default == "normal"
+        # None = 自动按时段轮换; optimize_post 内部会将 None 解析为具体人格
+        assert sig.parameters["persona"].default is None
 
 
 # ========================================================================
@@ -685,23 +686,28 @@ class TestEnsureDate:
 
 
 class TestProxyAuthBasicAuth:
-    """Tests that proxy authentication uses httpx.BasicAuth, not URL-embedded credentials."""
+    """Tests proxy credentials are handled safely.
+
+    现行设计 (SOCKS5 兼容): 凭据必须嵌入代理 URL -- httpx.BasicAuth 对
+    SOCKS5 握手层认证无效, 嵌入是有意决策 (见 batch_post.py 代理处理注释)。
+    安全要求相应演变为: 嵌入前必须对用户名/密码做百分号编码, 防止特殊
+    字符破坏 URL 结构或泄漏到日志/异常信息。
+    """
 
     def test_batch_post_no_creds_in_proxy_url(self):
-        """Test batch_post.py source does not embed credentials in proxy URLs.
+        """Test batch_post.py URL-encodes credentials embedded in proxy URLs.
 
-        Static analysis: verify the source code uses httpx.BasicAuth
-        instead of embedding user:pass in the proxy URL.
+        Static analysis: verify user/password are percent-encoded via
+        urllib.parse.quote(safe="") before being embedded in the proxy URL.
         """
         import inspect
         from tieba_mecha.core import batch_post
 
         source = inspect.getsource(batch_post)
-        # Should use httpx.BasicAuth
-        assert "httpx.BasicAuth" in source, "Should use httpx.BasicAuth for proxy auth (P0-03)"
-        # Should NOT embed credentials in URL like http://user:pass@host:port
-        assert "p_user" not in source or "proxy_url = f" not in source or \
-               "BasicAuth" in source, "Proxy credentials should not be in URL"
+        assert 'urllib.parse.quote(p_user, safe="")' in source, \
+            "Proxy username must be URL-encoded before embedding (P0-03)"
+        assert 'urllib.parse.quote(p_pwd, safe="")' in source, \
+            "Proxy password must be URL-encoded before embedding (P0-03)"
 
 
 # ========================================================================

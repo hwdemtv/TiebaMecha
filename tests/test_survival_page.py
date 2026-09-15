@@ -20,7 +20,10 @@ class MockDatabase:
                 posted_account_id=1,
                 posted_fname="测试吧",
                 content="测试内容",
+                title=None,
                 survival_status="alive",
+                death_reason=None,
+                posted_tid=None,
                 posted_time=None
             ),
             MagicMock(
@@ -28,7 +31,10 @@ class MockDatabase:
                 posted_account_id=2,
                 posted_fname="另一个吧",
                 content="另一个内容",
+                title=None,
                 survival_status="dead",
+                death_reason=None,
+                posted_tid=None,
                 posted_time=None
             ),
         ]
@@ -39,12 +45,26 @@ class MockDatabase:
     async def get_accounts(self):
         return self.accounts
 
-    async def get_materials_paginated(self, survival_status=None, account_id=None, page=1, page_size=20):
+    async def get_distinct_fnames(self):
+        return sorted({m.posted_fname for m in self.materials})
+
+    async def get_distinct_death_reasons(self):
+        return sorted({m.death_reason for m in self.materials if m.death_reason})
+
+    async def get_materials_paginated(
+        self, survival_status=None, account_id=None, fname=None,
+        death_reason=None, date_from=None, date_to=None, page=1, page_size=20,
+    ):
+        """签名与 SurvivalPage._load_page 的调用保持一致"""
         filtered = self.materials
         if survival_status and survival_status != "all":
             filtered = [m for m in filtered if m.survival_status == survival_status]
         if account_id:
             filtered = [m for m in filtered if m.posted_account_id == account_id]
+        if fname and fname != "all":
+            filtered = [m for m in filtered if m.posted_fname == fname]
+        if death_reason and death_reason != "all":
+            filtered = [m for m in filtered if m.death_reason == death_reason]
         total = len(filtered)
         start = (page - 1) * page_size
         end = start + page_size
@@ -85,7 +105,8 @@ class TestSurvivalPageInit:
         assert page._stats == {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         assert page._account_options == []
         assert page._current_page == 1
-        assert page._page_size == 20
+        # 页面演进: _PAGE_SIZE 已从 20 调整为 15 (survival.py 模块常量)
+        assert page._page_size == 15
         assert page._total == 0
         assert page._materials == []
 
@@ -189,28 +210,32 @@ class TestBuildStatCards:
 
 
 class TestBuildTable:
-    """测试表格构建"""
+    """测试数据列表构建 (页面演进: DataTable 已重构为卡片列表 _build_card_list)"""
 
     def test_build_table_structure(self, survival_page):
-        """测试表格结构"""
+        """测试卡片列表结构"""
         survival_page._materials = [
             MagicMock(
                 id=1,
                 posted_account_id=1,
                 posted_fname="测试吧",
                 content="测试",
+                title=None,
                 survival_status="alive",
+                death_reason=None,
+                posted_tid=None,
                 posted_time=None
             )
         ]
-        
-        table = survival_page._build_table()
-        
-        # 应返回 Container
-        assert isinstance(table, ft.Container)
-        # 内部应包含 DataTable
-        assert isinstance(table.content, ft.Column)
-        assert len(table.content.controls) > 0
+
+        container = survival_page._build_card_list()
+
+        # 应返回 Container, 内部为 Column (可滚动卡片列表)
+        assert isinstance(container, ft.Container)
+        assert isinstance(container.content, ft.Column)
+        # 触发一次刷新后应有 1 条物料对应的卡片
+        survival_page._update_card_list()
+        assert len(container.content.controls) == 1
 
 
 class TestBuildFilterBar:
@@ -267,20 +292,19 @@ class TestBuildPagination:
 
 
 class TestUpdateTable:
-    """测试表格更新"""
+    """测试卡片列表更新 (页面演进: _update_table 已重构为 _update_card_list)"""
 
     def test_update_table_empty_materials(self, survival_page):
         """测试空物料列表"""
         survival_page._materials = []
-        
-        # 模拟 _table 属性
-        survival_page._table = MagicMock()
-        survival_page._table.rows = []
-        
-        survival_page._update_table()
-        
-        # 表格应被清空
-        survival_page._table.rows = []
+
+        # 构建卡片列表区域 (内部创建 _card_list 引用)
+        survival_page._build_card_list()
+
+        survival_page._update_card_list()
+
+        # 空列表时应渲染"暂无数据"占位卡片
+        assert len(survival_page._card_list.controls) == 1
 
     def test_update_table_with_materials(self, survival_page):
         """测试有物料时更新"""
@@ -290,19 +314,20 @@ class TestUpdateTable:
                 posted_account_id=1,
                 posted_fname="测试吧",
                 content="测试内容",
+                title=None,
                 survival_status="alive",
+                death_reason=None,
+                posted_tid=None,
                 posted_time=MagicMock(strftime=lambda f: "04-17 10:30")
             )
         ]
-        
-        # 模拟 _table
-        survival_page._table = MagicMock()
-        survival_page._table.rows = []
-        
-        survival_page._update_table()
-        
-        # 表格应包含数据行
-        assert len(survival_page._table.rows) == 1
+
+        survival_page._build_card_list()
+
+        survival_page._update_card_list()
+
+        # 卡片列表应包含与物料数一致的卡片
+        assert len(survival_page._card_list.controls) == 1
 
 
 class TestUpdatePagination:
@@ -361,9 +386,12 @@ class TestBuild:
         """测试包含所有区块"""
         result = survival_page.build()
         column = result.content
-        
-        # 应包含：标题、统计卡片、筛选栏、表格、分页
-        assert len(column.controls) >= 5
+
+        # 页面演进: 顶层为 [标题栏, 分割线, Tabs(存活监控/行为审计), 内容容器] 4 个区块,
+        # 原统计卡片/筛选栏/表格/分页已下沉到 Tabs 的存活监控标签内
+        assert len(column.controls) >= 4
+        tabs = next(c for c in column.controls if isinstance(c, ft.Tabs))
+        assert len(tabs.tabs) == 2, "应包含存活监控与行为审计两个标签页"
 
 
 class TestNavigate:

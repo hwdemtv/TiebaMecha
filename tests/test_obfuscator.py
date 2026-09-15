@@ -92,7 +92,12 @@ class TestObfuscator:
         result = Obfuscator.inject_zero_width_chars(text, density=0.5)
 
         # Both Chinese and English should be preserved
-        assert "中文" in result
+        # 注入可能落在中文与中文之间，剥除零宽字符后应还原为原文
+        cleaned = result
+        for zwc in ZERO_WIDTH_CHARS:
+            cleaned = cleaned.replace(zwc, "")
+        assert cleaned == text
+        # 英文区域不注入，子串保持原样
         assert "English" in result
         assert "content" in result
 
@@ -187,7 +192,12 @@ class TestObfuscatorIntegration:
         result = Obfuscator.inject_zero_width_chars(text, density=0.2)
         result = Obfuscator.humanize_spacing(result)
 
-        # All key content should be preserved
+        # All key content should be preserved.
+        # 中文内容可能被随机注入零宽字符，须剥除后再断言 (与相邻用例口径一致，
+        # 否则断言随 density 概率随机失败)；URL/提取码值由实现保证不注入。
+        cleaned = result
+        for zwc in ZERO_WIDTH_CHARS:
+            cleaned = cleaned.replace(zwc, "")
         assert "https://pan.baidu.com/s/xxxxx" in result
-        assert "提取码" in result
+        assert "提取码" in cleaned
         assert "abcd" in result

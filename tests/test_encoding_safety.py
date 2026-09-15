@@ -67,7 +67,7 @@ async def test_batch_post_encoding_safety():
     
     with patch("tieba_mecha.core.batch_post.get_auth_manager", return_value=mock_auth):
         with patch("tieba_mecha.core.batch_post.get_account_credentials", AsyncMock(return_value=(1, "bduss", "stoken", None, "cuid", "ua"))):
-            with patch("tieba_mecha.core.batch_post.Obfuscator.from_db", AsyncMock(return_value=MagicMock())):
+            with patch("tieba_mecha.core.batch_post.Obfuscator.from_db", AsyncMock(return_value=Obfuscator({}))):
                 with patch("tieba_mecha.core.batch_post.create_client", AsyncMock(return_value=mock_client)):
                     with patch("httpx.AsyncClient") as MockClient:
                         mock_http = AsyncMock()
@@ -86,16 +86,21 @@ async def test_batch_post_encoding_safety():
 
                         # --- 断言验证 ---
             
-            # 1. 验证 HTTP POST 已执行，并使用 httpx 表单数据传递
+            # 1. 验证 HTTP POST 已执行，并以原始字节表单 (content=) 传递
             assert mock_http.post.call_count > 0
             post_call_args = mock_http.post.call_args
             assert post_call_args is not None
-            assert "data" in post_call_args.kwargs
-            data_payload = post_call_args.kwargs["data"]
-            assert isinstance(data_payload, dict)
-            assert data_payload["kw"] == target_fname
-            assert "title" in data_payload
-            assert "content" in data_payload
+            # 现行实现: 手动 urlencode 后以 content= 原始字节发送 (避免 httpx 对 <> 等字符过度百分号编码)
+            assert "content" in post_call_args.kwargs
+            body = post_call_args.kwargs["content"]
+            assert isinstance(body, bytes)
+            # UTF-8 百分号编码往返解析, 验证中文无乱码
+            payload = urllib.parse.parse_qs(body.decode("utf-8"), encoding="utf-8")
+            assert payload["kw"][0] == target_fname
+            zero_width = ("​", "‌", "‍", "﻿")
+            assert "".join(ch for ch in payload["title"][0] if ch not in zero_width) == "测试标题"
+            normalized_content = "".join(ch for ch in payload["content"][0] if ch not in zero_width)
+            assert "测试内容" in normalized_content
 
 @pytest.mark.asyncio
 async def test_manual_post_encoding_safety():
@@ -139,12 +144,14 @@ async def test_manual_post_encoding_safety():
                     assert f"kw={quoted_fname}" in get_call.args[0]
                     assert get_call.kwargs["headers"]["Referer"] == f"https://tieba.baidu.com/f?kw={quoted_fname}"
                     
-                    # 验证 POST 字段内容
+                    # 验证 POST 字段内容 (现行实现: 手动 urlencode 后以 content= 原始字节发送)
                     post_call = mock_http.post.call_args
-                    assert "data" in post_call.kwargs
-                    data_payload = post_call.kwargs["data"]
-                    assert data_payload["kw"] == target_fname
-                    normalized_content = data_payload["content"].replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+                    assert "content" in post_call.kwargs
+                    body = post_call.kwargs["content"]
+                    assert isinstance(body, bytes)
+                    payload = urllib.parse.parse_qs(body.decode("utf-8"), encoding="utf-8")
+                    assert payload["kw"][0] == target_fname
+                    normalized_content = payload["content"][0].replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
                     assert "手动内容" in normalized_content
     mock_db = MagicMock()
     target_fname = "影视大全"
@@ -178,8 +185,15 @@ async def test_manual_post_encoding_safety():
                     assert tid == 67890
 
                     post_call = mock_http.post.call_args
-                    assert "data" in post_call.kwargs
-                    data_payload = post_call.kwargs["data"]
-                    assert isinstance(data_payload, dict)
-                    assert "content" in data_payload
-                    assert data_payload["content"].count('\r\n') >= 3
+                    # 现行实现: 手动 urlencode 后以 content= 原始字节发送
+                    assert "content" in post_call.kwargs
+                    body = post_call.kwargs["content"]
+                    assert isinstance(body, bytes)
+                    payload = urllib.parse.parse_qs(body.decode("utf-8"), encoding="utf-8")
+                    content_value = payload["content"][0]
+                    # 换行已按贴吧 Web 表单规范转换为 [br] BBCode, 不得残留原始 \r\n
+                    assert "\r" not in content_value
+                    zero_width = ("​", "‌", "‍", "﻿")
+                    cleaned = "".join(ch for ch in content_value if ch not in zero_width)
+                    # 原文 4 处换行 (\r\n\r\n / \r / \n) 均应转换为 [br]
+                    assert cleaned.count("[br]") == 4

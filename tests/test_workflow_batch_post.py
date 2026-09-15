@@ -127,7 +127,10 @@ class TestBatchPostWorkflow:
         # Add a "success" material that needs reset
         await db.add_materials_bulk([("Reuse Title", "Reuse Content")])
         mats = await db.get_materials()
-        await db.update_material_status(mats[0].id, "success")
+        # 模拟真实执行后的物料状态: 发帖成功时 update_material_status 会回写
+        # task_id 关联 (见 batch_post.py 执行成功路径); reset_materials_for_task
+        # 按该关联筛选待重置物料, 不设置则任务级重置匹配不到
+        await db.update_material_status(mats[0].id, "success", task_id=str(task.id))
 
         # Mock dependencies
         with patch("tieba_mecha.core.daemon.get_db", return_value=db), \

@@ -175,7 +175,8 @@ class TestBatchPostTaskDefaults:
         t = BatchPostTask(id="1", fname="test")
         assert t.strategy == "round_robin"
         assert t.pairing_mode == "random"
-        assert t.ai_persona == "normal"
+        # ai_persona 默认 None = 自动按时段轮换 (由 AIOptimizer.optimize_post 兜底解析)
+        assert t.ai_persona is None
         assert t.delay_min == 120.0
         assert t.delay_max == 600.0
 
@@ -286,7 +287,8 @@ class TestFailureCircuitBreaker:
 
     async def test_trips_after_threshold(self):
         from tieba_mecha.core.batch_post import FailureCircuitBreaker
-        breaker = FailureCircuitBreaker(max_consecutive_failures=3, cooldown_minutes=60)
+        # 渐进式熔断: cooldown_minutes 已演进为 base_cooldown (按 24h 触发次数倍增)
+        breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60)
 
         tripped_1 = await breaker.record_failure(1)
         assert tripped_1 is False
@@ -298,7 +300,7 @@ class TestFailureCircuitBreaker:
 
     async def test_success_resets_counter(self):
         from tieba_mecha.core.batch_post import FailureCircuitBreaker
-        breaker = FailureCircuitBreaker(max_consecutive_failures=3, cooldown_minutes=60)
+        breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60)
 
         await breaker.record_failure(1)
         await breaker.record_failure(1)

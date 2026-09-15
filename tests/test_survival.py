@@ -341,7 +341,9 @@ class TestCheckPostSurvival:
             status, reason = await check_post_survival(12345)
 
             assert status == "dead"
-            assert reason == "deleted_by_user"
+            # 通用异常仅含 "deleted" 无删除者线索 → 归为 unknown
+            # (deleted_by_user 需 msg 含 用户/楼主/自删 关键词, 见 post.py 分类注释)
+            assert reason == "deleted_unknown"
 
     @pytest.mark.asyncio
     async def test_check_post_survival_banned_error(self):
@@ -359,7 +361,9 @@ class TestCheckPostSurvival:
             status, reason = await check_post_survival(12345)
 
             assert status == "dead"
-            assert reason == "banned_by_mod"
+            # blocked/banned 类 → 吧务删除; 分类器不产出 banned_by_mod
+            # (crud.update_material_survival_status 的映射表兼容旧拼写仅为防御)
+            assert reason == "deleted_by_mod"
 
     @pytest.mark.asyncio
     async def test_check_post_survival_captcha_error(self):
@@ -730,7 +734,8 @@ class TestGetMaterialIdsByStatus:
             from tieba_mecha.db.models import MaterialPool
             session.add(MaterialPool(title="待发", content="c", status="pending"))
             session.add(MaterialPool(title="失败", content="c", status="failed"))
-            session.add(MaterialPool(title="成功", content="c", status="success"))
+            # success 物料须带有效 posted_tid 才会入选 (归档全选与分页查询口径一致)
+            session.add(MaterialPool(title="成功", content="c", status="success", posted_tid=999))
             await session.commit()
 
         pending_ids = await db.get_material_ids_by_status(statuses=["pending", "failed"])

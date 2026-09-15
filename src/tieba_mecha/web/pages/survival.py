@@ -156,7 +156,7 @@ class SurvivalPage:
             # 加载行为审计数据
             await self._load_audit_data()
         except Exception as e:
-            from ..core.logger import log_error
+            from ...core.logger import log_error
             await log_error(f"加载存活分析数据失败: {e}")
 
     async def _load_audit_data(self):
@@ -166,7 +166,7 @@ class SurvivalPage:
             self._audit_reports = await audit_all_accounts(self.db, days=7)
             self._audit_error = None
         except Exception as e:
-            from ..core.logger import log_warn
+            from ...core.logger import log_warn
             await log_warn(f"加载行为审计数据失败: {e}")
             self._audit_reports = []
             self._audit_error = str(e)
@@ -544,7 +544,7 @@ class SurvivalPage:
         """执行删除"""
         self.page.close(confirm_dialog)
         if self.db:
-            from ..core.logger import log_info
+            from ...core.logger import log_info
             await log_info(f"用户删除物料 #{material_id}")
             await self.db.delete_material(material_id)
             # 重新加载统计数据和当前页
