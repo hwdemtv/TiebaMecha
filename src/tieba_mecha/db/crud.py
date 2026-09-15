@@ -1693,8 +1693,9 @@ class Database:
         """更新物料的存活探测状态，并联动更新 Forum 封禁标记。
         
         联动规则：
-        - 帖子阵亡 (dead) + 被删原因 (banned_by_mod/deleted_by_system/deleted_by_mod)
+        - 帖子阵亡 (dead) + 被删原因 (deleted_by_system/deleted_by_mod)
           → 标记该账号在该贴吧 Forum.is_banned=True, is_post_target=False
+          (banned_by_mod 为历史版本拼写, 仅作输入兼容保留)
         - 仅更新 Forum，不更新 TargetPool（TargetPool 的 fail_count 仅由发帖环节维护，
           避免发帖失败 + 存活检测重复计数）
         """
@@ -1706,6 +1707,7 @@ class Database:
                 m.last_checked_at = datetime.now()
 
                 # 联动标记：帖子被删除时，标记该账号在该贴吧为封禁/风控状态
+                # (banned_by_mod 仅兼容历史数据, 当前分类器只产出 deleted_by_mod)
                 ban_reason_map = {
                     "banned_by_mod": "存活探测：帖子被吧务删除",
                     "deleted_by_system": "存活探测：帖子被系统风控删除",

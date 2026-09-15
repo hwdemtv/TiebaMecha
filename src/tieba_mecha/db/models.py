@@ -283,7 +283,7 @@ class MaterialPool(Base):
     bump_last_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="上次执行日期(用于每日一次判断)")
 
     survival_status: Mapped[str] = mapped_column(String(20), default="unknown", comment="存活状态: unknown/alive/dead")
-    death_reason: Mapped[str] = mapped_column(String(100), default="", comment="被删原因: deleted_by_user/auto_removed/banned_by_mod/error")
+    death_reason: Mapped[str] = mapped_column(String(100), default="", comment="被删原因: deleted_by_system/deleted_by_mod/deleted_by_user/deleted_unknown/auto_removed/captcha_required/error")
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后存活检测时间")
     task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="关联批量任务ID，空表示手动录入")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="注入时间")

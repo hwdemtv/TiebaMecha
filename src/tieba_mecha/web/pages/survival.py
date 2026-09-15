@@ -29,12 +29,13 @@ _MAX_CONTENT_PREVIEW = 40  # 内容预览最大字符数
 _MAX_DETAIL_CONTENT = 500  # 详情弹窗内容最大字符数
 
 # 删帖原因英文代码 → 中文友好显示
+# 注: banned_by_mod 为历史版本拼写, 当前分类器只产出 deleted_by_mod,
+# 未列出的历史值经 _death_reason_display 的 fallback 显示原码
 _DEATH_REASON_MAP = {
     "deleted_by_system": "🤖 系统风控删除",
     "deleted_by_mod": "👮 吧务手动删除",
     "deleted_by_user": "👤 用户自删",
     "deleted_unknown": "❓ 帖子已删除（原因未明）",
-    "banned_by_mod": "👮 吧务删除（触发封禁）",
     "auto_removed": "🗑️ 帖子不存在/已过期",
     "captcha_required": "🔐 验证码拦截",
     "error": "⚠️ 检测异常",

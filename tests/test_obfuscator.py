@@ -173,10 +173,14 @@ class TestObfuscatorIntegration:
         result = Obfuscator.inject_zero_width_chars(text, density=0.3)
         result = Obfuscator.humanize_spacing(result)
 
-        # URL should still be preserved
+        # URL/英文区域不注入, 原样保留
         assert "https://example.com" in result
-        # Chinese content should be preserved
-        assert "测试帖子内容" in result or any(c in result for c in "测试帖子内容")
+        # 中文内容可能被随机注入零宽字符, 剥除后应完整保留
+        # (原 `or any(c in result ...)` 写法任一字符存在即通过, 属弱断言)
+        cleaned = result
+        for zwc in ZERO_WIDTH_CHARS:
+            cleaned = cleaned.replace(zwc, "")
+        assert "测试帖子内容，包含链接" in cleaned
 
     def test_realistic_post_content(self):
         """Test with realistic post content."""
