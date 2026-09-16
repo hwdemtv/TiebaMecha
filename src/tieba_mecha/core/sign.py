@@ -38,10 +38,8 @@ class ForumInfo:
     level: int = 0
 
 
-# 错误码常量
-ERR_ALREADY_SIGNED = 160002
-ERR_FORUM_INVALID = (340006, 340001)
-ERR_FORUM_BANNED = 3250004
+# 错误码常量（单源定义在 core/risk.py，此处重导出以兼容既有引用）
+from .risk import ERR_ALREADY_SIGNED, ERR_FORUM_INVALID, ERR_FORUM_BANNED
 
 # 全局签到流互斥锁：防止守护进程定时签到与界面手动签到并发执行，
 # 双流并跑会令请求频率翻倍，破坏行为模拟节奏并加大风控风险

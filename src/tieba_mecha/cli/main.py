@@ -50,12 +50,11 @@ def run_async(coro):
 
 @app.command()
 def web(
-    port: int = typer.Option(8080, "--port", "-p", help="Web 服务端口"),
+    port: int = typer.Option(9006, "--port", "-p", help="Web 服务端口（与 Web 端默认一致）"),
     host: str = typer.Option("localhost", "--host", "-h", help="绑定地址"),
 ):
     """启动 Web 界面"""
     import os
-    import sys
 
     # 设置环境变量供 Flet 使用
     os.environ["FLET_SERVER_PORT"] = str(port)
@@ -66,7 +65,7 @@ def web(
     # 导入并启动 Web 应用
     from tieba_mecha.web.app import run_app
 
-    run_app(port=port)
+    run_app(port=port, host=host)
 
 
 @app.command()
@@ -178,7 +177,8 @@ def account_verify():
             console.print("[red]未找到活跃账号[/red]")
             return
 
-        bduss, stoken, proxy_id, cuid, user_agent = creds
+        # get_account_credentials 返回 (id, bduss, stoken, proxy_id, cuid, user_agent) 6 元组
+        _, bduss, stoken, proxy_id, cuid, user_agent = creds
         valid, user_id, user_name, error = await account.verify_account(bduss, stoken)
 
         if valid:

@@ -7,6 +7,16 @@ import json
 from tieba_mecha.core.ai_optimizer import AIOptimizer, _encrypt_api_key, _decrypt_api_key, _URL_PATTERN
 
 
+@pytest.fixture(autouse=True)
+def _stub_pro_license():
+    """AI 优化是 Pro 功能：stub 授权管理器为 PRO，避免测试依赖真实库的授权状态。"""
+    stub = MagicMock()
+    stub.status = 1  # AuthStatus.PRO
+    stub.check_local_status = AsyncMock(return_value=1)
+    with patch("tieba_mecha.core.auth.get_auth_manager", new=AsyncMock(return_value=stub)):
+        yield
+
+
 class TestAIOptimizer:
     """Tests for AIOptimizer class."""
 

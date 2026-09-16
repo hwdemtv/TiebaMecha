@@ -73,6 +73,7 @@ class Forum(Base):
     __table_args__ = (
         UniqueConstraint("fid", "account_id", name="uq_forum_fid_account"),
         Index("ix_forums_account_id", "account_id"),  # 按账号查询贴吧
+        Index("ix_forums_fname", "fname"),  # 按吧名查询/全局删除/封禁标记
     )
 
 
@@ -90,6 +91,7 @@ class SignLog(Base):
     
     __table_args__ = (
         Index("ix_sign_logs_signed_at", "signed_at"),  # 按时间排序查询
+        Index("ix_sign_logs_forum_id", "forum_id"),  # 按吧聚合/查询历史
     )
 
 
@@ -291,6 +293,10 @@ class MaterialPool(Base):
     __table_args__ = (
         Index("ix_material_pool_status", "status"),  # 高频筛选
         Index("ix_material_pool_created_at", "created_at"),  # 按时间排序
+        Index("ix_material_pool_posted_tid", "posted_tid"),  # 存活检测按 TID 定位
+        Index("ix_material_pool_posted_fname", "posted_fname"),  # 存活分析按吧筛选
+        Index("ix_material_pool_survival_status", "survival_status"),  # 存活状态筛选
+        Index("ix_material_pool_task_id", "task_id"),  # 按任务回查物料
     )
 
 class TargetPool(Base):
@@ -408,4 +414,5 @@ class BatchPostLog(Base):
     __table_args__ = (
         Index("ix_batch_post_logs_created_at", "created_at"),
         Index("ix_batch_post_logs_task_id", "task_id"),
+        Index("ix_batch_post_logs_fname_status", "fname", "status"),  # 矩阵统计按吧+状态聚合
     )

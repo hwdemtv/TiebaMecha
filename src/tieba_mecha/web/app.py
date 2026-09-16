@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Callable
 
 import flet as ft
 
+from ..db.crud import get_db
 from .utils import with_opacity
 from .components import get_dark_theme, get_light_theme, icons
 
@@ -333,9 +334,10 @@ class TiebaMechaApp:
                         is_valid, uid, uname, msg = await verify_account(bduss, stoken)
                         status = "active" if is_valid else "expired"
                         if not is_valid:
+                            from ..core.risk import is_account_ban_error
                             if "timeout" in msg.lower() or "connection" in msg.lower() or "网络" in msg:
                                 status = "error" # 网络问题不代表过期
-                            elif "封禁" in msg or "屏蔽" in msg:
+                            elif is_account_ban_error(msg):
                                 status = "banned"
 
                         await self.db.update_account_status(acc.id, status)
@@ -580,7 +582,7 @@ class TiebaMechaApp:
         self.page.run_task(self._navigate, page_name)
 
 # 确保 create_gradient_button 在 fallback 中能用
-def run_app(port: int = 9006):
+def run_app(port: int = 9006, host: str | None = None):
     """启动 Flet 应用"""
     # 修复：aiotieba 导入后会将 logging level 30 的名称从标准的 'WARNING'
     # 覆盖为 'WARN'，导致 flet_runtime 传给 uvicorn 的日志级别字符串为 'warn'，
@@ -594,10 +596,13 @@ def run_app(port: int = 9006):
         await app.initialize(db)
 
     # 兼容不同 Flet 版本：优先使用 ft.run()，否则回退到 ft.app()
+    kwargs = dict(port=port, view=ft.AppView.WEB_BROWSER)
+    if host:
+        kwargs["host"] = host
     if hasattr(ft, 'run'):
-        ft.run(target=main, port=port, view=ft.AppView.WEB_BROWSER)
+        ft.run(target=main, **kwargs)
     else:
-        ft.app(target=main, port=port, view=ft.AppView.WEB_BROWSER)
+        ft.app(target=main, **kwargs)
 
 
 if __name__ == "__main__":

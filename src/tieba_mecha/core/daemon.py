@@ -481,10 +481,8 @@ class TiebaMechaDaemon:
             schedule_time: 计划执行时间
         """
         job_id = f"once_batch_{task_id}"
-        # 移除旧的（如果存在）
-        if self.scheduler.get_job(job_id):
-            self.scheduler.remove_job(self.scheduler.get_job(job_id))
-
+        # 注：下方 add_job 已带 replace_existing=True，会自动覆盖同 id 旧任务；
+        # 此处不要再手动 remove_job（传入 Job 对象会抛 JobLookupError）
         self.scheduler.add_job(
             _execute_once_task,
             'date',

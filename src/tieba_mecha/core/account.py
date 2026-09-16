@@ -86,6 +86,7 @@ class AccountInfo:
     post_weight: int = 5
     is_maint_enabled: bool = False
     last_maint_at: datetime | None = None
+    last_verified: datetime | None = None
 
 
 async def add_account(
@@ -127,7 +128,8 @@ async def add_account(
             user_name = uname
             status = "active"
         else:
-            if "封禁" in error or "屏蔽" in error:
+            from .risk import is_account_ban_error
+            if is_account_ban_error(error):
                 status = "banned"
             else:
                 status = f"invalid: {error[:50]}" if error else "invalid"
@@ -158,6 +160,7 @@ async def add_account(
         post_weight=getattr(account, 'post_weight', 5),
         is_maint_enabled=account.is_maint_enabled,
         last_maint_at=account.last_maint_at,
+        last_verified=getattr(account, 'last_verified', None),
     )
 
 
@@ -254,6 +257,7 @@ async def list_accounts(db: Database) -> list[AccountInfo]:
             post_weight=getattr(a, 'post_weight', 5),
             is_maint_enabled=a.is_maint_enabled,
             last_maint_at=a.last_maint_at,
+            last_verified=getattr(a, "last_verified", None),
         )
         for a in accounts
     ]
@@ -328,6 +332,7 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
             post_weight=getattr(updated, 'post_weight', 5),
             is_maint_enabled=updated.is_maint_enabled,
             last_maint_at=updated.last_maint_at,
+            last_verified=datetime.now(),
         )
     return None
 

@@ -127,17 +127,54 @@ class LicenseManager:
             return "UNKNOWN-HARDWARE-ID-ERR"
 
     async def check_local_status(self) -> AuthStatus:
-        """检查本地缓存的授权状态 (离线校验逻辑)"""
+        """检查本地缓存的授权状态 (离线校验逻辑)。
+
+        仅当最近一次在线验证成功且仍在宽限期内（默认 72 小时，覆盖 6 小时
+        心跳 + 短期离线场景）时才本地授予 PRO；否则回到 FREE 等待在线校准。
+        """
         if not self.db: self.db = await get_db()
-        
+
         license_key = await self.db.get_setting("license_key", "")
         if not license_key:
             self.status = AuthStatus.FREE
-        else:
-            # TODO: 校验本地 JWT 缓存。暂定默认为 PRO。
-            self.status = AuthStatus.PRO
-            
+            return self.status
+
+        if await self.db.get_setting("license_cached_status", "") != "pro":
+            self.status = AuthStatus.FREE
+            return self.status
+
+        last_ok = await self.db.get_setting("license_last_verified_at", "")
+        if not last_ok:
+            self.status = AuthStatus.FREE
+            return self.status
+
+        try:
+            from datetime import datetime, timedelta
+            last_ok_dt = datetime.fromisoformat(last_ok)
+            grace = timedelta(hours=72)
+            if datetime.now() - last_ok_dt <= grace:
+                self.status = AuthStatus.PRO
+            else:
+                # 缓存过期：需要重新在线验证
+                self.status = AuthStatus.FREE
+        except (ValueError, TypeError):
+            self.status = AuthStatus.FREE
+
         return self.status
+
+    async def _cache_auth_result(self, ok: bool):
+        """把在线验证结果落库，供 check_local_status 离线判定使用。"""
+        if not self.db:
+            return
+        try:
+            from datetime import datetime
+            if ok:
+                await self.db.set_setting("license_cached_status", "pro")
+                await self.db.set_setting("license_last_verified_at", datetime.now().isoformat())
+            else:
+                await self.db.set_setting("license_cached_status", "free")
+        except Exception as e:
+            logging.debug(f"[AUTH] 授权缓存写入失败: {e}")
 
     async def verify_online(self) -> bool:
         """多节点在线验证授权"""
@@ -190,11 +227,15 @@ class LicenseManager:
                                 if data.get("success"):
                                     self.status = AuthStatus.PRO
                                     self.license_info = data.get("info", {})
+                                    await self._cache_auth_result(ok=True)
                                     logging.info(f"授权同步成功 ({server})")
                                     return True
                                 else:
                                     # 提取真实的业务提示（如：卡密不存在、已被禁用等），降级为 WARNING
                                     msg = data.get("message") or data.get("msg") or "未知授权错误"
+                                    # 业务层明确拒绝：撤销本地 PRO 缓存，防止离线状态继续放行
+                                    self.status = AuthStatus.FREE
+                                    await self._cache_auth_result(ok=False)
                                     logging.warning(f"授权业务提示 ({server}): {msg}")
                             except Exception:
                                 logging.debug(f"无法解析服务器返回的 JSON 内容 ({server}): HTTP {resp.status}")

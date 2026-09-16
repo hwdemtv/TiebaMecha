@@ -104,6 +104,53 @@ async def get_best_proxy_config(db: Database, proxy_id: int | None = None) -> Op
     # 未指定 proxy_id 时，返回第一个可用代理
     return _build_proxy_config(proxies[0])
 
+
+def build_proxy_url(protocol: str, host: str, port: int, username: str = "", password: str = "") -> str:
+    """构建代理 URL（认证信息 URL-quote 后嵌入，适用 SOCKS5/HTTP）。
+
+    代理 URL 构建的单源实现：post.py / batch_post.py 等发帖路径一律调用
+    此函数，不再各自拼接（历史上四处实现的转义与认证嵌入行为不一致）。
+    """
+    import urllib.parse
+    host_port = f"{host}:{port}"
+    if username and password:
+        u = urllib.parse.quote(username, safe="")
+        p = urllib.parse.quote(password, safe="")
+        return f"{protocol}://{u}:{p}@{host_port}"
+    return f"{protocol}://{host_port}"
+
+
+async def build_proxy_url_from_model(db: Database, proxy_id: int | None) -> Optional[str]:
+    """按代理 ID 从库中取模型、解密凭据并构建代理 URL；无代理返回 None。
+
+    解密失败时回退使用原始值（与 _build_proxy_config 行为一致）。
+    """
+    if not proxy_id:
+        return None
+    proxy_model = await db.get_proxy(proxy_id)
+    if not proxy_model:
+        return None
+    from .account import decrypt_value
+    import logging
+    logger = logging.getLogger(__name__)
+
+    username = ""
+    password = ""
+    if proxy_model.username:
+        try:
+            username = decrypt_value(proxy_model.username)
+        except Exception:
+            logger.warning("代理 %s 用户名解密失败，可能加密密钥已变更", proxy_model.host)
+            username = proxy_model.username
+    if proxy_model.password:
+        try:
+            password = decrypt_value(proxy_model.password)
+        except Exception:
+            logger.warning("代理 %s 密码解密失败，可能加密密钥已变更", proxy_model.host)
+            password = proxy_model.password
+
+    return build_proxy_url(proxy_model.protocol, proxy_model.host, proxy_model.port, username, password)
+
 def _build_proxy_config(proxy) -> ProxyConfig:
     """内部工具函数：从模型构建 ProxyConfig，含解密逻辑"""
     from .account import decrypt_value

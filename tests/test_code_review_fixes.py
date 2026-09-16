@@ -697,17 +697,18 @@ class TestProxyAuthBasicAuth:
     def test_batch_post_no_creds_in_proxy_url(self):
         """Test batch_post.py URL-encodes credentials embedded in proxy URLs.
 
-        Static analysis: verify user/password are percent-encoded via
-        urllib.parse.quote(safe="") before being embedded in the proxy URL.
+        静态检查（重构后）：代理 URL 构建已收敛到 core/proxy.build_proxy_url
+        单源实现（转义逻辑在那里并有行为测试 test_refactor_core），batch_post
+        只允许通过 build_proxy_url_from_model 获取代理 URL，不得重新内联拼接。
         """
         import inspect
         from tieba_mecha.core import batch_post
 
         source = inspect.getsource(batch_post)
-        assert 'urllib.parse.quote(p_user, safe="")' in source, \
-            "Proxy username must be URL-encoded before embedding (P0-03)"
-        assert 'urllib.parse.quote(p_pwd, safe="")' in source, \
-            "Proxy password must be URL-encoded before embedding (P0-03)"
+        assert "build_proxy_url_from_model" in source, \
+            "batch_post must use the single-source proxy URL builder (P0-03)"
+        assert 'urllib.parse.quote(p_user' not in source, \
+            "batch_post must not re-inline proxy credential encoding (P0-03)"
 
 
 # ========================================================================

@@ -318,6 +318,7 @@ async def add_thread(
         (是否成功, 消息, tid)
     """
     from .obfuscator import Obfuscator
+    from .web_poster import build_web_headers, content_to_web_bbcode, build_thread_payload, prewarm_and_commit_thread
     import httpx
     creds = await get_account_credentials(db)
     if not creds:
@@ -333,81 +334,28 @@ async def add_thread(
                 return False, "获取账号发帖凭证(TBS)失败", 0
 
             forum = await client.get_forum(fname)
-            
-            # 增强环境伪装头
+
             # [核心加固] 对贴吧名进行转义，防止 Windows 环境下请求头触发 ASCII 编码异常
             quoted_fname = urllib.parse.quote(fname)
-            
-            headers = {
-                "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
-                "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-                "Referer": f"https://tieba.baidu.com/f?kw={quoted_fname}",
-                "Origin": "https://tieba.baidu.com",
-                "X-Requested-With": "XMLHttpRequest",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            }
-            
-            # 使用现有代理及 URL 构建
-            proxy_model = await db.get_proxy(proxy_id) if proxy_id else None
-            proxy_url = None
-            if proxy_model:
-                from .account import decrypt_value
-                scheme = proxy_model.protocol
-                h = proxy_model.host
-                p = proxy_model.port
-                user = decrypt_value(proxy_model.username) if proxy_model.username else ""
-                pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
-                if user and pwd:
-                    proxy_url = f"{scheme}://{user}:{pwd}@{h}:{p}"
-                else:
-                    proxy_url = f"{scheme}://{h}:{p}"
-            
+            headers = build_web_headers(bduss, stoken, quoted_fname, ua)
+
+            # 使用统一代理 URL 构建（单源：core/proxy.build_proxy_url_from_model）
+            from .proxy import build_proxy_url_from_model
+            proxy_url = await build_proxy_url_from_model(db, proxy_id)
+
             # 【核心层】反风控干扰触发 (仅混淆中文字符防抽，保留原意)
             obf = await Obfuscator.from_db(db)
             safe_title = obf.inject_zero_width_chars(title, density=0.2)
             safe_content = obf.obfuscate_all(content)
 
-            # 规范化换行 → 统一 LF → 转换为 [br] BBCode（贴吧 Web 表单 API 用 [br] 换行）
-            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '[br]')
-
-            data = {
-                "ie": "utf-8",
-                "kw": fname,
-                "fid": forum.fid,
-                "tbs": client.account.tbs,
-                "title": safe_title,
-                "content": safe_content,
-                "anonymous": 0,
-                "rich_text": "1",
-            }
-
-            # 手动 URL 编码并以原始字节发送，避免 httpx 对 <> 等字符的过度百分号编码
-            post_body = urllib.parse.urlencode(data, encoding='utf-8').encode('utf-8')
+            post_body = build_thread_payload(fname, forum.fid, client.account.tbs, safe_title, content_to_web_bbcode(safe_content))
 
             async with httpx.AsyncClient(proxy=proxy_url) as http_client:
-                # 【诊断日志】确认新固件已加载
-                from .logger import log_info as diagnostic_log
-                await diagnostic_log(f"[加固协议开启] 正在对 {fname} 执行预读转义...")
-                
-                # 【第一步防封】预热会话，模拟真人正在阅读本吧首页 (同步转义 URL)
-                try:
-                    await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
-                    await asyncio.sleep(1.2)  # 停留模拟人类打字停顿
-                except Exception as e:
-                    from .logger import log_warn
-                    await log_warn(f"[{fname}] 预读失败: {str(e)}")
-                    
-                # 【第二步防封】实际提交流程
-                res = await http_client.post(
-                    "https://tieba.baidu.com/f/commit/thread/add",
-                    headers=headers,
-                    content=post_body,
-                    timeout=15.0
+                res_json = await prewarm_and_commit_thread(
+                    http_client, headers, quoted_fname, post_body,
+                    prewarm_sleep=(1.2, 1.2),  # 手动单发保持原固定停顿
+                    commit_timeout=15.0,
                 )
-                
-                res_json = res.json()
                 if res_json.get("err_code") == 0:
                     tid = res_json.get("data", {}).get("tid", 0)
                     return True, "发帖成功", tid

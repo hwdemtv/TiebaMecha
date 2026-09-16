@@ -180,11 +180,9 @@ class CaptchaCircuitBreaker:
         Returns:
             True 表示触发了熔断，应暂停该账号；False 表示正常
         """
-        captcha_keywords = ["验证码", "captcha", "安全验证", "操作太频繁", "频繁登录", "账号异常"]
-        captcha_codes = [6, 7, 16, 18, 40, 100006, 100007]  # 常见的验证码相关错误码
+        from .risk import is_captcha_error
 
-        is_captcha = any(kw in str(err_msg) for kw in captcha_keywords) or err_code in captcha_codes
-
+        is_captcha = is_captcha_error(str(err_msg or ""), err_code)
         if is_captcha:
             async with self._lock:
                 self._captcha_triggers[account_id] = time.time()
@@ -1220,63 +1218,34 @@ class BatchPostManager:
                         
                         # 2.2 仿生预热浏览 (模拟进入贴吧首页)
                         quoted_fname = urllib.parse.quote(current_target_fname)
-                        
-                        # 代理处理：SOCKS5 必须将凭据嵌入 URL，BasicAuth 对 SOCKS5 握手层无效
-                        proxy_model = await self.db.get_proxy(proxy_id) if proxy_id else None
-                        proxy_url = None
-                        if proxy_model:
-                            from .account import decrypt_value
-                            p_user = decrypt_value(proxy_model.username) if proxy_model.username else ""
-                            p_pwd = decrypt_value(proxy_model.password) if proxy_model.password else ""
-                            proto = proxy_model.protocol
-                            host_port = f"{proxy_model.host}:{proxy_model.port}"
 
-                            if p_user and p_pwd:
-                                # 将认证信息直接嵌入 URL，适用于 SOCKS5 / HTTP 所有协议
-                                # 参考 proxy.py _build_proxy_config 的处理逻辑保持一致
-                                u = urllib.parse.quote(p_user, safe="")
-                                p = urllib.parse.quote(p_pwd, safe="")
-                                proxy_url = f"{proto}://{u}:{p}@{host_port}"
-                            else:
-                                # 匿名代理（无认证）
-                                proxy_url = f"{proto}://{host_port}"
+                        # 代理处理：统一走 core/proxy 的单源构建
+                        # （SOCKS5/HTTP 认证信息的 URL 嵌入与转义保持一致）
+                        from .proxy import build_proxy_url_from_model
+                        proxy_url = await build_proxy_url_from_model(self.db, proxy_id)
 
-                        headers = {
-                            "Cookie": f"BDUSS={bduss}; STOKEN={stoken}",
-                            "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                            "Referer": f"https://tieba.baidu.com/f?kw={quoted_fname}",
-                            "Origin": "https://tieba.baidu.com",
-                            "Accept-Language": f"zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-                            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                        }
+                        # 请求头：统一走 core/web_poster 的单源构建
+                        from .web_poster import build_web_headers, content_to_web_bbcode, build_thread_payload, prewarm_and_commit_thread
+                        headers = build_web_headers(bduss, stoken, quoted_fname, ua)
                         # 安全提示：headers 中包含敏感凭证(BDUSS/STOKEN)，禁止在日志中打印此对象
 
                         # 统一使用 proxy_url（凭据已嵌入），不再单独传 auth 参数
                         # 使用 try-finally 确保 HTTP 客户端在所有情况下都能正确关闭
                         _http_client = httpx.AsyncClient(proxy=proxy_url)
                         async with _http_client as http_client:
-                            # 预热延迟
-                            try:
-                                await http_client.get(f"https://tieba.baidu.com/f?kw={quoted_fname}", headers=headers, timeout=10.0)
-                                await asyncio.sleep(random.uniform(1.2, 3.5))
-                            except Exception as _e: logging.debug(f"预热浏览非关键失败: {_e}")
-                                
                             forum_info = await client.get_forum(current_target_fname)
-                            # 规范化换行 → 统一 LF → 转换为 [br] BBCode（贴吧 Web 表单 API 用 [br] 换行）
-                            safe_content = safe_content.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '[br]')
-                            data = {
-                                "ie": "utf-8", "kw": current_target_fname, "fid": getattr(forum_info, 'fid', 0),
-                                "tbs": client.account.tbs, "title": title, "content": safe_content,
-                                "anonymous": 0, "rich_text": "1",
-                            }
-                            # 手动 URL 编码并以原始字节发送，避免 httpx 对 <> 等字符的过度百分号编码
-                            post_body = urllib.parse.urlencode(data, encoding='utf-8').encode('utf-8')
-
-                            res = await http_client.post(
-                                "https://tieba.baidu.com/f/commit/thread/add",
-                                headers=headers, content=post_body, timeout=25.0
+                            post_body = build_thread_payload(
+                                current_target_fname,
+                                getattr(forum_info, 'fid', 0),
+                                client.account.tbs,
+                                title,
+                                content_to_web_bbcode(safe_content),
                             )
-                            res_json = res.json()
+
+                            res_json = await prewarm_and_commit_thread(
+                                http_client, headers, quoted_fname, post_body,
+                                commit_timeout=25.0,
+                            )
                             err_code = res_json.get("err_code", 0)
                             
                             if err_code == 0:
@@ -1324,8 +1293,9 @@ class BatchPostManager:
                                 await captcha_breaker.check_and_trigger(account_id, err_msg, err_code)
                                 await failure_breaker.record_failure(account_id)
                                 
-                                # 封禁逻辑识别
-                                if err_code == 4 or "封禁" in err_msg:
+                                # 封禁逻辑识别（统一风控分类器）
+                                from .risk import is_account_ban_error
+                                if err_code == 4 or is_account_ban_error(err_msg):
                                     if "本吧" in err_msg:
                                         await self.db.mark_forum_banned(account_id, current_target_fname, reason="发射检测吧封")
                                         await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="发射检测吧封")
@@ -1413,8 +1383,9 @@ class BatchPostManager:
                 err_str = str(e)
                 await log_error(f"自顶回帖失败 [TID:{tid}]: {err_str}")
                 
-                # 识别吧务封禁
-                if "3250004" in err_str:
+                # 识别吧务封禁（统一风控分类器）
+                from .risk import is_forum_ban_error
+                if is_forum_ban_error(err_str):
                     # 标记位熔断：不再删除记录，而是设为封禁并停止发帖许可
                     await self.db.mark_forum_banned(account_id, fname, reason="回帖触发吧务封禁 (3250004)")
                     await self.db.update_target_pool_status(fname, is_success=False, error_reason="回帖触发吧务封禁")
@@ -1522,9 +1493,8 @@ class BatchPostManager:
                             failed_count += 1
 
                             # ---- 验证码熔断 ----
-                            import re as _re
-                            code_match = _re.search(r'(\d{4,})', err_msg)
-                            err_code = int(code_match.group(1)) if code_match else 0
+                            from .risk import extract_err_code
+                            err_code = extract_err_code(err_msg)
                             is_captcha = await captcha_breaker.check_and_trigger(acc_id, err_msg, err_code)
                             if not is_captcha:
                                 await failure_breaker.record_failure(acc_id)
@@ -1711,10 +1681,8 @@ class BatchPostManager:
                             err_msg = str(e)
 
                             # ---- 验证码熔断检测 ----
-                            # 尝试从错误消息中提取数字错误码
-                            import re as _re
-                            code_match = _re.search(r'(\d{4,})', err_msg)
-                            err_code = int(code_match.group(1)) if code_match else 0
+                            from .risk import extract_err_code, is_forum_ban_error, is_already_followed_error, is_blacklisted_error
+                            err_code = extract_err_code(err_msg)
                             is_captcha = await captcha_breaker.check_and_trigger(acc_id, err_msg, err_code)
                             if is_captcha:
                                 result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "触发验证码，已熔断"})
@@ -1723,9 +1691,9 @@ class BatchPostManager:
                             elif await failure_breaker.record_failure(acc_id):
                                 result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "连续失败熔断"})
 
-                            elif "3250004" in err_msg or "已关注" in err_msg:
+                            elif is_forum_ban_error(err_msg) or is_already_followed_error(err_msg):
                                 result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "已关注或无法关注"})
-                            elif "被拉黑" in err_msg or "400013" in err_msg:
+                            elif is_blacklisted_error(err_msg):
                                 result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "账号被该吧拉黑"})
                                 # 标记为封禁，尝试获取真实 fid
                                 ban_fid = 0
