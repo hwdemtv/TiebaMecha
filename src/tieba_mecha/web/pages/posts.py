@@ -157,6 +157,7 @@ class PostsPage:
             on_change=self._on_content_change,
         )
         self.post_status = ft.Text("", size=11)
+        self.post_submit_btn = create_gradient_button("立即发布", icon=icons.SEND, on_click=self._do_post)
 
         post_area = ft.Container(
             content=ft.Column([
@@ -175,7 +176,7 @@ class PostsPage:
                     on_click=self._ai_optimize_post,
                     style=ft.ButtonStyle(color="primary")
                 ),
-                create_gradient_button("立即发布", icon=icons.SEND, on_click=self._do_post),
+                self.post_submit_btn,
                 self.post_status,
             ], spacing=10, scroll=ft.ScrollMode.AUTO),
             padding=15,
@@ -501,11 +502,27 @@ class PostsPage:
             self._show_snackbar(f"内容超出限制，当前{content_len}字", "error")
             return
 
-        self.post_status.value = "正在通过加密信道传输数据..."
-        self.post_status.color = "primary"
-        self.page.update()
+        # 防重复发帖：提交期间禁止再次触发
+        if getattr(self, "_posting", False):
+            self._show_snackbar("正在发布中，请勿重复提交", "warning")
+            return
+        self._posting = True
+        submit_btn = getattr(self, "post_submit_btn", None)
+        try:
+            if submit_btn:
+                submit_btn.disabled = True
+            self.post_status.value = "正在通过加密信道传输数据..."
+            self.post_status.color = "primary"
+            self.page.update()
 
-        success, msg, tid = await add_thread(self.db, fname, title, content)
+            success, msg, tid = await add_thread(self.db, fname, title, content)
+        except Exception as ex:
+            success, msg, tid = False, f"发布过程发生异常: {ex}", 0
+        finally:
+            self._posting = False
+            if submit_btn:
+                submit_btn.disabled = False
+
         if success:
             # 自动保存到物料池
             await self.db.add_materials_bulk([(title, content)])
@@ -774,7 +791,5 @@ class PostsPage:
         self.page.update()
 
     def _show_snackbar(self, message: str, type="info"):
-        color = "primary"
-        if type == "error": color = "error"
-        elif type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)

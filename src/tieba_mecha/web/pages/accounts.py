@@ -24,6 +24,11 @@ class AccountsPage:
         self._search_text = ""
         self._filter_status = "all"
         self._selected_ids = set()
+        self._sort_mode = "default"
+        self._busy = False  # 长耗时操作互斥锁，防止重复点击叠加执行
+
+        # 账号排序：危险状态(封禁/失效) > 异常 > 未知 > 正常
+        self._STATUS_SORT_ORDER = {"banned": 0, "invalid": 1, "expired": 2, "error": 3, "unknown": 4, "active": 5}
         
         # 吧库管理相关状态
         self._matrix_stats = []
@@ -73,49 +78,89 @@ class AccountsPage:
 
     async def _refresh_matrix_stats(self):
         """统一刷新矩阵统计数据（含封禁详情），替代散落各处的单独刷新"""
-        # 自动同步 is_post_target（根据封禁状态和删帖记录自动判定）
-        await self.db.auto_sync_post_target()
-        # 回填历史击穿数（仅补 success_count=0 的记录，幂等）
-        await self.db.backfill_success_count()
+        # 注：auto_sync_post_target / backfill_success_count 属于全库写操作，
+        # 已移至应用启动（app._full_initialize）执行，不再随每次刷新重复写入。
         self._matrix_stats = await self.db.get_forum_matrix_stats()
         self._banned_forum_details = await self.db.get_banned_forums_detail()
         self._banned_forum_map: dict[str, list[dict]] = {}
         for item in self._banned_forum_details:
             self._banned_forum_map.setdefault(item['fname'], []).append(item)
 
+    # ── 长耗时操作互斥与进度反馈 ──
+
+    def _begin_op(self) -> bool:
+        """开始一个长耗时操作；已有操作进行中时返回 False，避免叠加执行。"""
+        if self._busy:
+            self._show_snackbar("已有操作正在执行，请稍候...", "warning")
+            return False
+        self._busy = True
+        return True
+
+    def _end_op(self):
+        self._busy = False
+
+    def _open_progress_dialog(self, title: str, determinate: bool = False):
+        self._progress_text = ft.Text(title, size=13)
+        self._progress_bar = ft.ProgressBar(width=300, value=0 if determinate else None)
+        self._progress_dialog = ft.AlertDialog(
+            content=ft.Container(
+                content=ft.Column([self._progress_text, self._progress_bar], tight=True, spacing=12),
+                padding=ft.padding.only(left=10, right=10, top=5, bottom=5),
+                width=360,
+            ),
+            modal=True,
+        )
+        self.page.open(self._progress_dialog)
+
+    def _update_progress(self, text: str, value: float | None = None):
+        if not getattr(self, "_progress_dialog", None):
+            return
+        self._progress_text.value = text
+        if value is not None:
+            self._progress_bar.value = value
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _close_progress_dialog(self):
+        dialog = getattr(self, "_progress_dialog", None)
+        if dialog:
+            try:
+                self.page.close(dialog)
+            except Exception:
+                pass
+            self._progress_dialog = None
+
     def refresh_ui(self):
-        """刷新 UI"""
-        # 始终刷新当前 tab 的内容（确保数据更新时 UI 也更新）
+        """刷新 UI（仅重建当前活动 tab 的列表，切换 tab 时由 _on_tab_change 触发重建）"""
         current_tab = self._active_tab_index
-        
+
         # 账号档案中心
-        if hasattr(self, "account_list"):
+        if hasattr(self, "account_list") and current_tab == 0:
             self.account_list.controls = self._build_account_items()
             # 统计封禁损耗
             banned_count = sum(1 for a in getattr(self, "_accounts", []) if getattr(a, "status", "") == "banned")
             if hasattr(self, "account_stats_info"):
                 if banned_count > 0:
-                    self.account_stats_info.text = f"🚨 战损报警：检测到 {banned_count} 个已封禁账号"
+                    self.account_stats_info.content.value = f"🚨 战损报警：检测到 {banned_count} 个已封禁账号，点击筛选"
                     self.account_stats_info.visible = True
                 else:
                     self.account_stats_info.visible = False
-            # 只有在当前 tab 是账号中心时才更新 page
-            if current_tab == 0:
-                self.page.update()
-        
+            self.page.update()
+
         # 全域战略吧库
-        if hasattr(self, "matrix_list"):
+        if hasattr(self, "matrix_list") and current_tab == 1:
             self.matrix_list.controls = self._build_matrix_items()
             self._update_matrix_header()
-            if current_tab == 1:
-                self.page.update()
-        
+            self.page.update()
+
         # 存活分析
         if hasattr(self, "survival_list") and current_tab == 2:
             self.survival_list.controls = self._build_survival_items()
             self._update_survival_header()
             self.page.update()
-        
+
         # 异常记录
         if hasattr(self, "exception_list") and current_tab == 3:
             self.page.run_task(self._load_exception_events)
@@ -222,11 +267,31 @@ class AccountsPage:
                 ft.dropdown.Option("all", "全部状态"),
                 ft.dropdown.Option("active", "🟢 正常"),
                 ft.dropdown.Option("expired", "🔴 已失效"),
+                ft.dropdown.Option("invalid", "⛔ 验证失败"),
                 ft.dropdown.Option("error", "🟡 异常"),
                 ft.dropdown.Option("banned", "💔 已封禁"),
+                ft.dropdown.Option("unknown", "⚪ 未知"),
             ],
             value=self._filter_status,
             on_change=self._on_filter_change,
+            width=140,
+            height=45,
+            content_padding=10,
+            text_size=13,
+            border_radius=10,
+        )
+
+        self._status_filter_dropdown = status_filter
+
+        self._sort_dropdown = ft.Dropdown(
+            options=[
+                ft.dropdown.Option("default", "默认排序"),
+                ft.dropdown.Option("weight", "按权重"),
+                ft.dropdown.Option("status", "按状态"),
+                ft.dropdown.Option("verified", "按最近验证"),
+            ],
+            value=self._sort_mode,
+            on_change=self._on_sort_change,
             width=120,
             height=45,
             content_padding=10,
@@ -234,8 +299,16 @@ class AccountsPage:
             border_radius=10,
         )
 
-        self.account_stats_info = ft.Text("", size=12, color="error", visible=False)
+        # 战损报警横幅（点击一键筛选已封禁账号）
+        self.account_stats_info = ft.GestureDetector(
+            content=ft.Text("", size=12, color="error"),
+            visible=False,
+            on_tap=self._on_banned_banner_click,
+            mouse_cursor=ft.MouseCursor.CLICK,
+        )
 
+        self._bulk_verify_btn = ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=lambda e: self.page.run_task(self._bulk_verify_accounts, e), visible=False)
+        self._bulk_delete_btn = ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=lambda e: self.page.run_task(self._bulk_delete_accounts, e), style=ft.ButtonStyle(color="error"), visible=False)
         self.bulk_bar = ft.Row([
             ft.Checkbox(label="全选", on_change=self._toggle_select_all),
             ft.PopupMenuButton(
@@ -247,8 +320,9 @@ class AccountsPage:
                 tooltip="智能权重计算",
             ),
             ft.IconButton(icon=icons.SETTINGS, tooltip="评分模型配置", on_click=lambda e: self.page.run_task(self._show_weight_config_dialog), icon_size=18),
-            ft.TextButton("批量验证", icon=icons.VERIFIED_USER, on_click=lambda e: self.page.run_task(self._bulk_verify_accounts, e), visible=False),
-            ft.TextButton("批量删除", icon=icons.DELETE_SWEEP, on_click=lambda e: self.page.run_task(self._bulk_delete_accounts, e), style=ft.ButtonStyle(color="error"), visible=False),
+            ft.IconButton(icon=icons.HISTORY, tooltip="权重变更历史", on_click=lambda e: self.page.run_task(self._show_weight_history), icon_size=18),
+            self._bulk_verify_btn,
+            self._bulk_delete_btn,
             ft.Container(expand=True),
             self.account_stats_info
         ], spacing=10, visible=True)
@@ -262,7 +336,7 @@ class AccountsPage:
 
         return ft.Column(
             controls=[
-                ft.Row([search_field, status_filter, add_btn], spacing=10),
+                ft.Row([search_field, status_filter, self._sort_dropdown, add_btn], spacing=10),
                 self.bulk_bar,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
                 ft.Container(
@@ -348,10 +422,9 @@ class AccountsPage:
             on_click=self._bulk_matrix_edit_tag,
             visible=False,
         )
-        self.matrix_bulk_clear_target_btn = ft.TextButton(
-            "清理靶场", icon=icons.REMOVE_CIRCLE_OUTLINED,
-            on_click=lambda e: self.page.run_task(self._bulk_matrix_clear_target),
-            tooltip="从靶场池中移除（不取消关注）",
+        self.matrix_bulk_tag_btn = ft.TextButton(
+            "批量修改标签", icon=icons.LABEL_ROUNDED,
+            on_click=self._bulk_matrix_edit_tag,
             visible=False,
         )
         self.matrix_bulk_bar = ft.Row([
@@ -359,7 +432,6 @@ class AccountsPage:
             self.matrix_bulk_toggle_target_btn,
             self.matrix_bulk_follow_btn,
             self.matrix_bulk_unfollow_btn,
-            self.matrix_bulk_clear_target_btn,
             self.matrix_bulk_tag_btn,
         ], spacing=5, wrap=True)
 
@@ -422,6 +494,18 @@ class AccountsPage:
             on_click=lambda e: self.page.run_task(self._bulk_check_survival, e),
             tooltip="检测所有帖子的存活状态",
         )
+
+        self.survival_search_field = ft.TextField(
+            hint_text="搜索账号...",
+            prefix_icon=icons.SEARCH,
+            border_radius=10,
+            text_size=13,
+            on_change=self._on_survival_search_change,
+            bgcolor=with_opacity(0.05, "onSurface"),
+            border_color=with_opacity(0.1, "primary"),
+            expand=True,
+            height=45,
+        )
         
         self.survival_list = ft.ListView(
             expand=True,
@@ -452,6 +536,7 @@ class AccountsPage:
                     self.survival_check_btn,
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
+                self.survival_search_field,
                 ft.Container(
                     content=self.survival_list,
                     expand=True,
@@ -459,6 +544,10 @@ class AccountsPage:
             ],
             spacing=10,
         )
+
+    def _on_survival_search_change(self, e):
+        self._survival_search_text = e.control.value
+        self.refresh_ui()
 
     def _update_survival_header(self):
         """更新存活分析头部信息"""
@@ -547,27 +636,29 @@ class AccountsPage:
     async def _bulk_check_survival(self, e):
         """批量检测所有帖子的存活状态"""
         from ...core.post import check_post_survival
-        
-        self._show_snackbar("🚀 正在启动存活检测任务...", "info")
-        
+
+        if not self._begin_op():
+            return
+
         try:
             # 获取所有有 posted_tid 的物料
             materials = await self.db.get_materials(status="success")
             targets = [m for m in materials if m.posted_tid and m.posted_tid != 0]
-            
+
             if not targets:
                 self._show_snackbar("没有需要检测的帖子", "warning")
                 return
-            
+
+            self._open_progress_dialog("存活检测中...", determinate=True)
             alive_count = 0
             dead_count = 0
             total = len(targets)
-            
-            for i, m in enumerate(targets):
+
+            for i, m in enumerate(targets, 1):
                 try:
                     status, reason = await check_post_survival(m.posted_tid)
                     await self.db.update_material_survival_status(m.id, status, reason)
-                    
+
                     if status == "alive":
                         alive_count += 1
                     else:
@@ -575,25 +666,23 @@ class AccountsPage:
                 except Exception as ex:
                     await self.db.update_material_survival_status(m.id, "dead", str(ex))
                     dead_count += 1
-                
-                # 每 10 条刷新一次
-                if (i + 1) % 10 == 0:
-                    self._survival_stats = await self.db.get_survival_stats()
-                    self._survival_by_account = await self.db.get_survival_by_account()
-                    self.refresh_ui()
-                
-                import asyncio
+
+                self._update_progress(f"检测中 {i}/{total}：✅{alive_count} ❌{dead_count}", i / total)
+                # 逐条限速，避免高频请求触发风控
                 await asyncio.sleep(0.3)
-            
+
             # 重新加载数据
             self._survival_stats = await self.db.get_survival_stats()
             self._survival_by_account = await self.db.get_survival_by_account()
             self.refresh_ui()
-            
+
             self._show_snackbar(f"✅ 检测完成: 存活 {alive_count} 条, 阵亡 {dead_count} 条", "success")
-            
+
         except Exception as ex:
             self._show_snackbar(f"❌ 检测失败: {str(ex)}", "error")
+        finally:
+            self._close_progress_dialog()
+            self._end_op()
 
     def _build_exception_tab(self) -> ft.Control:
         """异常记录标签页"""
@@ -790,20 +879,20 @@ class AccountsPage:
     async def _on_sync_matrix(self, e):
         """全域同步关注列表"""
         from ...core.sign import sync_forums_to_db
-        
-        self._show_snackbar("🚀 指令下达：正在启动全域矩阵关注同步...", "info")
-        
+
+        if not self._begin_op():
+            return
         try:
-            # 标记按钮状态或显示进度 (可选)
+            self._open_progress_dialog("正在启动全域矩阵关注同步...")
             added = await sync_forums_to_db(self.db)
-            
-            # 重新加载统计数据
             await self._refresh_matrix_stats()
-            self.refresh_ui()
-            
             self._show_snackbar(f"✅ 全域同步完成！矩阵新增 {added} 个战略支点", "success")
+            self.refresh_ui()
         except Exception as ex:
             self._show_snackbar(f"❌ 同步失败: {str(ex)}", "error")
+        finally:
+            self._close_progress_dialog()
+            self._end_op()
 
     def _show_follow_forum_dialog(self, e):
         """显示关注贴吧弹窗"""
@@ -931,37 +1020,41 @@ class AccountsPage:
 
     async def _on_complement_follow(self, fname: str):
         """补齐关注：让未关注的账号也关注该贴吧"""
+        if not self._begin_op():
+            return
         try:
             # 获取未关注的账号
             missing_accounts = await self.db.get_accounts_not_following_forum(fname)
-            
+
             if not missing_accounts:
                 self._show_snackbar(f"✅ '{fname}' 已被所有账号关注，无需补齐", "success")
                 return
-            
+
             missing_names = [acc.name for acc in missing_accounts]
             self._show_snackbar(f"🔄 正在让 {len(missing_accounts)} 个账号关注 '{fname}'...", "info")
-            
+
             # 只让未关注的账号关注
             missing_ids = [acc.id for acc in missing_accounts]
             from ...core.batch_post import BatchPostManager
             pm = BatchPostManager(self.db)
             result = await pm.follow_forums_bulk([fname], account_ids=missing_ids)
-            
+
             success_count = len(result["success"])
             failed_count = len(result["failed"])
-            
+
             if success_count > 0:
                 self._show_snackbar(f"✅ {success_count}/{len(missing_accounts)} 个账号成功关注 '{fname}'", "success")
             if failed_count > 0:
                 self._show_snackbar(f"⚠️ {failed_count} 个账号关注失败", "warning")
-            
+
             # 刷新列表
             await self._refresh_matrix_stats()
             self.refresh_ui()
-            
+
         except Exception as e:
             self._show_snackbar(f"❌ 补齐失败: {str(e)}", "error")
+        finally:
+            self._end_op()
 
     async def _on_unfollow_forum(self, fname: str):
         """取消关注：所有账号取关该贴吧"""
@@ -1022,52 +1115,97 @@ class AccountsPage:
         self.matrix_bulk_toggle_target_btn.visible = has_sel
         self.matrix_bulk_follow_btn.visible = has_sel
         self.matrix_bulk_unfollow_btn.visible = has_sel
-        self.matrix_bulk_clear_target_btn.visible = has_sel
         self.matrix_bulk_tag_btn.visible = has_sel
         if has_sel:
             self.matrix_bulk_toggle_target_btn.text = f"批量切换火力 ({count})"
             self.matrix_bulk_follow_btn.text = f"批量补齐关注 ({count})"
             self.matrix_bulk_unfollow_btn.text = f"批量取消关注 ({count})"
-            self.matrix_bulk_clear_target_btn.text = f"清理靶场 ({count})"
             self.matrix_bulk_tag_btn.text = f"批量修改标签 ({count})"
         self.page.update()
 
     async def _bulk_matrix_toggle_target(self):
-        """批量切换 Target（已投放→移除，未投放→投放）"""
+        """批量切换 Target（未投放→投放；已投放→移出靶场，可选清理关注记录）"""
         if not self._matrix_selected_fnames: return
         fnames = list(self._matrix_selected_fnames)
-        count = len(fnames)
         try:
             # 从 _matrix_stats 构建状态映射
             stats_map = {s['fname']: s for s in self._matrix_stats}
-            target_fnames = set()
-            for f in fnames:
-                stat = stats_map.get(f, {})
-                if stat.get('is_target'):
-                    target_fnames.add(f)
-            non_target_fnames = set(fnames) - target_fnames
+            target_fnames = [f for f in fnames if stats_map.get(f, {}).get('is_target')]
+            non_target_fnames = [f for f in fnames if f not in set(target_fnames)]
 
-            # 投放未投放的
+            # 投放未投放的（无风险，直接执行）
             for f in non_target_fnames:
                 await self.db.upsert_target_pools([f], "未分类")
-            # 移除已投放的
-            if target_fnames:
-                await self.db.delete_target_pool_by_fnames(list(target_fnames))
 
-            # 重新加载数据并刷新 UI
-            await self._refresh_matrix_stats()
-            self._show_snackbar(f"✅ 已切换 {count} 个贴吧的火力标记（投放 {len(non_target_fnames)}，移除 {len(target_fnames)}）", "success")
+            if target_fnames:
+                # 已投放的 → 弹出"移出靶场"确认框（可选清理关注记录）
+                self._show_remove_target_dialog(target_fnames)
+            else:
+                self._show_snackbar(f"✅ 已投放 {len(non_target_fnames)} 个贴吧至靶场", "success")
+                await self._finish_matrix_bulk_change()
         except Exception as e:
             self._show_snackbar(f"❌ 批量操作失败: {str(e)}", "error")
+            await self._finish_matrix_bulk_change()
+
+    async def _finish_matrix_bulk_change(self):
+        """批量操作收尾：清空选择并刷新数据与 UI"""
         self._matrix_selected_fnames.clear()
         self.matrix_select_all_cb.value = False
         self._update_matrix_bulk_bar()
+        await self._refresh_matrix_stats()
         self.refresh_ui()
         self.page.update()
+
+    def _show_remove_target_dialog(self, target_fnames: list[str]):
+        """移出靶场确认框，可选同时清理全部账号对这些贴吧的关注记录"""
+        cleanup_cb = ft.Checkbox(
+            label="同时清理这些贴吧的全部关注记录（影响所有账号，不可恢复）",
+            value=False,
+        )
+        preview = ', '.join(target_fnames[:8]) + ('...' if len(target_fnames) > 8 else '')
+
+        async def do_remove(_):
+            try:
+                removed = await self.db.delete_target_pool_by_fnames(target_fnames)
+                cleaned = 0
+                if cleanup_cb.value:
+                    cleaned = await self.db.delete_forum_memberships_globally(target_fnames)
+                self.page.close(dialog)
+                msg = f"✅ 已将 {len(target_fnames)} 个贴吧移出靶场（移除 {removed} 条标记）"
+                if cleaned:
+                    msg += f"，清理关注记录 {cleaned} 条"
+                self._show_snackbar(msg, "success")
+                await self._finish_matrix_bulk_change()
+            except Exception as ex:
+                self._show_snackbar(f"❌ 移出失败: {str(ex)}", "error")
+
+        def _cancel(_):
+            self.page.close(dialog)
+            self.page.run_task(self._finish_matrix_bulk_change)
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.GPS_OFF_ROUNDED, color="error"), ft.Text(f"移出靶场（{len(target_fnames)} 个贴吧）")]),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Text(f"将移出：{preview}", size=12),
+                    ft.Text("移出后不再作为火力打击目标，默认不影响账号的关注状态。", size=11, color="onSurfaceVariant"),
+                    cleanup_cb,
+                ], tight=True, spacing=10),
+                width=420,
+                padding=10,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=_cancel),
+                ft.FilledButton("确认移出", icon=icons.GPS_OFF_ROUNDED, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=lambda e: self.page.run_task(do_remove, e)),
+            ],
+        )
+        self.page.open(dialog)
 
     async def _bulk_matrix_complement_follow(self):
         """批量补齐关注（N+1 优化：单次查询 + 单次批量操作）"""
         if not self._matrix_selected_fnames: return
+        if not self._begin_op():
+            return
         fnames = list(self._matrix_selected_fnames)
         try:
             # 单次查询获取所有缺失关注的账号（替代逐吧循环查询）
@@ -1089,6 +1227,8 @@ class AccountsPage:
                 self._show_snackbar(msg, "success")
         except Exception as e:
             self._show_snackbar(f"❌ 批量补齐失败: {str(e)}", "error")
+        finally:
+            self._end_op()
         self._matrix_selected_fnames.clear()
         await self._refresh_matrix_stats()
         self._update_matrix_bulk_bar()
@@ -1119,36 +1259,6 @@ class AccountsPage:
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
                 ft.FilledButton("确认取消", icon=icons.HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
-            ]
-        )
-        self.page.open(dialog)
-
-    async def _bulk_matrix_clear_target(self):
-        """从靶场池中移除选中的贴吧（不取消关注），同时清理Forum表残留"""
-        if not self._matrix_selected_fnames: return
-        fnames = list(self._matrix_selected_fnames)
-
-        async def do_clear(e):
-            try:
-                self.page.close(dialog)
-                # 1. 从靶场池移除
-                removed = await self.db.delete_target_pool_by_fnames(fnames)
-                # 2. 清理 Forum 表中残留的关注记录（0账号部署的贴吧）
-                forum_removed = await self.db.delete_forum_memberships_globally(fnames)
-                self._show_snackbar(f"✅ 已从靶场移除 {removed} 条，清理关注记录 {forum_removed} 条", "success")
-            except Exception as ex:
-                self._show_snackbar(f"❌ 清理靶场失败: {str(ex)}", "error")
-            self._matrix_selected_fnames.clear()
-            await self._refresh_matrix_stats()
-            self._update_matrix_bulk_bar()
-            self.refresh_ui()
-
-        dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.REMOVE_CIRCLE_OUTLINED, color="error"), ft.Text("确认清理靶场？")]),
-            content=ft.Text(f"确定要从靶场池中移除以下 {len(fnames)} 个贴吧吗？\n此操作不影响账号的关注状态，仅清理历史战绩数据。\n\n{', '.join(fnames[:10])}{'...' if len(fnames) > 10 else ''}"),
-            actions=[
-                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
-                ft.FilledButton("确认移除", icon=icons.REMOVE_CIRCLE_OUTLINED, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_clear),
             ]
         )
         self.page.open(dialog)
@@ -1441,7 +1551,7 @@ class AccountsPage:
                             padding=5,
                             border=ft.border.only(left=ft.border.BorderSide(1, with_opacity(0.1, "error") if stat.get('deleted_count', 0) > 0 else with_opacity(0.1, "primary"))),
                         ),
-                        # 操作按钮组
+                        # 操作按钮组：高频操作用图标，低频操作收进"更多"菜单
                         ft.Row([
                             ft.IconButton(
                                 icon=icons.GPS_FIXED_ROUNDED if not is_target else icons.GPS_OFF_ROUNDED,
@@ -1455,23 +1565,15 @@ class AccountsPage:
                                 icon_color="green" if is_post_target else "error",
                                 on_click=lambda e, s=stat: self._show_safety_detail(s),
                             ),
-                            ft.IconButton(
-                                icon=icons.LABEL_ROUNDED,
-                                tooltip="修改分组/标签",
-                                icon_color="primary",
-                                on_click=lambda e, s=stat: self._show_tag_edit_dialog(s)
-                            ),
-                            ft.IconButton(
-                                icon=icons.PERSON_ADD_ALT_1_ROUNDED,
-                                tooltip="补齐关注（让未关注账号也关注）",
-                                icon_color="primary",
-                                on_click=lambda e, f=fname: self.page.run_task(self._on_complement_follow, f)
-                            ),
-                            ft.IconButton(
-                                icon=icons.HEART_BROKEN,
-                                tooltip="取消关注（所有账号取关该贴吧）",
-                                icon_color="error",
-                                on_click=lambda e, f=fname: self.page.run_task(self._on_unfollow_forum, f)
+                            ft.PopupMenuButton(
+                                icon=icons.MORE_VERT_ROUNDED,
+                                tooltip="更多操作",
+                                items=[
+                                    ft.PopupMenuItem(text="修改分组/标签", icon=icons.LABEL_ROUNDED, on_click=lambda e, s=stat: self._show_tag_edit_dialog(s)),
+                                    ft.PopupMenuItem(text="补齐关注（让未关注账号也关注）", icon=icons.PERSON_ADD_ALT_1_ROUNDED, on_click=lambda e, f=fname: self.page.run_task(self._on_complement_follow, f)),
+                                    ft.PopupMenuItem(),
+                                    ft.PopupMenuItem(text="取消关注（所有账号取关）", icon=icons.HEART_BROKEN, on_click=lambda e, f=fname: self.page.run_task(self._on_unfollow_forum, f)),
+                                ],
                             ),
                         ], spacing=0),
                     ],
@@ -1522,13 +1624,13 @@ class AccountsPage:
             )
             return items
         search_lower = self._search_text.lower()
-        for acc in self._accounts:
-            # 状态过滤
-            status = getattr(acc, "status", "unknown")
-            if self._filter_status != "all" and status != self._filter_status:
-                continue
 
-            # 搜索过滤
+        # 第一步：状态 + 搜索过滤
+        filtered = []
+        for acc in self._accounts:
+            status = getattr(acc, "status", "unknown")
+            if not self._status_matches(status, self._filter_status):
+                continue
             if search_lower:
                 match = (
                     search_lower in (acc.name or "").lower() or
@@ -1537,17 +1639,22 @@ class AccountsPage:
                 )
                 if not match:
                     continue
+            filtered.append(acc)
 
+        # 第二步：排序
+        filtered.sort(key=self._account_sort_key)
+
+        for acc in filtered:
             is_active = acc.id == self._active_id
             is_selected = acc.id in self._selected_ids
-            
+
             # 状态灯
             status = getattr(acc, "status", "unknown")
             last_v = getattr(acc, "last_verified", None)
-            
+
             status_color = COLORS.GREY_400
             if status == "active": status_color = COLORS.GREEN_ACCENT_400
-            elif status == "expired": status_color = COLORS.ERROR
+            elif status == "expired" or status.startswith("invalid"): status_color = COLORS.ERROR
             elif status == "error": status_color = COLORS.AMBER
             elif status == "banned": status_color = COLORS.RED_ACCENT_400
             
@@ -1555,7 +1662,10 @@ class AccountsPage:
             proxy_info = "直连"
             if acc.proxy_id:
                 p = next((p for p in self._proxies if p.id == acc.proxy_id), None)
-                if p: proxy_info = f"{p.protocol}://{p.host}"
+                if p:
+                    proxy_info = f"{p.protocol}://{p.host}"
+                else:
+                    proxy_info = f"代理#{acc.proxy_id} (已停用)"
             
             card = ft.Container(
                 content=ft.Row(
@@ -1594,7 +1704,7 @@ class AccountsPage:
                                         bgcolor="primary",
                                         padding=ft.padding.symmetric(horizontal=6, vertical=2),
                                         border_radius=4,
-                                        visible=is_active and status != "banned",
+                                        visible=is_active and status == "active",
                                     ),
                                     ft.Container(
                                         content=ft.Row([
@@ -1609,10 +1719,12 @@ class AccountsPage:
                                 ], spacing=8),
                                 ft.Row([
                                     ft.Icon(icons.FINGERPRINT, size=12, color="onSurfaceVariant"),
-                                    ft.Text(f"UID: {acc.user_id or '待验证'}", color="onSurfaceVariant" if acc.user_id else "error", size=11),
-                                    ft.Container(width=10),
-                                    ft.Icon(icons.PHONELINK_LOCK_ROUNDED, size=12, color="onSurfaceVariant"),
-                                    ft.Text(f"标识: {getattr(acc, 'cuid', '')[:8]}...", color="onSurfaceVariant", size=11, tooltip=f"完整指纹: {getattr(acc, 'cuid', '')}"),
+                                    ft.Text(
+                                        f"UID: {acc.user_id or '待验证'}",
+                                        color="onSurfaceVariant" if acc.user_id else "error",
+                                        size=11,
+                                        tooltip=f"设备指纹: {getattr(acc, 'cuid', '')}",
+                                    ),
                                     ft.Container(width=10),
                                     ft.Icon(icons.LANGUAGE, size=12, color="onSurfaceVariant"),
                                     ft.Text(f"代理: {proxy_info}", color="onSurfaceVariant", size=11),
@@ -1691,6 +1803,15 @@ class AccountsPage:
                 on_hover=self._on_item_hover,
             )
             items.append(card)
+
+        if not items and self._accounts:
+            items.append(
+                ft.Container(
+                    content=ft.Text("未找到匹配的账号，请调整搜索关键词或状态筛选条件", color="onSurfaceVariant", size=13),
+                    padding=50,
+                    alignment=ft.alignment.center,
+                )
+            )
         return items
 
     def _on_search_change(self, e):
@@ -1741,7 +1862,7 @@ class AccountsPage:
         
         weight_row = ft.Row([
             ft.Icon(icons.STAR_HALF_ROUNDED, size=20, color="primary"),
-            ft.Text("发帖权重:", size=13),
+            ft.Text("发帖权重 (智能计算可覆盖):", size=13),
             weight_slider,
             ft.Text("5", size=13, weight="bold")
         ], spacing=10)
@@ -1922,7 +2043,7 @@ class AccountsPage:
         
         edit_weight_row = ft.Row([
             ft.Icon(icons.STAR_HALF_ROUNDED, size=20, color="primary"),
-            ft.Text("发帖权重:", size=13),
+            ft.Text("发帖权重 (智能计算可覆盖):", size=13),
             edit_weight_slider,
             ft.Text(str(account.post_weight or 5), size=13, weight="bold")
         ], spacing=10)
@@ -2015,15 +2136,20 @@ class AccountsPage:
 
     async def _refresh_account_info(self, account_id: int):
         """刷新账号信息"""
-        acc = await refresh_account(self.db, account_id)
-        if acc:
-            await self.load_data()
-            if acc.status.startswith("invalid"):
-                self._show_snackbar(f"账号 '{acc.name}' 已失效", "error")
+        if not self._begin_op():
+            return
+        try:
+            acc = await refresh_account(self.db, account_id)
+            if acc:
+                await self.load_data()
+                if acc.status.startswith("invalid"):
+                    self._show_snackbar(f"账号 '{acc.name}' 已失效", "error")
+                else:
+                    self._show_snackbar(f"账号 '{acc.user_name}' 刷新成功", "success")
             else:
-                self._show_snackbar(f"账号 '{acc.user_name}' 刷新成功", "success")
-        else:
-            self._show_snackbar("刷新失败，账号不存在", "error")
+                self._show_snackbar("刷新失败，账号不存在", "error")
+        finally:
+            self._end_op()
 
     async def _show_delete_confirm(self, account):
         """显示删除确认框"""
@@ -2051,6 +2177,41 @@ class AccountsPage:
         self._filter_status = e.control.value
         self.refresh_ui()
 
+    def _on_sort_change(self, e):
+        self._sort_mode = e.control.value
+        self.refresh_ui()
+
+    def _on_banned_banner_click(self, e=None):
+        """点击战损报警横幅：一键筛选已封禁账号"""
+        self._filter_status = "banned"
+        if hasattr(self, "_status_filter_dropdown"):
+            self._status_filter_dropdown.value = "banned"
+        self.refresh_ui()
+
+    @staticmethod
+    def _status_matches(status: str, filter_value: str) -> bool:
+        """状态筛选匹配。`invalid: xxx` 这类带错误详情的状态按前缀归入 invalid。"""
+        if filter_value == "all":
+            return True
+        if filter_value == "invalid":
+            return status == "invalid" or status.startswith("invalid:")
+        return status == filter_value
+
+    def _account_sort_key(self, acc):
+        """账号列表排序键。"""
+        if self._sort_mode == "weight":
+            return -(getattr(acc, "post_weight", None) or 5)
+        if self._sort_mode == "status":
+            status = getattr(acc, "status", None) or "unknown"
+            if status.startswith("invalid"):
+                status = "invalid"
+            return self._STATUS_SORT_ORDER.get(status, 4)
+        if self._sort_mode == "verified":
+            lv = getattr(acc, "last_verified", None)
+            # 最近验证的排前面；从未验证的排最后
+            return (0, -lv.timestamp()) if lv else (1, 0)
+        return acc.id
+
     async def _on_maint_toggle(self, account_id: int, value: bool):
         """开启或关闭养号维护功能"""
         await self.db.update_account(account_id, is_maint_enabled=value)
@@ -2076,7 +2237,7 @@ class AccountsPage:
         if e.control.value:
             for acc in self._accounts:
                 status = getattr(acc, "status", "unknown")
-                if self._filter_status != "all" and status != self._filter_status:
+                if not self._status_matches(status, self._filter_status):
                     continue
                 if search_lower:
                     match = (search_lower in (acc.name or "").lower() or 
@@ -2091,22 +2252,59 @@ class AccountsPage:
 
     def _update_bulk_bar(self):
         has_sel = len(self._selected_ids) > 0
-        self.bulk_bar.controls[2].visible = has_sel
-        self.bulk_bar.controls[3].visible = has_sel
-        self.bulk_bar.controls[2].text = f"批量验证 ({len(self._selected_ids)})"
-        self.bulk_bar.controls[3].text = f"批量删除 ({len(self._selected_ids)})"
+        self._bulk_verify_btn.visible = has_sel
+        self._bulk_delete_btn.visible = has_sel
+        self._bulk_verify_btn.text = f"批量验证 ({len(self._selected_ids)})"
+        self._bulk_delete_btn.text = f"批量删除 ({len(self._selected_ids)})"
         self.page.update()
 
     async def _bulk_verify_accounts(self, e):
-        if not self._selected_ids: return
-        count = len(self._selected_ids)
-        self._show_snackbar(f"开始批量验证 {count} 个账号...", "info")
-        for aid in list(self._selected_ids):
-            await refresh_account(self.db, aid)
-        self._selected_ids.clear()
-        self._update_bulk_bar()
-        await self.load_data()
-        self._show_snackbar(f"成功完成 {count} 个账号的批量效验", "success")
+        if not self._selected_ids:
+            return
+        if not self._begin_op():
+            return
+        ids = list(self._selected_ids)
+        try:
+            self._open_progress_dialog("批量验证中...", determinate=True)
+            results = []  # (显示名, 结果标签)
+            for i, aid in enumerate(ids, 1):
+                acc = await refresh_account(self.db, aid)
+                display = (acc.user_name or acc.name) if acc else f"账号#{aid}"
+                if acc is None:
+                    results.append((display, "❌ 读取失败"))
+                elif acc.status == "active":
+                    results.append((display, "✅ 有效"))
+                elif acc.status == "banned":
+                    results.append((display, "💔 已封禁"))
+                elif acc.status.startswith("invalid") or acc.status == "expired":
+                    results.append((display, "⛔ 已失效"))
+                else:
+                    results.append((display, f"⚠️ {acc.status}"))
+                self._update_progress(f"正在验证 {i}/{len(ids)}：{display}", i / len(ids))
+
+            self._selected_ids.clear()
+            self._update_bulk_bar()
+            await self.load_data()
+
+            ok_count = sum(1 for _, s in results if s == "✅ 有效")
+            fail_lines = "\n".join(f"{n}：{s}" for n, s in results if s != "✅ 有效") or "无"
+            detail_lines = "\n".join(f"{n}：{s}" for n, s in results[:20])
+            if len(results) > 20:
+                detail_lines += f"\n... 其余 {len(results) - 20} 个账号"
+            dialog = ft.AlertDialog(
+                title=ft.Text(f"批量验证完成：{ok_count}/{len(results)} 有效"),
+                content=ft.Container(
+                    content=ft.Text(f"失效/异常清单：\n{fail_lines}\n\n全部结果：\n{detail_lines}", size=12, selectable=True),
+                    width=380,
+                    height=280,
+                ),
+                actions=[ft.TextButton("确定", on_click=lambda _: self.page.close(dialog))],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            self.page.open(dialog)
+        finally:
+            self._close_progress_dialog()
+            self._end_op()
 
     async def _bulk_delete_accounts(self, e):
         if not self._selected_ids: return
@@ -2135,6 +2333,14 @@ class AccountsPage:
         """一键自动计算所有账号的推荐权重"""
         from ...core.batch_post import AutoWeightCalculator
 
+        if not self._begin_op():
+            return
+        try:
+            await self._auto_calculate_weights_impl(e, incremental)
+        finally:
+            self._end_op()
+
+    async def _auto_calculate_weights_impl(self, e, incremental: bool = False):
         self._show_snackbar("正在分析账号数据，计算智能权重...", "info")
 
         # 加载自定义权重比例
@@ -2380,23 +2586,5 @@ class AccountsPage:
         self.page.open(dialog)
 
     def _show_snackbar(self, message: str, type="info"):
-        if not self.page:
-            return
-        color = "primary"
-        if type == "error": color = "error"
-        elif type == "success": color = COLORS.GREEN
-        
-        try:
-            self.page.show_snack_bar(
-                ft.SnackBar(
-                    content=ft.Text(message), 
-                    bgcolor=with_opacity(0.8, color), 
-                    behavior=ft.SnackBarBehavior.FLOATING,
-                    duration=3000
-                )
-            )
-            # 确保在 FastAPI 异步模式下安全更新
-            self.page.update()
-        except Exception:
-            pass
-
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)

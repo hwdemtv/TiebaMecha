@@ -574,20 +574,21 @@ class SignPage:
                     self._show_snackbar("所有签到指令已执行完毕", "success")
         except Exception as ex:
             self._show_snackbar(f"任务异常中止: {str(ex)}", "error")
-        
-        self._is_signing = False
-        self._stop_requested = False
-        self.progress_bar.visible = False
-        self.status_text.value = ""
-        
-        # UI 恢复
-        self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
-        self.sign_btn_text.value = "启动签到流"
-        
-        # 发送结束广播
-        self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
-        
-        await self.load_data()
+        finally:
+            # finally 保证任务被取消（CancelledError）时也能复位状态，避免按钮永久卡在"停止签到流"
+            self._is_signing = False
+            self._stop_requested = False
+            self.progress_bar.visible = False
+            self.status_text.value = ""
+
+            # UI 恢复
+            self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
+            self.sign_btn_text.value = "启动签到流"
+
+            # 发送结束广播
+            self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
+
+            await self.load_data()
 
     async def _do_sign_matrix(self):
         if self._is_signing: return
@@ -649,19 +650,19 @@ class SignPage:
                     self._show_snackbar("矩阵全扫指令已在后台全部执行完毕", "success")
         except Exception as ex:
             self._show_snackbar(f"矩阵任务异常中止: {str(ex)}", "error")
-        
-        self._is_signing = False
-        self._stop_requested = False
-        self.progress_bar.visible = False
-        self.status_text.value = ""
-        
-        # UI 恢复
-        self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
-        self.sign_btn_text.value = "启动签到流"
-        
-        # 发送结束广播
-        self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
-        await self.load_data()
+        finally:
+            self._is_signing = False
+            self._stop_requested = False
+            self.progress_bar.visible = False
+            self.status_text.value = ""
+
+            # UI 恢复
+            self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
+            self.sign_btn_text.value = "启动签到流"
+
+            # 发送结束广播
+            self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
+            await self.load_data()
 
     async def _do_sign_one(self, fname):
         self._show_snackbar(f"正在手动签到: {fname}", "info")
@@ -719,10 +720,8 @@ class SignPage:
         if self.on_navigate: self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
-        color = "primary"
-        if type == "error": color = "error"
-        elif type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)
 
     async def _on_unfollow_forum(self, fname: str):
         """取消关注单个贴吧"""

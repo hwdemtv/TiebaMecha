@@ -173,39 +173,47 @@ class LoginPage:
                 self.page.update()
                 return
 
-            if self._is_setup_mode:
-                # 设置密码模式
-                confirm = self.confirm_field.value.strip() if self.confirm_field.value else ""
-                if password != confirm:
-                    self.status_text.value = "两次输入的密码不一致。"
-                    self.status_text.color = "error"
+            self.submit_btn.disabled = True
+            try:
+                if self._is_setup_mode:
+                    # 设置密码模式
+                    confirm = self.confirm_field.value.strip() if self.confirm_field.value else ""
+                    if password != confirm:
+                        self.status_text.value = "两次输入的密码不一致。"
+                        self.status_text.color = "error"
+                        self.page.update()
+                        return
+
+                    self.status_text.value = "正在配置安全矩阵..."
+                    self.status_text.color = "primary"
                     self.page.update()
-                    return
 
-                self.submit_btn.disabled = True
-                self.status_text.value = "正在配置安全矩阵..."
-                self.status_text.color = "primary"
-                self.page.update()
-
-                await set_password(self.db, password)
-                self._show_snackbar("密码设置成功！", "success")
-                await self._auth_success()
-            else:
-                # 登录模式
-                self.submit_btn.disabled = True
-                self.status_text.value = "正在验证身份..."
-                self.status_text.color = "primary"
-                self.page.update()
-
-                ok = await check_password(self.db, password)
-                if ok:
-                    self._show_snackbar("验证通过，欢迎回来。", "success")
+                    await set_password(self.db, password)
+                    self._show_snackbar("密码设置成功！", "success")
                     await self._auth_success()
                 else:
-                    self.status_text.value = "密码错误，请重试。"
-                    self.status_text.color = "error"
-                    self.submit_btn.disabled = False
+                    # 登录模式
+                    self.status_text.value = "正在验证身份..."
+                    self.status_text.color = "primary"
                     self.page.update()
+
+                    ok = await check_password(self.db, password)
+                    if ok:
+                        self._show_snackbar("验证通过，欢迎回来。", "success")
+                        await self._auth_success()
+                    else:
+                        self.status_text.value = "密码错误，请重试。"
+                        self.status_text.color = "error"
+                        self.page.update()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                self.status_text.value = f"处理请求时发生异常: {ex}"
+                self.status_text.color = "error"
+                self.page.update()
+            finally:
+                # 登录成功路径由 _auth_success 接管页面，此处恢复按钮不影响
+                self.submit_btn.disabled = False
         except asyncio.CancelledError:
             return
 
@@ -225,15 +233,5 @@ class LoginPage:
             return
 
     def _show_snackbar(self, message: str, type: str = "info"):
-        color = "primary"
-        if type == "error":
-            color = "error"
-        elif type == "success":
-            color = COLORS.GREEN
-        self.page.show_snack_bar(
-            ft.SnackBar(
-                content=ft.Text(message),
-                bgcolor=with_opacity(0.8, color),
-                behavior=ft.SnackBarBehavior.FLOATING,
-            )
-        )
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)

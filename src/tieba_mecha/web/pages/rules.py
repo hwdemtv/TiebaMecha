@@ -22,26 +22,15 @@ class RulesPage:
         self.db = db
         self.on_navigate = on_navigate
         self._rules = []
-        self._log_task = None
-        self._log_task_running = False
 
     async def load_data(self):
         """加载数据"""
         if self.db:
             self._rules = await self.db.get_auto_rules()
             
-            # 加载历史日志
-            recent_history = await get_recent_logs(100)
-            if hasattr(self, "log_list"):
-                self.log_list.controls.clear()
-                for log_entry in recent_history:
-                    if "[AutoRule]" in log_entry["message"]:
-                        self._add_single_log_ui(log_entry)
-
-            # 开启实时日志监听
-            if not self._log_task_running:
-                self._log_task_running = True
-                self._log_task = self.page.run_task(self._listen_logs)
+            # 启动日志流（含历史回放，仅 [AutoRule] 相关，幂等）
+            if hasattr(self, "log_stream"):
+                await self.log_stream.start(self.page)
 
             self.refresh_ui()
 
@@ -88,12 +77,18 @@ class RulesPage:
         ], expand=True)
 
         # 2. 执行日志 Tab
-        self.log_list = ft.ListView(expand=True, spacing=5, padding=10)
+        from ..components.log_stream import LogStreamView
+        self.log_stream = LogStreamView(
+            filter_fn=lambda e: "[AutoRule]" in e.get("message", ""),
+            max_rows=100,
+            badge_color_fn=lambda e: COLORS.GREEN if ("已删除" in e.get("message", "") or "命中" in e.get("message", "")) else "primary",
+            history_count=100,
+        )
         logs_tab = ft.Column([
             ft.Divider(height=10, color="transparent"),
             ft.Text("最近执行记录 / EXECUTION LOGS", size=14, weight=ft.FontWeight.W_500),
             ft.Container(
-                content=self.log_list,
+                content=self.log_stream,
                 expand=True,
                 border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                 border_radius=10,
@@ -157,30 +152,6 @@ class RulesPage:
             items.append(card)
         return items
 
-    def _add_single_log_ui(self, log_entry):
-        color = COLORS.GREEN if "已删除" in log_entry["message"] or "命中" in log_entry["message"] else "primary"
-        log_row = ft.Row([
-            ft.Text(f"[{log_entry['time']}]", size=10, color="onSurfaceVariant", font_family="Consolas"),
-            ft.Container(content=ft.Text(log_entry["level"], size=9, weight=ft.FontWeight.BOLD, color="black"),
-                         bgcolor=color, padding=ft.padding.symmetric(horizontal=4, vertical=1), border_radius=3),
-            ft.Text(log_entry["message"], size=11, color="onSurface", expand=True),
-        ], spacing=10)
-        self.log_list.controls.insert(0, log_row)
-        if len(self.log_list.controls) > 100: self.log_list.controls.pop()
-
-    async def _listen_logs(self):
-        queue = get_log_queue()
-        try:
-            while self._log_task_running:
-                log_entry = await queue.get()
-                if self._log_task_running and "[AutoRule]" in log_entry["message"]:
-                    if hasattr(self, "log_list"):
-                        self._add_single_log_ui(log_entry)
-                        self.page.update()
-                queue.task_done()
-        except asyncio.CancelledError: pass
-        finally: self._log_task_running = False
-
     def _show_add_dialog(self, e):
         fname_f = ft.TextField(label="作用贴吧 (支持多个以逗号分隔)", hint_text="例如: c++吧,python吧")
         rule_type_f = ft.Dropdown(label="匹配类型", options=[ft.dropdown.Option("keyword", "关键字匹配"), ft.dropdown.Option("regex", "正则表达式")], value="keyword")
@@ -211,9 +182,9 @@ class RulesPage:
         if self.on_navigate: self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
-        color = COLORS.GREEN if type=="success" else "error" if type=="error" else "primary"
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)
 
     def cleanup(self):
-        if self._log_task and not self._log_task.done(): self._log_task.cancel()
-        self._log_task_running = False
+        if hasattr(self, "log_stream"):
+            self.log_stream.stop()

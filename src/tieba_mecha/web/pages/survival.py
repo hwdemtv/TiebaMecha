@@ -536,7 +536,7 @@ class SurvivalPage:
             content=ft.Text(f"确定要删除物料 #{m.id} 吗？此操作不可撤销。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.close(confirm)),
-                ft.TextButton("删除", style=ft.ButtonStyle(color="error"), on_click=lambda e: self._do_delete(m.id, confirm)),
+                ft.TextButton("删除", style=ft.ButtonStyle(color="error"), on_click=lambda e: self.page.run_task(self._do_delete, m.id, confirm)),
             ],
         )
         self.page.open(confirm)

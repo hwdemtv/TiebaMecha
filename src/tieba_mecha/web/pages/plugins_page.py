@@ -163,7 +163,5 @@ class PluginsPage:
             self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
-        color = "primary"
-        if type == "error": color = "error"
-        elif type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)

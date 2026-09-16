@@ -46,11 +46,18 @@ class DashboardPage:
         self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
         self._recent_forums = []
         self._ai_api_key_set = False  # AI API Key 是否已配置
-        self._log_task = None  # 日志监听任务引用
-        self._log_task_running = False  # 日志监听任务运行标志
+        self._sign_progress_subscribed = False  # 订阅随 build/cleanup 生命周期管理
 
-        # --- 方案 A: 跨页面进度同步订阅 ---
+    def _subscribe_sign_progress(self):
+        """订阅跨页签到进度（幂等）。
+
+        页面实例被 app 层缓存后 __init__ 不会重跑，而 cleanup 每次离开都退订；
+        订阅必须放在 build() 里刷新，与 cleanup 对称，否则二次进入进度条失效。
+        """
+        if self._sign_progress_subscribed:
+            return
         self.page.pubsub.subscribe_topic("sign_progress", self._on_sign_progress)
+        self._sign_progress_subscribed = True
 
     async def load_data(self):
         """同步数据库数据"""
@@ -87,56 +94,11 @@ class DashboardPage:
         ai_key = await self.db.get_setting("ai_api_key", "")
         self._ai_api_key_set = bool(ai_key and ai_key.strip())
             
-        # 页面挂载时主动补齐过去的历史
-        from ...core.logger import get_recent_logs
-        recent_history = await get_recent_logs(50)
-        if hasattr(self, "log_list") and hasattr(self, "_add_single_log_ui"):
-            self.log_list.controls.clear()
-            for log_entry in recent_history:
-                self._add_single_log_ui(log_entry)
-        
-        # 开启日志监听任务
-        if not self._log_task_running:
-            self._log_task_running = True
-            self._log_task = self.page.run_task(self._listen_logs)
-            
+        # 页面挂载时启动日志流（含 50 条历史回放，幂等）
+        if hasattr(self, "log_stream"):
+            await self.log_stream.start(self.page)
+
         self.refresh_ui()
-
-    def _add_single_log_ui(self, log_entry):
-        color = "primary"
-        if log_entry["level"] == "ERROR": color = "error"
-        elif log_entry["level"] == "WARN": color = "secondary"
-        
-        log_row = ft.Row([
-            ft.Text(f"[{log_entry['time']}]", size=10, color="onSurfaceVariant", font_family="Consolas"),
-            ft.Container(
-                content=ft.Text(log_entry["level"], size=9, weight=ft.FontWeight.BOLD, color="black"),
-                bgcolor=color,
-                padding=ft.padding.symmetric(horizontal=4, vertical=1),
-                border_radius=3,
-            ),
-            ft.Text(log_entry["message"], size=11, color="onSurface", expand=True),
-        ], spacing=10)
-        
-        self.log_list.controls.insert(0, log_row)
-        if len(self.log_list.controls) > 30:
-            self.log_list.controls.pop()
-
-    async def _listen_logs(self):
-        """监听日志队列并更新 UI"""
-        queue = get_log_queue()
-        try:
-            while self._log_task_running:
-                log_entry = await queue.get()
-                if self._log_task_running and hasattr(self, "log_list"):
-                    self._add_single_log_ui(log_entry)
-                    self.page.update()
-                queue.task_done()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            self._log_task_running = False
-            self._log_task = None
 
     def refresh_ui(self):
         if hasattr(self, "hud"):
@@ -194,12 +156,12 @@ class DashboardPage:
         self.page.update()
 
     def build(self) -> ft.Control:
+        # 每次进入页面重新订阅跨页进度（与 cleanup 退订对称）
+        self._subscribe_sign_progress()
+
         # --- 初始化组件 (避免在控件列表中直接赋值引起语法错误) ---
-        self.log_list = ft.ListView(
-            expand=True,
-            spacing=5,
-            padding=10,
-        )
+        from ..components.log_stream import LogStreamView
+        self.log_stream = LogStreamView(max_rows=30, history_count=50)
 
         # --- 标题区域 ---
         header = ft.Row(
@@ -437,7 +399,7 @@ class DashboardPage:
                     # 底层：最近动态
                     ft.Text("实时状态流 / SYSTEM STREAM", size=14, weight=ft.FontWeight.W_500, color="primary"),
                     ft.Container(
-                        content=self.log_list,
+                        content=self.log_stream,
                         height=200,
                         border=ft.border.all(1, with_opacity(0.1, "#00BFA5")),
                         border_radius=10,
@@ -455,10 +417,11 @@ class DashboardPage:
         """页面卸载时清理资源：取消 pubsub 订阅、停止后台任务"""
         try:
             self.page.pubsub.unsubscribe_topic("sign_progress", self._on_sign_progress)
+            self._sign_progress_subscribed = False
         except Exception:
             pass
-        if self._log_task and not self._log_task.done():
-            self._log_task.cancel()
+        if hasattr(self, "log_stream"):
+            self.log_stream.stop()
 
     def _navigate(self, page_name: str):
         if self.on_navigate:

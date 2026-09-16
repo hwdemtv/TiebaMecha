@@ -84,9 +84,11 @@ class ProxyPage:
             height=45,
         )
 
+        self._bulk_test_btn = ft.TextButton("批量测速", icon=SPEED, on_click=self._bulk_test_proxies, visible=False)
+        self._bulk_delete_btn = ft.TextButton("批量删除", icon=DELETE_SWEEP, style=ft.ButtonStyle(color="error"), on_click=self._bulk_delete_proxies, visible=False)
         bulk_actions = ft.Row([
-            ft.TextButton("批量测速", icon=SPEED, on_click=self._bulk_test_proxies, visible=False),
-            ft.TextButton("批量删除", icon=DELETE_SWEEP, style=ft.ButtonStyle(color="error"), on_click=self._bulk_delete_proxies, visible=False),
+            self._bulk_test_btn,
+            self._bulk_delete_btn,
         ], spacing=10)
         self.bulk_bar = bulk_actions
 
@@ -357,10 +359,8 @@ class ProxyPage:
             self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
-        color = "primary"
-        if type == "error": color = "error"
-        elif type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)
 
     def _on_search_change(self, e):
         self._search_text = e.control.value
@@ -384,24 +384,53 @@ class ProxyPage:
 
     def _update_bulk_bar(self):
         has_sel = len(self._selected_ids) > 0
-        if hasattr(self, "bulk_bar"):
-            self.bulk_bar.controls[0].visible = has_sel
-            self.bulk_bar.controls[1].visible = has_sel
-            self.bulk_bar.controls[0].text = f"批量测速 ({len(self._selected_ids)})"
-            self.bulk_bar.controls[1].text = f"批量删除 ({len(self._selected_ids)})"
+        if hasattr(self, "_bulk_test_btn"):
+            self._bulk_test_btn.visible = has_sel
+            self._bulk_delete_btn.visible = has_sel
+            self._bulk_test_btn.text = f"批量测速 ({len(self._selected_ids)})"
+            self._bulk_delete_btn.text = f"批量删除 ({len(self._selected_ids)})"
             self.page.update()
 
     async def _bulk_test_proxies(self, e):
-        if not self._selected_ids: return
-        self._show_snackbar(f"正在启动 {len(self._selected_ids)} 个节点的并行链路测试...", "info")
-        for pid in list(self._selected_ids):
-            p = next((x for x in self._proxies if x.id == pid), None)
-            if p:
-                # 寻找对应的测试按钮触发（简单处理直接调用核心逻辑）
-                await self._on_test_click(p, None) 
-        self._selected_ids.clear()
-        self._update_bulk_bar()
-        self.refresh_ui()
+        """批量测速：独立遍历选中节点（不复用 _on_test_click，其依赖事件对象）"""
+        if not self._selected_ids:
+            return
+        if getattr(self, "_bulk_testing", False):
+            self._show_snackbar("批量测速进行中，请稍候...", "warning")
+            return
+        self._bulk_testing = True
+        targets = [x for x in self._proxies if x.id in self._selected_ids]
+        try:
+            self._bulk_test_btn.disabled = True
+            self.page.update()
+
+            ok, fail = 0, 0
+            fail_msgs = []
+            for i, p in enumerate(targets, 1):
+                proxy_url = f"{p.protocol}://{p.host}:{p.port}"
+                try:
+                    success, msg = await test_proxy(proxy_url, p.username, p.password)
+                except Exception as ex:
+                    success, msg = False, str(ex)
+                if success:
+                    ok += 1
+                else:
+                    fail += 1
+                    fail_msgs.append(f"{p.host}:{p.port} - {msg}")
+                self._show_snackbar(f"测速中 {i}/{len(targets)}：通过 {ok} / 失败 {fail}", "info")
+
+            summary = f"批量测速完成：通过 {ok}，失败 {fail}"
+            if fail_msgs:
+                summary += "\n" + "\n".join(fail_msgs[:5])
+                if len(fail_msgs) > 5:
+                    summary += f"\n... 其余 {len(fail_msgs) - 5} 个失败节点"
+            self._show_snackbar(summary, "success" if fail == 0 else ("error" if ok == 0 else "info"))
+        finally:
+            self._bulk_testing = False
+            self._bulk_test_btn.disabled = False
+            self._selected_ids.clear()
+            self._update_bulk_bar()
+            self.refresh_ui()
 
     async def _bulk_delete_proxies(self, e):
         if not self._selected_ids: return

@@ -694,11 +694,12 @@ class BatchPostPage:
         """批量重置排期池中的选中项（通常用于将‘失败’重置为‘待发’）"""
         if not self._selected_material_ids:
             return
+        count = len(self._selected_material_ids)
         for mid in list(self._selected_material_ids):
             await self.db.update_material_status(mid, "pending")
         self._selected_material_ids.clear()
         await self._refresh_material_table()
-        self._show_snackbar(f"已批量重置 {len(self._selected_material_ids)} 条物料到待发状态", "success")
+        self._show_snackbar(f"已批量重置 {count} 条物料到待发状态", "success")
 
     async def _refresh_material_table(self):
         """分页刷新物料表（排期池+归档库），服务端过滤+分页"""
@@ -1234,6 +1235,27 @@ class BatchPostPage:
         self.page.open(dialog)
 
     async def _clear_all_materials(self, e=None):
+        if e is not None:
+            # 用户手动触发：先弹确认框，防止误触清空全部物料
+            async def do_clear(_):
+                try:
+                    self.page.close(dialog)
+                    await self._clear_all_materials(e=None)
+                    self._show_snackbar("物料池已全库排空", "success")
+                except Exception as ex:
+                    self._show_snackbar(f"清空失败: {ex}", "error")
+
+            dialog = ft.AlertDialog(
+                title=ft.Row([ft.Icon(icons.DELETE_FOREVER, color="error"), ft.Text("确认摧毁总计划？")]),
+                content=ft.Text("将清空物料池中的全部物料（含排期池与归档库），此操作不可恢复。"),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                    ft.FilledButton("确认清空", icon=icons.DELETE_FOREVER, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=lambda ev: self.page.run_task(do_clear, ev)),
+                ],
+            )
+            self.page.open(dialog)
+            return
+
         await self.db.clear_materials()
         self._material_page = 1
         self._archive_page = 1
@@ -3427,8 +3449,9 @@ class BatchPostPage:
         )
 
         # 持久化即时任务到数据库，使 UI 刷新后任务队列可见
+        db_task_id = None
         try:
-            await self.db.add_batch_task(
+            db_task = await self.db.add_batch_task(
                 fname=fnames[0],
                 fnames_json=json.dumps(fnames, ensure_ascii=False),
                 titles_json="[]",
@@ -3444,20 +3467,10 @@ class BatchPostPage:
                 schedule_type="once",
                 status="running"
             )
+            db_task_id = db_task.id
             await self.load_data()
         except Exception:
             pass  # 持久化失败不阻塞执行
-
-        # 获取刚保存的数据库任务 ID，用于后续更新状态
-        db_task_id = None
-        try:
-            _latest_tasks = await self.db.get_all_batch_tasks()
-            for _t in _latest_tasks:
-                if getattr(_t, "schedule_type", None) == "once" and getattr(_t, "status", None) == "running":
-                    db_task_id = _t.id
-                    break
-        except Exception:
-            pass
 
         try:
             async for update in self.manager.execute_task(task):
@@ -3473,7 +3486,8 @@ class BatchPostPage:
 
                 if update["status"] == "success":
                     self._add_log(update) # 直接传入字典以进行结构化渲染
-                    self.progress_bar.value = update["progress"] / update["total"]
+                    total = update.get("total") or 0
+                    self.progress_bar.value = (update["progress"] / total) if total > 0 else 0
                 elif update["status"] == "error":
                     self._add_log(update, "error")
                 elif update["status"] == "skipped":
@@ -3792,18 +3806,5 @@ class BatchPostPage:
         if self.on_navigate: self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
-        if not self.page: return
-        color = "primary" if type != "error" else "error"
-        if type == "success": color = COLORS.GREEN
-        try:
-            self.page.show_snack_bar(
-                ft.SnackBar(
-                    content=ft.Text(message), 
-                    bgcolor=with_opacity(0.8, color), 
-                    behavior=ft.SnackBarBehavior.FLOATING,
-                    duration=3000
-                )
-            )
-            self.page.update()
-        except Exception:
-            pass
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)

@@ -29,8 +29,6 @@ class SettingsPage:
         self._latest_release = None
         
         # 养号日志状态
-        self._log_task = None
-        self._log_task_running = False
         self._maint_config = {
             "maint_acc_delay_min": "300",
             "maint_acc_delay_max": "900",
@@ -79,16 +77,9 @@ class SettingsPage:
         for key in self._maint_config.keys():
             self._maint_config[key] = await self.db.get_setting(key, self._maint_config[key])
         
-        recent_history = await get_recent_logs(100)
-        if hasattr(self, "maint_log_list"):
-            self.maint_log_list.controls.clear()
-            for log_entry in recent_history:
-                if "[BioWarming]" in log_entry["message"]:
-                    self._add_maint_log_ui(log_entry)
-        
-        if not self._log_task_running:
-            self._log_task_running = True
-            self._log_task = self.page.run_task(self._listen_maint_logs)
+        # 启动养号日志流（含历史回放，仅 [BioWarming] 相关，幂等）
+        if hasattr(self, "log_stream"):
+            await self.log_stream.start(self.page)
 
         # 7. 加载守护任务
         await self._load_daemon_info()
@@ -289,7 +280,7 @@ class SettingsPage:
                 ft.TextButton("立即执行一次养号周期", icon=ft.icons.PLAY_CIRCLE_FILL_ROUNDED, on_click=self._trigger_maint_now),
             ]),
             ft.Container(
-                content=self.maint_log_list, 
+                content=self.log_stream, 
                 height=350, 
                 border=ft.border.all(1, with_opacity(0.1, "onSurface")), 
                 border_radius=10,
@@ -387,7 +378,12 @@ class SettingsPage:
             "maint_acc_delay_min": ft.TextField(label="账号延迟Min(s)", expand=True),
             "maint_acc_delay_max": ft.TextField(label="账号延迟Max(s)", expand=True),
         }
-        self.maint_log_list = ft.ListView(expand=True, spacing=5, padding=10)
+        from ..components.log_stream import LogStreamView
+        self.log_stream = LogStreamView(
+            filter_fn=lambda e: "[BioWarming]" in e.get("message", ""),
+            max_rows=100,
+            history_count=100,
+        )
 
     def _init_general_sec_fields(self):
         self.web_password_status = ft.Text("...", size=12, weight=ft.FontWeight.BOLD)
@@ -399,28 +395,6 @@ class SettingsPage:
         return ft.Row([ft.Icon(icon, color="primary", size=18), ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color="primary")], spacing=10)
 
     # --- Logic Helpers ---
-    def _add_maint_log_ui(self, log_entry):
-        color = "error" if log_entry["level"] == "ERROR" else "secondary" if log_entry["level"] == "WARN" else "primary"
-        log_row = ft.Row([
-            ft.Text(f"[{log_entry['time']}]", size=10, color="onSurfaceVariant", font_family="Consolas"),
-            ft.Container(content=ft.Text(log_entry["level"], size=9, weight=ft.FontWeight.BOLD), bgcolor=color, padding=ft.padding.symmetric(horizontal=4, vertical=1), border_radius=3),
-            ft.Text(log_entry["message"], size=11, expand=True),
-        ], spacing=10)
-        self.maint_log_list.controls.insert(0, log_row)
-        if len(self.maint_log_list.controls) > 100: self.maint_log_list.controls.pop()
-
-    async def _listen_maint_logs(self):
-        queue = get_log_queue()
-        try:
-            while self._log_task_running:
-                log_entry = await queue.get()
-                if self._log_task_running and "[BioWarming]" in log_entry["message"]:
-                    if hasattr(self, "maint_log_list"):
-                        self._add_maint_log_ui(log_entry); self.page.update()
-                queue.task_done()
-        except asyncio.CancelledError: pass
-        finally: self._log_task_running = False
-
     def _build_daemon_cards(self) -> list[ft.Control]:
         cards = []
         for j in self._jobs_info:
@@ -480,38 +454,71 @@ class SettingsPage:
 
     # 复用授权、更新、密码逻辑
     async def _verify_license_online(self, e):
-        await self.db.set_setting("license_key", self.license_key_field.value)
-        am = await get_auth_manager()
-        if await am.verify_online(): self._show_snackbar("授权成功", "success")
-        else: self._show_snackbar("验证失败", "error")
-        await self.load_data()
+        btn = e.control if e else getattr(self, "_license_verify_btn", None)
+        try:
+            if btn:
+                btn.disabled = True
+                self.page.update()
+            await self.db.set_setting("license_key", self.license_key_field.value)
+            am = await get_auth_manager()
+            if await am.verify_online(): self._show_snackbar("授权成功", "success")
+            else: self._show_snackbar("验证失败", "error")
+            await self.load_data()
+        except Exception as ex:
+            self._show_snackbar(f"授权验证异常: {ex}", "error")
+        finally:
+            if btn:
+                btn.disabled = False
+                self.page.update()
 
     async def _manual_check_update(self, e):
-        updater = get_update_manager(self.db)
-        release = await updater.check_update()
-        if release:
-            self.latest_version_info.value = f"新版本: {release.tag_name}"; self.latest_version_info.color = COLORS.GREEN
-            self.changelog_area.value = await updater.get_changelog(release)
-        else: self.latest_version_info.value = "已是最新版本"
-        self.page.update()
+        btn = e.control if e else getattr(self, "_check_update_btn", None)
+        try:
+            if btn:
+                btn.disabled = True
+                self.page.update()
+            updater = get_update_manager(self.db)
+            release = await updater.check_update()
+            if release:
+                self.latest_version_info.value = f"新版本: {release.tag_name}"; self.latest_version_info.color = COLORS.GREEN
+                self.changelog_area.value = await updater.get_changelog(release)
+            else: self.latest_version_info.value = "已是最新版本"
+            self.page.update()
+        except Exception as ex:
+            self._show_snackbar(f"检查更新失败: {ex}", "error")
+        finally:
+            if btn:
+                btn.disabled = False
+                self.page.update()
 
     async def _change_password(self, e):
-        old, new, conf = self.web_old_pwd_field.value, self.web_new_pwd_field.value, self.web_confirm_pwd_field.value
-        if await is_password_set(self.db) and not await check_password(self.db, old): self._show_snackbar("原密码错误", "error"); return
-        if not new or new != conf: self._show_snackbar("两次输入不一致", "error"); return
-        await set_password(self.db, new); await self.load_data(); self._show_snackbar("密码已修改", "success")
+        btn = e.control if e else getattr(self, "_change_pwd_btn", None)
+        try:
+            if btn:
+                btn.disabled = True
+                self.page.update()
+            old, new, conf = self.web_old_pwd_field.value, self.web_new_pwd_field.value, self.web_confirm_pwd_field.value
+            if await is_password_set(self.db) and not await check_password(self.db, old): self._show_snackbar("原密码错误", "error"); return
+            if not new or new != conf: self._show_snackbar("两次输入不一致", "error"); return
+            await set_password(self.db, new); await self.load_data(); self._show_snackbar("密码已修改", "success")
+        except Exception as ex:
+            self._show_snackbar(f"修改密码失败: {ex}", "error")
+        finally:
+            if btn:
+                btn.disabled = False
+                self.page.update()
 
     async def _clear_password(self, e):
         if await check_password(self.db, self.web_old_pwd_field.value): await clear_password(self.db); await self.load_data(); self._show_snackbar("密码已移除", "success")
         else: self._show_snackbar("原密码错误", "error")
 
     def cleanup(self):
-        self._log_task_running = False
-        if self._log_task and not self._log_task.done(): self._log_task.cancel()
+        if hasattr(self, "log_stream"):
+            self.log_stream.stop()
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)
 
     def _show_snackbar(self, message: str, type="info"):
-        color = COLORS.GREEN if type=="success" else "error" if type=="error" else "primary"
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)

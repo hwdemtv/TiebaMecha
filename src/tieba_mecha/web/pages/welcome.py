@@ -97,26 +97,31 @@ class WelcomePage:
             # 假设直接输入的是 BDUSS
             bduss = cookie_raw
 
-        is_valid, uid, uname, msg = await verify_account(bduss, stoken)
-        
-        if is_valid:
-            # 使用 core.add_account 进行加密存储
-            await core_add_account(
-                db=self.db,
-                name=uname,
-                bduss=bduss,
-                stoken=stoken,
-            )
-            self._show_snackbar(f"验证成功！欢迎回来，{uname}。", "success")
-            await asyncio.sleep(1)
-            if self.on_navigate:
-                self.on_navigate("dashboard")
-        else:
-            self.status.value = f"验证失败: {msg}"
+        try:
+            is_valid, uid, uname, msg = await verify_account(bduss, stoken)
+
+            if is_valid:
+                # 使用 core.add_account 进行加密存储
+                await core_add_account(
+                    db=self.db,
+                    name=uname,
+                    bduss=bduss,
+                    stoken=stoken,
+                )
+                self._show_snackbar(f"验证成功！欢迎回来，{uname}。", "success")
+                await asyncio.sleep(1)
+                if self.on_navigate:
+                    self.on_navigate("dashboard")
+            else:
+                self.status.value = f"验证失败: {msg}"
+                self.status.color = "error"
+        except Exception as ex:
+            self.status.value = f"添加账号时发生异常: {ex}"
             self.status.color = "error"
+        finally:
+            # 无论成功/失败/异常都恢复按钮，避免首次使用即卡死
             self.verify_btn.disabled = False
-        
-        self.page.update()
+            self.page.update()
 
     def _show_tutorial(self, e):
         """显示分步引导教程"""
@@ -151,7 +156,5 @@ class WelcomePage:
         self.page.open(dialog)
 
     def _show_snackbar(self, message: str, type="info"):
-        color = "primary"
-        if type == "error": color = "error"
-        elif type == "success": color = COLORS.GREEN
-        self.page.show_snack_bar(ft.SnackBar(content=ft.Text(message), bgcolor=with_opacity(0.8, color), behavior=ft.SnackBarBehavior.FLOATING))
+        from ..components.toast import show_toast
+        show_toast(self.page, message, type)
