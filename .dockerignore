@@ -1,0 +1,33 @@
+# 安全：绝不能打进镜像的敏感与本地数据
+.env
+.env.*
+data/
+*.db
+uploads/
+output/
+logs/
+
+# 构建产物与缓存
+build/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+tmp/
+scratch/
+
+# 测试与开发残留
+tests/
+gui-test-screenshots/
+test_*.py
+tmp_*.py
+check_flet.py
+.gemini_diff.txt
+.codebuddy/
+
+# 文档与杂项（镜像内不需要）
+*.md
+*.csv
+*.ico
+.git/
+.gitignore

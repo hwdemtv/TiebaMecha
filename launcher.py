@@ -14,7 +14,13 @@ os.environ["PYTHONUTF8"] = "1"
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
-SECRET_KEY = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY") or "cyber_mecha_dual_launcher_999"
+SECRET_KEY = os.getenv("TIEBA_MECHA_SECRET_KEY") or os.getenv("FLET_SECRET_KEY")
+if not SECRET_KEY:
+    # 安全修复：不再回退到硬编码密钥（可预测密钥会被用于伪造上传凭据），
+    # 改为随机生成；未在 .env 固定时重启后 Web 会话失效，建议配置 .env。
+    import secrets as _secrets
+    SECRET_KEY = _secrets.token_hex(32)
+    print("[WARN] 未设置 TIEBA_MECHA_SECRET_KEY，已生成随机密钥（重启后失效，建议配置 .env）")
 os.environ["FLET_SECRET_KEY"] = SECRET_KEY
 
 import uvicorn.config as _uvc

@@ -176,3 +176,13 @@ tmp/
  
 # Uploads directory
 uploads/
+
+# 运行产物与本地数据（爬取结果/导出数据不入库，保留在本地）
+output/
+gui-test-screenshots/
+
+# 诊断/实验脚本工作区
+scratch/
+
+# AI 协作工具的计划文件
+.codebuddy/

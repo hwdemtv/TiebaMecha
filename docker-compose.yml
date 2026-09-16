@@ -8,9 +8,11 @@ services:
       - "9006:9006"
     volumes:
       - ./data:/app/data
-      - ./logs:/app/logs
     environment:
       - TZ=Asia/Shanghai
+      # 凭据加密密钥：从宿主机环境变量或同目录 .env 透传（缺失时容器内首次加密会报错）
+      - TIEBA_MECHA_SALT=${TIEBA_MECHA_SALT:-}
+      - TIEBA_MECHA_SECRET_KEY=${TIEBA_MECHA_SECRET_KEY:-}
       # 如果需要指定自定义端口，可以启用下方设置
       # - PORT=9006
     healthcheck:
