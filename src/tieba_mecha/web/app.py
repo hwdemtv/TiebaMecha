@@ -268,231 +268,28 @@ class TiebaMechaApp:
         else:
             await self._navigate("dashboard")
 
-        # 启动后台任务
-        self.page.run_task(self._account_heartbeat)
-        # 注：批量发帖调度已统一由 daemon.py 的 do_batch_post_tasks() 处理，不再此处重复调度
-        self.page.run_task(self._proxy_monitor) # 挂载代理智能监控
-        self.page.run_task(self._notification_sync)  # 通知同步
-        self.page.run_task(self._update_checker)  # 更新检测
+        # 启动进程级自动化（daemon + 心跳/代理巡检/通知同步/更新检测）。
+        # 关键：必须用 asyncio.create_task 而非 page.run_task——后者把任务
+        # 绑定到浏览器会话，会话断开即取消，导致无人值守时自动化静默停止；
+        # AutomationManager 幂等，后续会话接入不会重复启动。
+        from .runtime import AutomationManager
+        AutomationManager.set_ui_hook(self._refresh_notification_bell)
+        started = await AutomationManager.ensure_started(self.db)
 
-        # 拉起全局调度引擎
-        from ..core.daemon import daemon_instance
-        self.page.run_task(daemon_instance.start)
+        if started:
+            await log_info("TiebaMecha 系统内聚核动力引擎已启动（进程级，会话断开不影响）")
+        else:
+            await log_info("自动化引擎已在运行，本会话接入观察模式")
 
-        await log_info("TiebaMecha 系统内聚核动力引擎已启动")
+    async def _refresh_notification_bell(self):
+        """刷新通知铃（UI 侧钩子；会话断开时由 runtime 吞掉异常）"""
+        await self.notification_bell.refresh()
 
     async def _show_notifications(self, _=None):
         """显示通知对话框（延迟导入）"""
         from ..core.notification import get_notification_manager
         from .components.notification_bell import show_notification_dialog
         await show_notification_dialog(self.page, get_notification_manager())
-
-    async def _is_quiet_hour(self) -> bool:
-        """检查当前是否处于静默时间窗"""
-        from datetime import datetime
-        try:
-            start_str = await self.db.get_setting("quiet_start", "01:00")
-            end_str = await self.db.get_setting("quiet_end", "06:00")
-            
-            now = datetime.now().time()
-            start = datetime.strptime(start_str, "%H:%M").time()
-            end = datetime.strptime(end_str, "%H:%M").time()
-            
-            if start <= end:
-                return start <= now <= end
-            else:
-                # 跨天情况 (如 23:00 - 05:00)
-                return now >= start or now <= end
-        except Exception:
-            return False
-
-    async def _account_heartbeat(self):
-        """账号心跳检测后台循环"""
-        from ..core.logger import log_info, log_warn, log_error
-        from ..core.account import verify_account, decrypt_value
-
-        while True:
-            try:
-                # 检查静默期
-                if await self._is_quiet_hour():
-                    await log_info("当前处于系统静默时间窗，后台自动化任务已挂起")
-                    await asyncio.sleep(1800) # 静默期内每 30 分钟检查一次
-                    continue
-
-                # 获取检测间隔 (默认 2 小时)
-                interval_str = await self.db.get_setting("heartbeat_interval", "2")
-                interval = max(1, int(interval_str)) # 最少 1 小时
-
-                await log_info(f"开启账号状态全域扫描 (计划周期: {interval}h)")
-
-                accounts = await self.db.get_accounts()
-                for acc in accounts:
-                    try:
-                        bduss = decrypt_value(acc.bduss)
-                        stoken = decrypt_value(acc.stoken) if acc.stoken else ""
-
-                        is_valid, uid, uname, msg = await verify_account(bduss, stoken)
-                        status = "active" if is_valid else "expired"
-                        if not is_valid:
-                            from ..core.risk import is_account_ban_error
-                            if "timeout" in msg.lower() or "connection" in msg.lower() or "网络" in msg:
-                                status = "error" # 网络问题不代表过期
-                            elif is_account_ban_error(msg):
-                                status = "banned"
-
-                        await self.db.update_account_status(acc.id, status)
-
-                        if not is_valid:
-                            await log_warn(f"账号 [{acc.name}] 验证失败: {msg}")
-                    except Exception as e:
-                        await log_error(f"扫描账号 [{acc.name}] 时发生异常: {str(e)}")
-
-                await log_info("账号巡回检查完毕")
-                await asyncio.sleep(interval * 3600)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                await log_error(f"心跳任务异常: {str(e)}")
-                await asyncio.sleep(300) # 出错后 5 分钟重试
-
-    async def _proxy_monitor(self):
-        """代理池智能监控与自动维护引擎（含账号联动挂起/恢复）"""
-        from ..core.logger import log_info, log_warn, log_error
-        from ..core.proxy import test_proxy
-
-        while True:
-            try:
-                proxies = await self.db.get_active_proxies()
-                if proxies:
-                    await log_info(f"开启周期性网络探测: 正在巡检 {len(proxies)} 个代理节点")
-                    for p in proxies:
-                        proxy_url = f"{p.protocol}://{p.host}:{p.port}"
-                        success, result = await test_proxy(proxy_url, p.username, p.password)
-
-                        if not success:
-                            await log_warn(f"节点连通性异常: {p.host}:{p.port} -> {result}")
-                            await self.db.mark_proxy_fail(p.id)
-
-                            # 重新检查是否达到失效阈值（mark_proxy_fail 内部处理）
-                            # 若代理已被标记为 inactive，联动挂起关联账号
-                            from ..db.crud import Database
-                            proxy_obj = await self.db.get_proxy(p.id)
-                            if proxy_obj and not proxy_obj.is_active:
-                                suspended = await self.db.suspend_accounts_for_proxy(
-                                    p.id, reason=f"代理 {p.host}:{p.port} 连续失效，自动隔离"
-                                )
-                                if suspended:
-                                    names = [a.name for a in suspended]
-                                    await log_warn(
-                                        f"代理失效联动：已挂起 {len(suspended)} 个关联账号 → {names}"
-                                    )
-                        else:
-                            # 代理连通性正常：若之前曾被标记失效并恢复，解挂关联账号
-                            if p.fail_count > 0:
-                                # 重置失败计数
-                                async with self.db.async_session() as session:
-                                    from sqlalchemy import update as sa_update
-                                    from ..db.models import Proxy
-                                    await session.execute(
-                                        sa_update(Proxy).where(Proxy.id == p.id).values(fail_count=0)
-                                    )
-                                    await session.commit()
-
-                                restored = await self.db.restore_accounts_for_proxy(p.id)
-                                if restored:
-                                    names = [a.name for a in restored]
-                                    await log_info(
-                                        f"代理 {p.host}:{p.port} 已恢复，解挂 {len(restored)} 个账号 → {names}"
-                                    )
-
-                await asyncio.sleep(1800)  # 每 30 分钟巡检一次
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                await log_error(f"代理监控引擎异常: {str(e)}")
-                await asyncio.sleep(600)
-
-    async def _notification_sync(self):
-        """通知同步后台任务 - 定期从 hw-license-center 拉取远程通知"""
-        from ..core.logger import log_error
-        from ..core.notification import get_notification_manager
-
-        nm = get_notification_manager()
-        if not nm:
-            return
-
-        # 启动时立即尝试执行一次同步
-        try:
-            await self._perform_notification_sync(nm)
-        except Exception as e:
-            await log_error(f"程序启动初始通知同步异常: {str(e)}")
-
-        while True:
-            try:
-                # 每小时定期同步一次远程通知
-                await asyncio.sleep(3600)
-                await self._perform_notification_sync(nm)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                await log_error(f"周期性通知同步异常: {str(e)}")
-                await asyncio.sleep(1800)
-
-    async def _perform_notification_sync(self, nm):
-        """执行具体的通知同步逻辑"""
-        from ..core.logger import log_info
-
-        # 加载许可证配置
-        license_key = await self.db.get_setting("license_key", "")
-        device_id = await self.db.get_setting("device_id", "")
-        server_url = await self.db.get_setting("license_server_url", "")
-
-        # 配置并触发同步
-        nm.set_license_config(license_key, device_id, server_url)
-        added = await nm.sync_remote_notifications()
-        if added > 0:
-            await log_info(f"同步远程通知: 新增 {added} 条")
-            await self.notification_bell.refresh()
-
-    async def _update_checker(self):
-        """更新检测后台任务 - 定期检查 GitHub Releases"""
-        from ..core.logger import log_info, log_error
-        from ..core.notification import get_notification_manager
-        from ..core.updater import get_update_manager
-
-        updater = get_update_manager()
-
-        while True:
-            try:
-                # 检查是否应该检测更新（默认 24 小时一次）
-                if await updater.should_check_update(interval_hours=24):
-                    release = await updater.check_update()
-                    if release:
-                        nm = get_notification_manager()
-                        if nm:
-                            await nm.push(
-                                type="update_available",
-                                title=f"发现新版本 {release.tag_name}",
-                                message="点击查看更新内容",
-                                action_url=release.html_url,
-                                extra={
-                                    "version": release.version,
-                                    "published_at": release.published_at.isoformat(),
-                                },
-                                show_snackbar=True,
-                            )
-                            await log_info(f"检测到新版本: {release.tag_name}")
-
-                # 每 24 小时检查一次
-                await asyncio.sleep(86400)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                await log_error(f"更新检测异常: {str(e)}")
-                await asyncio.sleep(3600)
-
 
     def _on_web_reconnect(self, e):
         """浏览器刷新/重连时清除残留的对话框，忽略已取消的 Future 回调"""

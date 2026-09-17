@@ -497,9 +497,8 @@ class TiebaMechaDaemon:
     def cancel_once_task(self, task_id: str):
         """取消已注册的 once 精确调度任务"""
         job_id = f"once_batch_{task_id}"
-        job = self.scheduler.get_job(job_id)
-        if job:
-            self.scheduler.remove_job(job)
+        if self.scheduler.get_job(job_id):
+            self.scheduler.remove_job(job_id)
             print(f"[DAEMON] 已取消 once 调度: 任务 {task_id}")
 
     def stop(self):
