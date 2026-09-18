@@ -186,3 +186,10 @@ scratch/
 
 # AI 协作工具的计划文件
 .codebuddy/
+
+# 官网（React 项目）已拆分至独立仓库，本地保留
+website/
+
+# 根目录导出产物与生成图标
+/threads_export_*.csv
+/generated-*.ico

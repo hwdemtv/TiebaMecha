@@ -21,11 +21,9 @@ from .models import (
     BatchPostLog,
     BatchPostTask,
     CaptchaEvent,
-    CrawlTask,
     Forum,
     MaterialPool,
     Notification,
-    PostCache,
     Proxy,
     Setting,
     SignLog,
@@ -61,7 +59,6 @@ from .repositories.proxy_repo import PROXY_FAIL_THRESHOLD  # noqa: F401
 from .repositories import (
     AccountRepository,
     ForumRepository,
-    CrawlRepository,
     SettingRepository,
     ProxyRepository,
     RuleRepository,
@@ -78,7 +75,6 @@ from .repositories import (
 class Database(
     AccountRepository,
     ForumRepository,
-    CrawlRepository,
     SettingRepository,
     ProxyRepository,
     RuleRepository,

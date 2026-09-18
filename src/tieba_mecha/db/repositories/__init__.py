@@ -2,7 +2,6 @@
 
 from .account_repo import AccountRepository
 from .forum_repo import ForumRepository
-from .crawl_repo import CrawlRepository
 from .setting_repo import SettingRepository
 from .proxy_repo import ProxyRepository
 from .rule_repo import RuleRepository
@@ -14,4 +13,4 @@ from .notification_repo import NotificationRepository
 from .thread_repo import ThreadRepository
 from .batch_log_repo import BatchLogRepository
 
-__all__ = ["AccountRepository", "ForumRepository", "CrawlRepository", "SettingRepository", "ProxyRepository", "RuleRepository", "BatchTaskRepository", "MaterialRepository", "TargetPoolRepository", "CaptchaRepository", "NotificationRepository", "ThreadRepository", "BatchLogRepository"]
+__all__ = ["AccountRepository", "ForumRepository", "SettingRepository", "ProxyRepository", "RuleRepository", "BatchTaskRepository", "MaterialRepository", "TargetPoolRepository", "CaptchaRepository", "NotificationRepository", "ThreadRepository", "BatchLogRepository"]

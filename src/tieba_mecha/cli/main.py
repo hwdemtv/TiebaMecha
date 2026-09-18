@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from tieba_mecha import __version__
-from tieba_mecha.core import account, crawl, post, sign
+from tieba_mecha.core import account, post, sign
 from tieba_mecha.db.crud import Database, get_db
 
 app = typer.Typer(
@@ -24,12 +24,10 @@ console = Console()
 account_app = typer.Typer(name="account", help="账号管理")
 sign_app = typer.Typer(name="sign", help="签到管理")
 post_app = typer.Typer(name="post", help="帖子管理")
-crawl_app = typer.Typer(name="crawl", help="数据爬取")
 
 app.add_typer(account_app)
 app.add_typer(sign_app)
 app.add_typer(post_app)
-app.add_typer(crawl_app)
 
 
 def run_async(coro):
@@ -411,94 +409,6 @@ def post_good(
             console.print(f"[red]{msg}[/red]")
 
     run_async(_good)
-
-
-# ========== 数据爬取 ==========
-
-
-@crawl_app.command("threads")
-def crawl_threads(
-    forum: str = typer.Argument(..., help="贴吧名称"),
-    pages: int = typer.Option(5, "--pages", "-p", help="爬取页数"),
-    output: Optional[str] = typer.Option(None, "--output", "-o", help="输出目录"),
-):
-    """爬取贴吧帖子"""
-
-    async def _crawl(db: Database):
-        output_dir = output if output else None
-        from pathlib import Path
-
-        console.print(f"[cyan]开始爬取 {forum}，共 {pages} 页...[/cyan]")
-
-        async for progress in crawl.crawl_threads(
-            db, forum, pages, Path(output_dir) if output_dir else None
-        ):
-            if progress.status == "running":
-                console.print(f"[yellow]已爬取 {progress.current} 条...[/yellow]")
-            elif progress.status == "completed":
-                console.print(f"[green]{progress.message}[/green]")
-            elif progress.status == "error":
-                console.print(f"[red]错误: {progress.message}[/red]")
-
-    run_async(_crawl)
-
-
-@crawl_app.command("user")
-def crawl_user(
-    user_id: str = typer.Argument(..., help="用户ID或portrait"),
-    posts: bool = typer.Option(False, "--posts", "-p", help="是否爬取发帖记录"),
-    output: Optional[str] = typer.Option(None, "--output", "-o", help="输出目录"),
-):
-    """爬取用户信息"""
-
-    async def _crawl(db: Database):
-        from pathlib import Path
-
-        output_dir = Path(output) if output else None
-
-        console.print(f"[cyan]开始爬取用户 {user_id}...[/cyan]")
-
-        async for progress in crawl.crawl_user(db, user_id, posts, output_dir):
-            if progress.status == "running":
-                console.print(f"[yellow]{progress.message}[/yellow]")
-            elif progress.status == "completed":
-                console.print(f"[green]{progress.message}[/green]")
-            elif progress.status == "failed":
-                console.print(f"[red]失败: {progress.message}[/red]")
-
-    run_async(_crawl)
-
-
-@crawl_app.command("history")
-def crawl_history(
-    limit: int = typer.Option(20, "--limit", "-n", help="显示数量"),
-):
-    """查看爬取历史"""
-
-    async def _history(db: Database):
-        history = await crawl.get_crawl_history(db, limit)
-
-        table = Table(title="爬取历史")
-        table.add_column("ID", style="cyan")
-        table.add_column("类型", style="green")
-        table.add_column("目标", style="yellow")
-        table.add_column("状态", style="magenta")
-        table.add_column("数量", style="blue")
-        table.add_column("时间", style="dim")
-
-        for h in history:
-            table.add_row(
-                str(h["id"]),
-                h["type"],
-                h["target"],
-                h["status"],
-                str(h["count"]),
-                h["created_at"][:19] if h["created_at"] else "-",
-            )
-
-        console.print(table)
-
-    run_async(_history)
 
 
 if __name__ == "__main__":

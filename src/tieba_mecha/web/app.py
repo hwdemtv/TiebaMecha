@@ -26,11 +26,9 @@ PAGE_MODULES = {
     "login": ("login", "LoginPage"),
     "sign": ("sign", "SignPage"),
     "posts": ("posts", "PostsPage"),
-    "crawl": ("crawl", "CrawlPage"),
     "proxy": ("proxy", "ProxyPage"),
     "rules": ("rules", "RulesPage"),
     "batch_post": ("batch_post_page", "BatchPostPage"),
-    "plugins": ("plugins_page", "PluginsPage"),
     "settings": ("settings", "SettingsPage"),
     "survival": ("survival", "SurvivalPage"),
 }
@@ -112,19 +110,7 @@ class TiebaMechaApp:
                     selected_icon=icons.SHIELD,
                     label="自动化规则",
                 ),
-                ft.NavigationRailDestination(
-                    icon=icons.TRAVEL_EXPLORE_OUTLINED,
-                    selected_icon=icons.TRAVEL_EXPLORE,
-                    label="数据爬取",
-                ),
 
-                # --- 🧩 插件中心 ---
-                ft.NavigationRailDestination(
-                    icon=icons.EXTENSION_OUTLINED,
-                    selected_icon=icons.EXTENSION,
-                    label="插件中心",
-                ),
-                
                 # --- ⚙️ 系统设置 ---
                 ft.NavigationRailDestination(
                     icon=icons.SETTINGS_OUTLINED,
@@ -190,19 +176,11 @@ class TiebaMechaApp:
             from ..core.logger import log_info
             await log_info("密码重置模式：已清除 Web 密码，可进入设置页重新配置")
 
-        # Web 认证检查：未认证则显示登录页，跳过后台任务初始化
+        # Web 认证检查：未认证则显示登录页（设置密码/登录均由 login 页处理），跳过后台任务初始化
         if self.page.session_id not in _authenticated_sessions:
-            from ..core.web_auth import is_password_set
-            if await is_password_set(db):
-                # 密码已设置 → 显示登录页
-                self._show_login_only()
-                await self._navigate("login")
-                return
-            else:
-                # 未设置密码 → 显示设置密码页（可跳过）
-                self._show_login_only()
-                await self._navigate("login")
-                return
+            self._show_login_only()
+            await self._navigate("login")
+            return
 
         # 认证已通过，执行完整初始化
         await self._full_initialize(db)
@@ -315,10 +293,8 @@ class TiebaMechaApp:
             4: "batch_post",
             5: "posts",
             6: "rules",
-            7: "crawl",
-            8: "plugins",
-            9: "settings",
-            10: "survival",
+            7: "settings",
+            8: "survival",
         }
         page_name = dest_map.get(e.control.selected_index, "dashboard")
         self.page.run_task(self._navigate, page_name)
@@ -378,7 +354,6 @@ class TiebaMechaApp:
         """供子页面使用的同步导航回调"""
         self.page.run_task(self._navigate, page_name)
 
-# 确保 create_gradient_button 在 fallback 中能用
 def run_app(port: int = 9006, host: str | None = None):
     """启动 Flet 应用"""
     # 修复：aiotieba 导入后会将 logging level 30 的名称从标准的 'WARNING'
