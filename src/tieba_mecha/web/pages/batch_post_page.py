@@ -11,6 +11,8 @@ from ...core.account import get_account_credentials
 from ...core.batch_post import BatchPostTask, BatchPostManager
 from ...core.link_manager import SmartLinkConnector
 from ...core.ai_optimizer import AIOptimizer
+from .batch_post.launch_config import LaunchConfig, LaunchConfigError
+from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport
 
 def _format_schedule_display(task) -> str:
     """格式化任务的调度信息显示"""
@@ -2672,10 +2674,16 @@ class BatchPostPage:
         self.account_pool_title = ft.Text("参与账号池 (勾选启用)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.W_500)
         self.account_pool_column = ft.Column(spacing=5, expand=True, scroll=ft.ScrollMode.ADAPTIVE)
         self.start_btn = ft.ElevatedButton(
-            "制定矩阵任务", 
+            "制定矩阵任务",
             icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
             on_click=self._on_start_click,
             style=ft.ButtonStyle(color="white", bgcolor="primary")
+        )
+        self.dry_run_btn = ft.OutlinedButton(
+            "干跑预检",
+            icon=icons.CHECK_CIRCLE_ROUNDED,
+            on_click=self._on_dry_run_click,
+            tooltip="不发帖，只验证账号/代理/目标贴吧/物料可用性",
         )
         
         # 5. 状态与进度
@@ -2768,7 +2776,7 @@ class BatchPostPage:
                                     border_radius=8,
                                 ),
                                 ft.Divider(height=5, color="transparent"),
-                                self.start_btn,
+                                ft.Row([self.start_btn, self.dry_run_btn], spacing=10),
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
@@ -3118,6 +3126,183 @@ class BatchPostPage:
             await log_error(f"文件导入失败: {ex}")
             self._show_snackbar(f"文件解析失败: {str(ex)}", "error")
 
+    def _collect_launch_config(self) -> LaunchConfig:
+        """从 UI 控件收集结构化任务配置（唯一读取点）。
+
+        解析失败抛 LaunchConfigError，由调用方转 Snackbar——
+        文案与既有拦截提示保持一致。
+        """
+        try:
+            if self.use_schedule.value:
+                schedule_type = self.schedule_type_dropdown.value or "once"
+                reset_strategy = self.reset_strategy_dropdown.value or "new_only"
+                now = datetime.now()
+                if schedule_type == "once":
+                    st = datetime.strptime(self.schedule_time.value, "%Y-%m-%d %H:%M")
+                elif schedule_type in ("daily", "weekly"):
+                    hm = datetime.strptime(self.schedule_time_hm.value, "%H:%M")
+                    st = now.replace(hour=hm.hour, minute=hm.minute, second=0, microsecond=0)
+                    if st <= now:
+                        st += timedelta(days=1 if schedule_type == "daily" else 7)
+                else:  # interval 及未知类型：立即开始（或1小时后）
+                    st = now + timedelta(hours=1)
+            else:
+                schedule_type = "once"
+                reset_strategy = "new_only"
+                st = None
+            return LaunchConfig(
+                account_ids=sorted(self._selected_account_ids),
+                local_fnames=list(self._temp_local_fnames),
+                global_fnames=list(self._temp_global_fnames),
+                strategy=self.strategy_dropdown.value,
+                pairing_mode=self.pairing_mode_dropdown.value,
+                post_count=int(self.post_count.value),
+                delay_min=float(self.min_delay.value),
+                delay_max=float(self.max_delay.value),
+                use_ai=self.use_ai_switch.value,
+                ai_persona=self.ai_persona_dropdown.value or "normal",
+                use_schedule=self.use_schedule.value,
+                schedule_type=schedule_type,
+                schedule_time=st,
+                interval_hours=int(self.interval_hours.value) if self.interval_hours.value and schedule_type == "interval" else 0,
+                schedule_day_of_week=int(self.schedule_day_of_week.value) if schedule_type == "weekly" else None,
+                reset_strategy=reset_strategy,
+            )
+        except LaunchConfigError:
+            raise
+        except Exception as ex:
+            raise LaunchConfigError(f"定时解析失败: {str(ex)}") from ex
+
+    async def _collect_and_preflight(self):
+        """收集配置并执行预检。返回 (config, report)；配置异常时弹提示并返回 None。"""
+        try:
+            config = self._collect_launch_config()
+        except LaunchConfigError as ex:
+            self._show_snackbar(str(ex), "error")
+            return None
+        if not config.account_ids:
+            self._show_snackbar("请在中间栏至少勾选一个执行账号", "error")
+            return None
+        report = await PreflightService(self.db).run(config)
+        return config, report
+
+    def _build_summary_issue_row(self, issue: PreflightIssue):
+        icon_map = {
+            "error": (icons.ERROR_ROUNDED, "error"),
+            "warning": (icons.WARNING_AMBER_ROUNDED, "orange"),
+            "info": (icons.INFO_OUTLINED, "primary"),
+        }
+        icon_name, color = icon_map.get(issue.level, (icons.INFO_OUTLINED, "primary"))
+        return ft.Row([
+            ft.Icon(name=icon_name, color=color, size=16),
+            ft.Container(expand=True, content=ft.Text(issue.message, size=11, selectable=True)),
+        ], spacing=6)
+
+    def _build_summary_content(self, report: PreflightReport, dry: bool) -> ft.Control:
+        s = report.stats
+        est_min, est_max = s.get("estimated_duration", ("—", "—"))
+        mult_note = "（凌晨双倍延迟已启用）" if s.get("delay_multiplier", 1) > 1 else ""
+
+        if s.get("mode") == "scheduled":
+            type_labels = {"once": "单次定时", "daily": "每天", "weekly": "每周", "interval": "循环间隔"}
+            mode_line = f"{type_labels.get(s.get('schedule_type', 'once'), '定时')} · {s.get('schedule_time', '')}"
+        else:
+            mode_line = "立即执行"
+
+        score = report.risk_score
+        score_color = "error" if score >= 6 else ("orange" if score >= 3 else COLORS.GREEN)
+        risk_line = ft.Row([
+            ft.Text("任务风险评分", size=12, color="onSurfaceVariant"),
+            ft.Container(
+                content=ft.Text(f"{score:g} / 10", size=12, weight=ft.FontWeight.BOLD, color="white"),
+                bgcolor=score_color, border_radius=10, padding=ft.padding.only(left=10, right=10, top=2, bottom=2),
+            ),
+        ], spacing=8)
+
+        stat_rows = [
+            ft.Text(mode_line, size=12, weight=ft.FontWeight.BOLD),
+            ft.Text(
+                f"账号 {s.get('accounts_selected', 0)} 个（有效 {s.get('accounts_effective', 0)}） · "
+                f"贴吧 {len(report.effective_fnames)} 个 · "
+                f"待发物料 {s.get('materials_pending', 0)} 条 · "
+                f"预计发布 {s.get('planned_posts', 0)} 帖",
+                size=12,
+            ),
+            ft.Text(f"预计耗时 {est_min} ~ {est_max}{mult_note}", size=11, color="onSurfaceVariant"),
+        ]
+        if report.risk_factors:
+            stat_rows.append(ft.Text("风险构成: " + "；".join(report.risk_factors),
+                                     size=10, color="onSurfaceVariant", selectable=True))
+
+        issue_rows = [self._build_summary_issue_row(i) for i in report.warnings + report.infos]
+        if not report.warnings and not report.infos:
+            issue_rows.append(ft.Row([
+                ft.Icon(name=icons.CHECK_CIRCLE_ROUNDED, color=COLORS.GREEN, size=16),
+                ft.Text("预检通过：账号、代理、目标贴吧、物料均可用", size=11),
+            ], spacing=6))
+
+        return ft.Container(
+            content=ft.Column([
+                risk_line,
+                ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
+                *stat_rows,
+                ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
+                ft.Column(issue_rows, spacing=6, scroll=ft.ScrollMode.ADAPTIVE, height=200 if len(issue_rows) > 3 else None),
+            ], spacing=8, tight=True),
+            width=520,
+        )
+
+    async def _show_launch_summary_dialog(self, report: PreflightReport, dry: bool = False) -> bool:
+        """展示启动摘要/预检报告。dry=True 仅展示（干跑/错误查看），否则等待确认。返回是否确认。"""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[bool] = loop.create_future()
+
+        def _resolve(value: bool):
+            if not future.done():
+                future.set_result(value)
+            try:
+                self.page.close(dialog)
+            except Exception:
+                pass
+
+        has_errors = bool(report.errors)
+        title = "干跑预检报告" if dry else ("发射拦截" if has_errors else "确认发射")
+        if has_errors:
+            # 错误视图：只列拦截项
+            content = ft.Container(
+                content=ft.Column(
+                    [self._build_summary_issue_row(i) for i in report.errors],
+                    spacing=6, tight=True),
+                width=520,
+            )
+            actions = [ft.TextButton("返回", on_click=lambda _: _resolve(False))]
+        else:
+            content = self._build_summary_content(report, dry)
+            if dry:
+                actions = [ft.TextButton("关闭", on_click=lambda _: _resolve(False))]
+            else:
+                actions = [
+                    ft.TextButton("返回调整", on_click=lambda _: _resolve(False)),
+                    ft.FilledButton(
+                        "确认发射",
+                        icon=icons.ROCKET_LAUNCH,
+                        style=ft.ButtonStyle(bgcolor="primary", color="white"),
+                        on_click=lambda _: _resolve(True),
+                    ),
+                ]
+
+        dialog = ft.AlertDialog(modal=True, title=ft.Text(title), content=content, actions=actions)
+        self.page.open(dialog)
+        return await future
+
+    async def _on_dry_run_click(self, e):
+        """干跑预检：不发帖，只验证账号/代理/物料/目标贴吧可用性。"""
+        collected = await self._collect_and_preflight()
+        if collected is None:
+            return
+        config, report = collected
+        await self._show_launch_summary_dialog(report, dry=True)
+
     async def _on_start_click(self, e):
         if self._is_running:
             self._is_running = False
@@ -3126,69 +3311,27 @@ class BatchPostPage:
             self.page.update()
             return
 
-        # 获取选中的账号（使用权威数据源而非遍历 UI 控件，避免搜索过滤后不同步）
-        selected_accounts = list(self._selected_account_ids)
-        if not selected_accounts:
-            self._show_snackbar("请在中间栏至少勾选一个执行账号", "error")
+        # [预检闭环] 收集配置 → 干跑预检 → 摘要确认后才真正启动
+        collected = await self._collect_and_preflight()
+        if collected is None:
+            return
+        config, report = collected
+        if report.errors:
+            await self._show_launch_summary_dialog(report, dry=True)
+            return
+        if not await self._show_launch_summary_dialog(report):
             return
 
-        # 合并本地自留区 + 全域轰炸组 (两组独立锁定，仅合并已锁定的)
-        fnames = list(set(self._temp_local_fnames + self._temp_global_fnames))
+        # 使用预检后的有效目标（已剔除封禁/失效贴吧）
+        fnames = report.effective_fnames
+        selected_accounts = config.account_ids
+        pairing_mode = config.pairing_mode
+        strategy = config.strategy
 
-        # [修复] 最终防线：校验 fnames 有效性，移除已封禁/已失效的贴吧
-        all_valid_forums = await self.db.get_all_unique_forums()
-        valid_fnames = {f['fname'] for f in all_valid_forums if not f['is_banned']}
-        safe_fnames = {f['fname'] for f in all_valid_forums if f['is_post_target']}
-        # 过滤掉已封禁/已失效的贴吧
-        filtered_fnames = [fn for fn in fnames if fn in valid_fnames]
-        removed_count = len(fnames) - len(filtered_fnames)
-        if removed_count > 0:
-            self._show_snackbar(f"已自动移除 {removed_count} 个已封禁/失效贴吧", "warning")
-            fnames = filtered_fnames
-        # 检测非安全贴吧并警告
-        unsafe_in_task = [fn for fn in fnames if fn not in safe_fnames]
-        if unsafe_in_task:
-            self._show_snackbar(f"⚠️ 含 {len(unsafe_in_task)} 个非安全贴吧，可能被拦截", "warning")
-
-        # Validation（从数据库获取全部待发物料，不受分页限制）
-        pending_m = await self.db.get_materials(status="pending", limit=None)
-        
-        if not fnames or not pending_m:
-            error_details = []
-            if not fnames: error_details.append("目标贴吧库为空")
-            if not pending_m: error_details.append("排期池无待发物料 (需手动回炉或重新导入)")
-            
-            self._show_snackbar(f"发射拦截：{', '.join(error_details)}", "error")
-            return
-            
-        pairing_mode = self.pairing_mode_dropdown.value
-        strategy = self.strategy_dropdown.value
-            
-        if self.use_schedule.value:
+        if config.use_schedule:
             try:
-                schedule_type = self.schedule_type_dropdown.value or "once"
-                reset_strategy = self.reset_strategy_dropdown.value or "new_only"
-
-                # 根据循环模式解析 schedule_time
-                now = datetime.now()
-                if schedule_type == "once":
-                    # 单次：完整日期时间
-                    st = datetime.strptime(self.schedule_time.value, "%Y-%m-%d %H:%M")
-                elif schedule_type in ("daily", "weekly"):
-                    # 每天/每周：仅时分，自动拼上今天的日期
-                    hm = datetime.strptime(self.schedule_time_hm.value, "%H:%M")
-                    st = now.replace(hour=hm.hour, minute=hm.minute, second=0, microsecond=0)
-                    # 如果今天的时间已过，推到明天/下周
-                    if st <= now:
-                        if schedule_type == "daily":
-                            st += timedelta(days=1)
-                        else:
-                            st += timedelta(days=7)
-                elif schedule_type == "interval":
-                    # 间隔模式：立即开始（或1小时后）
-                    st = now + timedelta(hours=1)
-                else:
-                    st = now + timedelta(hours=1)
+                schedule_type = config.schedule_type
+                st = config.schedule_time
 
                 new_task = await self.db.add_batch_task(
                     fname=fnames[0], # 保留以作向下兼容
@@ -3198,15 +3341,15 @@ class BatchPostPage:
                     accounts_json=json.dumps(selected_accounts, ensure_ascii=False),
                     strategy=strategy,
                     pairing_mode=pairing_mode,
-                    total=int(self.post_count.value),
-                    delay_min=float(self.min_delay.value),
-                    delay_max=float(self.max_delay.value),
-                    use_ai=self.use_ai_switch.value,
-                    ai_persona=self.ai_persona_dropdown.value or "normal",
+                    total=config.post_count,
+                    delay_min=config.delay_min,
+                    delay_max=config.delay_max,
+                    use_ai=config.use_ai,
+                    ai_persona=config.ai_persona,
                     schedule_type=schedule_type,
-                    interval_hours=int(self.interval_hours.value) if self.interval_hours.value and schedule_type == "interval" else 0,
-                    schedule_day_of_week=int(self.schedule_day_of_week.value) if schedule_type == "weekly" else None,
-                    reset_strategy=reset_strategy if schedule_type != "once" else "new_only",
+                    interval_hours=config.interval_hours if schedule_type == "interval" else 0,
+                    schedule_day_of_week=config.schedule_day_of_week if schedule_type == "weekly" else None,
+                    reset_strategy=config.reset_strategy if schedule_type != "once" else "new_only",
                     schedule_time=st,
                     status="pending"
                 )
@@ -3219,7 +3362,7 @@ class BatchPostPage:
                         from ...core.logger import log_warn
                         await log_warn(f"once 精度调度注册失败（将由 30min 轮询兜底）: {_sched_err}")
                 # 生成提示
-                type_labels = {"once": "单次", "daily": "每天", "weekly": "每周", "interval": f"每{self.interval_hours.value}小时"}
+                type_labels = {"once": "单次", "daily": "每天", "weekly": "每周", "interval": f"每{config.interval_hours}小时"}
                 self._show_snackbar(f"{type_labels.get(schedule_type, '')}矩阵任务已加入全域队列", "success")
                 await self.load_data()
 
@@ -3231,7 +3374,7 @@ class BatchPostPage:
                     next_st = st + timedelta(weeks=1)
                     self.schedule_time_hm.value = next_st.strftime("%H:%M")
                 elif schedule_type == "interval":
-                    step_hours = int(self.interval_hours.value) if self.interval_hours.value and int(self.interval_hours.value) > 0 else 6
+                    step_hours = config.interval_hours if config.interval_hours and config.interval_hours > 0 else 6
                     next_st = st + timedelta(hours=step_hours)
                 else:
                     next_st = st + timedelta(hours=1)
@@ -3258,11 +3401,11 @@ class BatchPostPage:
             fnames=fnames,
             accounts=selected_accounts,
             strategy=strategy,
-            total=int(self.post_count.value),
-            delay_min=float(self.min_delay.value),
-            delay_max=float(self.max_delay.value),
-            use_ai=self.use_ai_switch.value,
-            ai_persona=self.ai_persona_dropdown.value or "normal",
+            total=config.post_count,
+            delay_min=config.delay_min,
+            delay_max=config.delay_max,
+            use_ai=config.use_ai,
+            ai_persona=config.ai_persona,
             pairing_mode=pairing_mode
         )
 
@@ -3277,11 +3420,11 @@ class BatchPostPage:
                 accounts_json=json.dumps(selected_accounts, ensure_ascii=False),
                 strategy=strategy,
                 pairing_mode=pairing_mode,
-                total=int(self.post_count.value),
-                delay_min=float(self.min_delay.value),
-                delay_max=float(self.max_delay.value),
-                use_ai=self.use_ai_switch.value,
-                ai_persona=self.ai_persona_dropdown.value or "normal",
+                total=config.post_count,
+                delay_min=config.delay_min,
+                delay_max=config.delay_max,
+                use_ai=config.use_ai,
+                ai_persona=config.ai_persona,
                 schedule_type="once",
                 status="running"
             )
