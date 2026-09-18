@@ -1,5 +1,6 @@
 """Test account verification"""
 import asyncio
+import os
 import sys
 sys.path.insert(0, 'src')
 
@@ -8,9 +9,12 @@ import aiotieba
 async def test_login():
     print("测试账号登录...")
 
-    # 你的凭证
-    BDUSS = "***BDUSS_REMOVED***"
-    STOKEN = "***STOKEN_REMOVED***"
+    # 凭证从环境变量注入，勿硬编码
+    BDUSS = os.environ.get("TIEBA_BDUSS", "")
+    STOKEN = os.environ.get("TIEBA_STOKEN", "")
+    if not BDUSS:
+        print("✗ 请先设置环境变量 TIEBA_BDUSS / TIEBA_STOKEN")
+        return
 
     print(f"BDUSS 长度: {len(BDUSS)}")
     print(f"STOKEN 长度: {len(STOKEN)}")

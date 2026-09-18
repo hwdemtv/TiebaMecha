@@ -1,10 +1,11 @@
 """Test Web UI functionality directly"""
 import asyncio
+import os
 import sys
 sys.path.insert(0, 'src')
 
 from tieba_mecha.db.crud import Database, get_db
-from tieba_mecha.core import account, sign, post, crawl
+from tieba_mecha.core import account, sign, post
 
 async def test_web_functions():
     print("=" * 60)
@@ -18,8 +19,12 @@ async def test_web_functions():
 
     # 测试账号验证
     print("\n[测试账号验证]")
-    BDUSS = "***BDUSS_REMOVED***"
-    STOKEN = "***STOKEN_REMOVED***"
+    # 凭证从环境变量注入，勿硬编码
+    BDUSS = os.environ.get("TIEBA_BDUSS", "")
+    STOKEN = os.environ.get("TIEBA_STOKEN", "")
+    if not BDUSS:
+        print("✗ 请先设置环境变量 TIEBA_BDUSS / TIEBA_STOKEN")
+        return
 
     print("验证账号中...")
     valid, user_id, user_name = await account.verify_account(BDUSS, STOKEN)

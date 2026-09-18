@@ -7,17 +7,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.tieba_mecha.core.link_manager import SmartLinkConnector
 
-class MockDB:
-    """模拟数据库，用于单元测试注入配置"""
-    async def get_setting(self, key, default=""):
-        if key == "slm_api_url":
-            return "https://s.hubinwei.top"
-        if key == "slm_api_key":
-            # 填入用户刚刚生成的测试 Key
-            return "***SLM_KEY_REMOVED***"
-        return default
-
 async def test_api_integration():
+    api_key = os.environ.get("SLM_API_KEY", "")
+    if not api_key:
+        print("❌ 请先设置环境变量 SLM_API_KEY")
+        return
+
+    class MockDB:
+        """模拟数据库，用于单元测试注入配置"""
+        async def get_setting(self, key, default=""):
+            if key == "slm_api_url":
+                return "https://s.hubinwei.top"
+            if key == "slm_api_key":
+                # 从环境变量注入，勿硬编码
+                return api_key
+            return default
+
     db = MockDB()
     connector = SmartLinkConnector(db)
     
