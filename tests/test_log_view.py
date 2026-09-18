@@ -103,7 +103,7 @@ def _install_stubs():
     # Enums / type annotations that are used as types in batch_post_page.py
     flet.FilePickerResultEvent = type("FilePickerResultEvent", (), {})
     flet.FilePickerUploadEvent = type("FilePickerUploadEvent", (), {})
-    flet.CrossAxisAlignment = types.SimpleNamespace(CENTER="center", START="start", END="end")
+    flet.CrossAxisAlignment = types.SimpleNamespace(CENTER="center", START="start", END="end", STRETCH="stretch")
     flet.KeyboardType = types.SimpleNamespace(TEXT="text", NUMBER="number")
     flet.LabelPosition = types.SimpleNamespace(RIGHT="right")
     flet.NumbersOnlyInputFilter = lambda *a, **kw: None

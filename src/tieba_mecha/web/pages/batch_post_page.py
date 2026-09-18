@@ -76,8 +76,6 @@ class BatchPostPage:
         
         # 矩阵配置持久化状态
         self._selected_account_ids = set()
-        self._selected_forum_names = set()
-        self._selected_group_names = set()
         self._temp_local_fnames = []    # 本地自留区锁定的吧名
         self._temp_global_fnames = []   # 全域轰炸组锁定的吧名
         
@@ -93,37 +91,49 @@ class BatchPostPage:
         """加载页面数据"""
         if not self.db: return
         try:
-            self._tasks = await self.db.get_all_batch_tasks()
-            self._accounts = await self.db.get_matrix_accounts()
+            # 并行加载互不依赖的数据；配置项合并为一次批量查询（避免 ~15 次串行往返）
+            _setting_keys = [
+                "max_bump_count", "use_ai_rewrite", "ai_persona", "use_schedule",
+                "bump_matrix_enabled", "bump_ai_content", "bump_mode",
+                "last_selected_local_forums", "last_selected_global_forums", "last_selected_account_ids",
+            ]
+            (
+                self._tasks, self._accounts, _all_accs,
+                self._native_forums, self._target_groups,
+                self._status_counts, cache_data, _s, all_valid_forums,
+            ) = await asyncio.gather(
+                self.db.get_all_batch_tasks(),
+                self.db.get_matrix_accounts(),
+                self.db.get_accounts(),
+                self.db.get_native_post_targets(),
+                self.db.get_target_pool_groups(),
+                self.db.get_materials_status_counts(),
+                self.db.get_survival_cache_data(),
+                self.db.get_settings_bulk(_setting_keys),
+                self.db.get_all_unique_forums(),
+            )
             # 全量账号映射（用于任务队列显示账号名称，包含已封禁/停用账号）
-            _all_accs = await self.db.get_accounts()
             self._account_name_map = {a.id: (a.user_name or a.name) for a in _all_accs if a}
-            # 双擎靶位缓存
-            self._native_forums = await self.db.get_native_post_targets()
-            self._target_groups = await self.db.get_target_pool_groups()
-            
             # [持久化同步] 从数据库加载历史探测状态到内存缓存（轻量查询，只取 tid+survival_status）
-            self._status_counts = await self.db.get_materials_status_counts()
-            cache_data = await self.db.get_survival_cache_data()
             self._survival_cache.update(cache_data)
 
-# [自顶配置同步] 加载 max_bump_count 到内存缓存
-            max_bump_raw = await self.db.get_setting("max_bump_count")
+            # [自顶配置同步] 加载 max_bump_count 到内存缓存
+            max_bump_raw = _s.get("max_bump_count", "")
             self._max_bump_count = int(max_bump_raw) if max_bump_raw else 20
-            
+
             # [自顶配置同步] 恢复 AI 改写与定时执行开关状态
-            ai_raw = await self.db.get_setting("use_ai_rewrite")
+            ai_raw = _s.get("use_ai_rewrite", "")
             if ai_raw is not None:
                 self.use_ai_switch.value = ai_raw == "1"
-            
+
             # 恢复 AI 人格设定
-            persona_raw = await self.db.get_setting("ai_persona")
-            if persona_raw is not None:
+            persona_raw = _s.get("ai_persona", "")
+            if persona_raw:
                 self.ai_persona_dropdown.value = persona_raw
             else:
                 self.ai_persona_dropdown.value = "normal"
-            
-            sched_raw = await self.db.get_setting("use_schedule")
+
+            sched_raw = _s.get("use_schedule", "")
             if sched_raw is not None:
                 self.use_schedule.value = sched_raw == "1"
                 # 恢复定时输入框的可见性
@@ -133,34 +143,33 @@ class BatchPostPage:
                         st = self.schedule_type_dropdown.value or "once"
                         if hasattr(self, '_update_schedule_visibility'):
                             self._update_schedule_visibility(st)
-            
+
             # [自顶配置同步] 恢复矩阵协同模式开关
-            matrix_raw = await self.db.get_setting("bump_matrix_enabled")
+            matrix_raw = _s.get("bump_matrix_enabled", "")
             if matrix_raw is not None:
                 self.bump_matrix_switch.value = matrix_raw == "1"
-            
+
             # [自顶配置同步] 恢复 AI自顶内容开关
-            bump_ai_raw = await self.db.get_setting("bump_ai_content")
+            bump_ai_raw = _s.get("bump_ai_content", "")
             if bump_ai_raw is not None:
                 self.bump_ai_content_switch.value = bump_ai_raw == "1"
-            
+
             # [自顶配置同步] 恢复自顶模式
-            bump_mode_raw = await self.db.get_setting("bump_mode")
+            bump_mode_raw = _s.get("bump_mode", "")
             if bump_mode_raw is not None and hasattr(self, "bump_mode_group"):
                 self.bump_mode_group.value = bump_mode_raw
                 self.bump_loop_container.visible = (bump_mode_raw == "matrix_loop")
-            
+
             # [持久化同步] 恢复上次选中的贴吧 (分本地/全域两组独立)
             # [修复] 校验持久化贴吧是否仍然有效（排除已隐藏/已封禁/已删除的贴吧）
-            all_valid_forums = await self.db.get_all_unique_forums()
             valid_fnames = {f['fname'] for f in all_valid_forums if not f['is_banned']}
-            last_local_raw = await self.db.get_setting("last_selected_local_forums")
+            last_local_raw = _s.get("last_selected_local_forums", "")
             if last_local_raw:
                 try:
                     restored = json.loads(last_local_raw)
                     self._temp_local_fnames = [fn for fn in restored if fn in valid_fnames]
                 except Exception: pass
-            last_global_raw = await self.db.get_setting("last_selected_global_forums")
+            last_global_raw = _s.get("last_selected_global_forums", "")
             if last_global_raw:
                 try:
                     restored = json.loads(last_global_raw)
@@ -169,7 +178,7 @@ class BatchPostPage:
             self._update_forum_select_btn()
 
             # [持久化同步] 恢复上次选中的账号
-            last_acc_raw = await self.db.get_setting("last_selected_account_ids")
+            last_acc_raw = _s.get("last_selected_account_ids", "")
             has_last_acc = False
             if last_acc_raw:
                 try:
@@ -193,7 +202,6 @@ class BatchPostPage:
             
             self._refresh_task_list()
             self._refresh_account_pool()
-            self._refresh_forum_pool()
             await self._refresh_material_table()
 
             # [持久化同步] 从数据库加载最近的流水记录
@@ -410,55 +418,6 @@ class BatchPostPage:
             except Exception:
                 pass
 
-    def _refresh_forum_pool(self):
-        """刷新贴吧池选择器 UI（用于兼容的本地吧列表）"""
-        if hasattr(self, "forum_pool_column"):
-            items = []
-            for fname in self._native_forums:
-                cb = ft.Checkbox(
-                    label=fname,
-                    value=fname in self._selected_forum_names,
-                    data=fname,
-                    fill_color="green",  # 标记为安全的本土吧
-                    on_change=self._on_forum_select_change
-                )
-                items.append(cb)
-            
-            self.forum_pool_column.controls = items
-            
-            # 同时也刷新靶标组
-            if hasattr(self, "global_group_column"):
-                g_items = []
-                for g in self._target_groups:
-                    cb = ft.Checkbox(
-                        label=g,
-                        value=g in self._selected_group_names,
-                        data=g,
-                        fill_color="red", # 标记为轰炸大池
-                        on_change=self._on_group_select_change
-                    )
-                    g_items.append(cb)
-                    
-                if not g_items:
-                    g_items.append(ft.Container(
-                        content=ft.Text("尚无任何全域轰炸组数据\n请点击右上角【录入新靶群】", color="onSurfaceVariant", text_align="center", size=12),
-                        alignment=ft.alignment.center,
-                        height=150
-                    ))
-                self.global_group_column.controls = g_items
-
-            self.page.update()
-
-    def _filter_checkboxes(self, container: ft.Column, text: str):
-        """过滤列表中的复选框"""
-        for cb in container.controls:
-            if isinstance(cb, ft.Checkbox):
-                cb.visible = text.lower() in cb.label.lower()
-        try:
-            container.update()
-        except Exception:
-            pass
-
     def _toggle_select_all(self, container: ft.Column, value: bool):
         """批量全选/取消"""
         for cb in container.controls:
@@ -468,12 +427,6 @@ class BatchPostPage:
                 if container == self.account_pool_column:
                     if value: self._selected_account_ids.add(cb.data)
                     else: self._selected_account_ids.discard(cb.data)
-                elif container == self.forum_pool_column:
-                    if value: self._selected_forum_names.add(cb.data)
-                    else: self._selected_forum_names.discard(cb.data)
-                elif hasattr(self, "global_group_column") and container == self.global_group_column:
-                    if value: self._selected_group_names.add(cb.data)
-                    else: self._selected_group_names.discard(cb.data)
         try:
             container.update()
         except Exception:
@@ -498,106 +451,6 @@ class BatchPostPage:
         if self.db:
             ids_json = json.dumps(list(self._selected_account_ids))
             self.page.run_task(self.db.set_setting, "last_selected_account_ids", ids_json)
-
-    def _on_forum_select_change(self, e):
-        fname = e.control.data
-        if e.control.value: self._selected_forum_names.add(fname)
-        else: self._selected_forum_names.discard(fname)
-
-    def _on_group_select_change(self, e):
-        group_name = e.control.data
-        if e.control.value: self._selected_group_names.add(group_name)
-        else: self._selected_group_names.discard(group_name)
-
-    def _toggle_select_all_forums(self, e):
-        """全选/取消贴吧 (保留兼容旧版逻辑)"""
-        self._toggle_select_all(self.forum_pool_column, e.control.value)
-
-
-    async def _open_native_forum_config(self, e):
-        """查看本机原发安全圈状态（自动判定，不可手动切换）"""
-        # 先自动同步，确保数据最新
-        await self.db.auto_sync_post_target()
-        forums = await self.db.get_all_unique_forums()
-        
-        forum_list_container = ft.Column(spacing=5, height=300, scroll=ft.ScrollMode.ADAPTIVE)
-
-        def build_items(filter_text=""):
-            items = []
-            safe_count = 0
-            unsafe_count = 0
-            for f in forums:
-                if filter_text.lower() in f['fname'].lower():
-                    is_safe = f['is_post_target']
-                    if is_safe:
-                        safe_count += 1
-                    else:
-                        unsafe_count += 1
-                    items.append(
-                        ft.Row([
-                            ft.Icon(icons.SHIELD_ROUNDED if is_safe else icons.SHIELD_OUTLINED,
-                                    size=16, color="green" if is_safe else "error"),
-                            ft.Text(f['fname'], size=12, weight="bold" if is_safe else None,
-                                    color="onSurface" if is_safe else "onSurfaceVariant"),
-                            ft.Text("安全" if is_safe else ("封禁" if f.get('is_banned') else "有删帖记录"),
-                                    size=10, color="green" if is_safe else "error"),
-                        ], spacing=6)
-                    )
-            summary_text.value = f"✅ 安全: {safe_count} 个 | ⚠️ 不安全: {unsafe_count} 个"
-            return items
-
-        def on_search(e):
-            forum_list_container.controls = build_items(e.control.value)
-            try:
-                try:
-                    forum_list_container.update()
-                    summary_text.update()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        summary_text = ft.Text("", size=12, weight="bold")
-
-        search_field = ft.TextField(
-            hint_text="搜索贴吧名...",
-            prefix_icon=icons.SEARCH,
-            on_change=on_search,
-            expand=True,
-            height=40,
-            text_size=12,
-            content_padding=10
-        )
-
-        forum_list_container.controls = build_items()
-
-        if not forums:
-            forum_list_container.controls.append(ft.Text("系统内无吧数据，请先于Dashboard运行签到或同步关注贴吧！", color="error"))
-
-        async def close_dialog(_):
-            self.page.close(dialog)
-            await self.load_data()
-            self._refresh_forum_pool()
-            self.page.update()
-
-        dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED, color="green"), ft.Text("安全原初打法状态（自动判定）")]),
-            content=ft.Column([
-                ft.Text("本土作战许可已改为自动判定：未封禁且无删帖记录 = 安全", size=11, color="onSurfaceVariant"),
-                summary_text,
-                ft.Row([search_field], spacing=10),
-                ft.Container(
-                    content=forum_list_container,
-                    border=ft.border.all(1, with_opacity(0.1, "green")),
-                    border_radius=8,
-                    padding=5
-                )
-            ], tight=True, width=450, spacing=10),
-            actions=[
-                ft.FilledButton("确认返回", icon=icons.CHECK_CIRCLE_ROUNDED, on_click=close_dialog, style=ft.ButtonStyle(bgcolor="green", color="white"))
-            ]
-        )
-        self.page.open(dialog)
 
     def _open_add_target_pool_dialog(self, e):
         """打开导入全域靶场弹窗"""
@@ -766,8 +619,8 @@ class BatchPostPage:
                         on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
                         cells=[
                             ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Text(display_t, tooltip=m_title)),
-                            ft.DataCell(ft.Text(display_c, tooltip=m_content)),
+                            ft.DataCell(ft.Container(ft.Text(display_t, size=12, tooltip=m_title), width=170)),
+                            ft.DataCell(ft.Container(ft.Text(display_c, size=12, tooltip=m_content), width=200)),
                             ft.DataCell(
                                 ft.Row([
                                     ft.Icon(status_icon, color=status_color, size=14),
@@ -899,7 +752,7 @@ class BatchPostPage:
                         on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_archive_row_select, mid, e.data),
                         cells=[
                             ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Text(display_t, tooltip=m_title)),
+                            ft.DataCell(ft.Container(ft.Text(display_t, size=12, tooltip=m_title), width=200)),
                             ft.DataCell(ft.Text(m_posted_fname, weight=ft.FontWeight.BOLD, color="primary")),
                             ft.DataCell(ft.Text(
                                 next((a.name for a in self._accounts if a.id == m.posted_account_id), f"账号-{m.posted_account_id}" if m.posted_account_id else "-"),
@@ -1317,30 +1170,6 @@ class BatchPostPage:
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.open(dialog)
-
-    async def _reset_all_materials(self, e=None):
-        await self.db.reset_materials_status()
-        await self._refresh_material_table()
-        if e: self._show_snackbar("所有已发送的物料状态和锁已强行卸除", "success")
-
-    async def _export_materials(self, e):
-        import csv, os
-        from datetime import datetime
-        # 导出全部物料（不受分页限制）
-        all_materials = await self.db.get_materials(limit=None)
-        if not all_materials:
-            self._show_snackbar("无可导出的物料", "warning")
-            return
-        
-        try:
-            filename = f"materials_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            with open(filename, "w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["ID", "Title", "Content", "Status", "AI_Status"])
-                for m in all_materials:
-                    writer.writerow([m.id, m.title, m.content, m.status, m.ai_status])
-        except Exception:
-            pass
 
     async def _on_material_select_all(self, e):
         # 跨页全选：从数据库查询所有符合条件的 ID
@@ -2143,14 +1972,13 @@ class BatchPostPage:
                     groups_container.controls.append(ft.Column(controls, spacing=0))
                 try:
                     groups_container.update()
-                except Exception as ex:
-                    print(f"[DEBUG] refresh_group_items update error: {ex}")
-            except Exception as ex:
-                print(f"[DEBUG] refresh_group_items error: {ex}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         async def render_groups():
             """初始化渲染分组列表"""
-            print(f"[DEBUG] render_groups called, target_groups={target_groups}")
             await refresh_group_items()
         
         async def on_global_lock(_):
@@ -2397,7 +2225,7 @@ class BatchPostPage:
                     self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
-                    content=ft.ListView([self._material_table], expand=True),
+                    content=ft.ListView([ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)], expand=True),
                     expand=True,
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
@@ -2483,7 +2311,7 @@ class BatchPostPage:
                     self._archive_bulk_actions,
                 ], spacing=10),
                 ft.Container(
-                    content=ft.ListView([self._archive_table], expand=True),
+                    content=ft.ListView([ft.Row([self._archive_table], scroll=ft.ScrollMode.ADAPTIVE)], expand=True),
                     expand=True,
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
@@ -2513,7 +2341,6 @@ class BatchPostPage:
         self._status_counts = {}
 
         # 1. 贴吧选择
-        self.forum_pool_column = ft.Column(spacing=2, height=120, scroll=ft.ScrollMode.ADAPTIVE)
         self.forum_select_btn = ft.OutlinedButton(
             "点击选择目标贴吧",
             icon=icons.TOUCH_APP_ROUNDED,
@@ -2719,18 +2546,23 @@ class BatchPostPage:
         
         # 4. 账号与策略
         self.strategy_dropdown = ft.Dropdown(
-            label="账号调度策略", value="round_robin", expand=1, text_size=12,
+            label="账号调度策略", value="round_robin", text_size=12,
             options=[
-                ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"), 
+                ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"),
                 ft.dropdown.Option("strict_round_robin", "严格轮询 (Strict RR)"),
                 ft.dropdown.Option("random", "随机 (Random)")
             ]
         )
         self.pairing_mode_dropdown = ft.Dropdown(
-            label="文案提取模式", value="random", expand=1, text_size=12,
+            label="文案提取模式", value="random", text_size=12,
             options=[ft.dropdown.Option("random", "随机混用 (防抽混淆)"), ft.dropdown.Option("strict", "严格配对 (发多资源)")]
         )
-        self._strategy_row = ft.Row([self.strategy_dropdown, self.pairing_mode_dropdown], spacing=10)
+        # 纵向堆叠并横向拉伸，避免窄栏内互相挤压截断（expand 在 Column 里是纵向拉伸，不能用）
+        self._strategy_row = ft.Column(
+            [self.strategy_dropdown, self.pairing_mode_dropdown],
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
         
         # 4.1 自顶配置控件
         self.bump_max_count_field = ft.TextField(
@@ -2873,10 +2705,10 @@ class BatchPostPage:
             selected_index=0,
             animation_duration=300,
             tabs=[
-                ft.Tab(text="全域任务队列", icon=icons.UPDATE_ROUNDED, content=self._build_task_queue_view()),
-                ft.Tab(text="物料排期池", icon=icons.LIST_ALT_ROUNDED, content=self._build_material_view()),
-                ft.Tab(text="已发归档库", icon=icons.ARCHIVE_ROUNDED, content=self._build_archive_view()),
-                ft.Tab(text="实时任务流水", icon=icons.STREAM_ROUNDED, content=self._build_log_view()),
+                ft.Tab(text="任务中心", icon=icons.UPDATE_ROUNDED, content=self._build_task_queue_view()),
+                ft.Tab(text="待发物料", icon=icons.LIST_ALT_ROUNDED, content=self._build_material_view()),
+                ft.Tab(text="已发归档", icon=icons.ARCHIVE_ROUNDED, content=self._build_archive_view()),
+                ft.Tab(text="运行日志", icon=icons.STREAM_ROUNDED, content=self._build_log_view()),
             ],
             expand=True,
         )
@@ -2940,7 +2772,7 @@ class BatchPostPage:
                             ], spacing=10),
                             padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                         ),
-                    ], expand=2, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),
+                    ], expand=3, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),
 
                     # 第二栏：核心操作区 (Center, expand=5，最宽)
                     ft.Column([
@@ -2969,7 +2801,7 @@ class BatchPostPage:
                         ),
                         # 底部标签页
                         self.bottom_tabs,
-                    ], expand=6, spacing=15),
+                    ], expand=5, spacing=15),
 
                     # 第三栏：账号池管理 (Right, expand=3)
                     ft.Column([
@@ -3038,13 +2870,12 @@ class BatchPostPage:
                 ft.IconButton(icons.REFRESH, on_click=lambda e: self.page.run_task(self.load_data)),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(
-                content=ft.ListView([self.task_table], expand=True), expand=True,
+                content=ft.ListView([ft.Row([self.task_table], scroll=ft.ScrollMode.ADAPTIVE)], expand=True), expand=True,
                 border=ft.border.all(1, with_opacity(0.05, "onSurface")), border_radius=8,
             )
         ], spacing=10, expand=True)
 
     def _build_task_row(self, t, index):
-        import json
         status_color = {"pending": "orange", "running": "primary", "completed": "green", "failed": "error"}.get(t.status, "onSurface")
         
         # 优化贴吧列表显示
@@ -3095,7 +2926,7 @@ class BatchPostPage:
             ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(_format_schedule_display(t))),
-            ft.DataCell(ft.Text(t.status.upper(), color=status_color, weight=ft.FontWeight.BOLD)),
+            ft.DataCell(ft.Text({"pending": "待执行", "running": "运行中", "completed": "已完成", "failed": "失败"}.get(t.status, t.status), color=status_color, weight=ft.FontWeight.BOLD)),
             ft.DataCell(ft.Text(f"{t.progress}/{t.total}")),
             ft.DataCell(
                 ft.Row([
@@ -3113,7 +2944,6 @@ class BatchPostPage:
     async def _on_delete_task(self, task):
         task_id = task.id
         # 尝试获取任务描述
-        import json
         try:
             fnames = json.loads(task.fnames_json) if hasattr(task, "fnames_json") and task.fnames_json else []
             task_desc = fnames[0] if fnames else (task.fname or str(task_id))
@@ -3231,9 +3061,6 @@ class BatchPostPage:
                 upload_dir = os.path.join(root_dir, "uploads")
 
             file_server_path = os.path.join(upload_dir, e.file_name)
-            
-            print(f"[DEBUG] 上传完成，探测目录: {upload_dir}")
-            print(f"[DEBUG] 查找目标文件: {file_server_path}")
 
             # 等待 1.0s 确保 OS 文件句柄释放且缓冲区落盘
             await asyncio.sleep(1.0)
@@ -3261,8 +3088,6 @@ class BatchPostPage:
         """通用的文本/CSV物料解析与持久化逻辑"""
         pairs = []
         try:
-            print(f"[DEBUG] 开始处理文件导入: {file_path}")
-
             if file_path.lower().endswith(".txt"):
                 # 使用 utf-8-sig 兼容带/不带 BOM 的文本
                 with open(file_path, "r", encoding="utf-8-sig") as f:
@@ -3280,21 +3105,17 @@ class BatchPostPage:
                         elif len(row) == 1 and row[0].strip():
                             pairs.append(("暂无标题", row[0].strip()))
 
-            print(f"[DEBUG] 解析到 {len(pairs)} 条数据")
-
             if not pairs:
                 self._show_snackbar("文件内容为空或格式不匹配，未导入任何数据", "warning")
                 return
 
             added_count = await self.db.add_materials_bulk(pairs)
-            print(f"[DEBUG] 写入数据库: {added_count} 条")
 
             await self._refresh_material_table()
             self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")
         except Exception as ex:
-            print(f"[ERROR] 文件导入失败: {str(ex)}")
-            import traceback
-            traceback.print_exc()
+            from ...core.logger import log_error
+            await log_error(f"文件导入失败: {ex}")
             self._show_snackbar(f"文件解析失败: {str(ex)}", "error")
 
     async def _on_start_click(self, e):
@@ -3337,7 +3158,6 @@ class BatchPostPage:
             if not fnames: error_details.append("目标贴吧库为空")
             if not pending_m: error_details.append("排期池无待发物料 (需手动回炉或重新导入)")
             
-            print(f"[VALIDATION FAIL] {', '.join(error_details)}")
             self._show_snackbar(f"发射拦截：{', '.join(error_details)}", "error")
             return
             
@@ -3396,7 +3216,8 @@ class BatchPostPage:
                         from ...core.daemon import daemon_instance
                         daemon_instance.schedule_once_task(str(new_task.id), st)
                     except Exception as _sched_err:
-                        print(f"[SCHED] once 精度调度注册失败（将由 30min 轮询兜底）: {_sched_err}")
+                        from ...core.logger import log_warn
+                        await log_warn(f"once 精度调度注册失败（将由 30min 轮询兜底）: {_sched_err}")
                 # 生成提示
                 type_labels = {"once": "单次", "daily": "每天", "weekly": "每周", "interval": f"每{self.interval_hours.value}小时"}
                 self._show_snackbar(f"{type_labels.get(schedule_type, '')}矩阵任务已加入全域队列", "success")

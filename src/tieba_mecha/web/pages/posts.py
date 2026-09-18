@@ -2,6 +2,7 @@
 
 import asyncio
 import flet as ft
+from types import SimpleNamespace
 from ..flet_compat import COLORS
 import csv
 import os
@@ -78,17 +79,10 @@ class PostsPage:
             # 将 ThreadRecord 转换为类似 Threads 对象的结构
             self._threads = []
             for r in records:
-                # 创建简单的数据类来存储帖子信息
-                class ThreadData:
-                    pass
-                t = ThreadData()
-                t.tid = int(r.tid)
-                t.title = r.title
-                t.author_name = r.author_name
-                t.reply_num = r.reply_num
-                t.text = r.text
-                t.fname = r.fname
-                t.is_good = r.is_good
+                t = SimpleNamespace(
+                    tid=int(r.tid), title=r.title, author_name=r.author_name,
+                    reply_num=r.reply_num, text=r.text, fname=r.fname, is_good=r.is_good,
+                )
                 self._threads.append(t)
 
             self._is_from_db = True
@@ -206,7 +200,7 @@ class PostsPage:
         self.remove_local_btn = ft.TextButton("移除记录", icon=icons.DELETE_OUTLINE, icon_color="onSurfaceVariant", on_click=self._remove_selected_local, visible=False)
         self.delete_server_btn = ft.TextButton("物理抹除", icon=icons.DELETE_FOREVER_OUTLINED, icon_color="error", on_click=self._delete_selected, visible=False)
 
-        self.toolbar_label = ft.Text("监控列表", size=14, weight=ft.FontWeight.W_500)
+        self.toolbar_label = ft.Text("帖子管理与监控", size=14, weight=ft.FontWeight.W_500)
 
         self.toolbar = ft.Row([
             self.toolbar_label,
@@ -219,6 +213,7 @@ class PostsPage:
         ], visible=True)
 
         list_area = ft.Column([
+            ft.Text("已发布帖子", size=12, color="onSurfaceVariant"),
             ft.Row([
                 self.search_forum,
                 self.search_keyword,
@@ -335,9 +330,9 @@ class PostsPage:
                             ),
                         ], spacing=10),
                     ], expand=True, spacing=2),
-                    # 本地移除按钮 (垃圾桶)
+                    # 本地移除按钮（与服务器端删除在视觉上区分：圆形叉 = 仅本地）
                     ft.IconButton(
-                        icons.DELETE_OUTLINE,
+                        icons.REMOVE_CIRCLE_OUTLINED,
                         icon_color="onSurfaceVariant",
                         icon_size=18,
                         tooltip="移除记录 (仅本地)",
@@ -527,6 +522,7 @@ class PostsPage:
             # 自动保存到物料池
             await self.db.add_materials_bulk([(title, content)])
             # 更新刚添加的物料状态为已发布
+            account = await self.db.get_active_account()
             materials = await self.db.get_materials(status=None, limit=10)
             for m in materials:
                 if m.title == title and m.content == content and m.status == "pending":
@@ -535,12 +531,11 @@ class PostsPage:
                         m.id, "success",
                         posted_fname=fname,
                         posted_tid=tid,
-                        posted_account_id=(await self.db.get_active_account()).id if await self.db.get_active_account() else None,
+                        posted_account_id=account.id if account else None,
                         posted_time=datetime.now()
                     )
                     break
             # 保存帖子记录到本地数据库，以便在列表中显示
-            account = await self.db.get_active_account()
             await self.db.upsert_thread_records([{
                 "tid": tid,
                 "title": title,
@@ -580,15 +575,6 @@ class PostsPage:
             self.post_status.color = "error"
 
         self.page.update()
-
-    async def _delete_thread(self, tid):
-        # 简单处理，直接调用
-        success, msg = await delete_thread(self.db, self._current_fname, tid)
-        if success:
-            self._show_snackbar("帖子已从服务器抹除", "info")
-            await self._do_search(None)
-        else:
-            self._show_snackbar(msg, "error")
 
     async def _remove_local_record(self, tid):
         """仅从本地数据库移除记录"""

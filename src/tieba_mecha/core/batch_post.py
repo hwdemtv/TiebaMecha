@@ -1510,7 +1510,12 @@ class BatchPostManager:
                 
                 return False
 
-    async def unfollow_forums_bulk(self, fnames: list[str], progress_callback=None):
+    async def unfollow_forums_bulk(
+        self,
+        fnames: list[str],
+        progress_callback=None,
+        account_ids: list[int] | None = None,
+    ):
         """
         批量取消关注并清理数据库记录。
         内置反风控防护：PerAccountRateLimiter / CaptchaCircuitBreaker /
@@ -1525,8 +1530,12 @@ class BatchPostManager:
         await failure_breaker.load()
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
-        # 1. 识别受影响的账号
-        account_ids = await self.db.get_account_ids_following_forums(fnames)
+        # 1. 识别受影响的账号；账号详情页可限制为单个账号取关。
+        all_affected_account_ids = await self.db.get_account_ids_following_forums(fnames)
+        if account_ids is None:
+            account_ids = all_affected_account_ids
+        else:
+            account_ids = [aid for aid in account_ids if aid in all_affected_account_ids]
 
         # 跟踪每个账号成功取关的贴吧 {(account_id, fname)}
         successful_unfollows: set[tuple[int, str]] = set()
@@ -1633,7 +1642,7 @@ class BatchPostManager:
                 await session.commit()
 
             # 仅当所有贴吧的所有账号都成功取关时，才清理靶场数据
-            all_pairs = {(acc_id, fname) for acc_id in account_ids for fname in fnames}
+            all_pairs = {(acc_id, fname) for acc_id in all_affected_account_ids for fname in fnames}
             if successful_unfollows == all_pairs:
                 del_target_count = await self.db.delete_target_pool_by_fnames(fnames)
                 await log_info(f"全局阵地清理完成：移除了 {del_membership_count} 条关注记录，移除了 {del_target_count} 个靶场目标。")

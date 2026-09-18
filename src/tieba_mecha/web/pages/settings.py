@@ -37,30 +37,54 @@ class SettingsPage:
         
         # 守护任务状态
         self._jobs_info = []
+        # 后台触发任务引用池（防止任务被 GC 后异常无声丢失）
+        self._bg_tasks: set = set()
 
     async def load_data(self):
         """同步数据库中的配置项"""
         if not self.db: return
-        
-        # 1. 加载核心配置
-        raw_key = await self.db.get_setting("ai_api_key", "")
-        self._settings["ai_api_key"] = _decrypt_api_key(raw_key)
-        self._settings["ai_base_url"] = await self.db.get_setting("ai_base_url", "https://open.bigmodel.cn/api/paas/v4/")
-        self._settings["ai_model"] = await self.db.get_setting("ai_model", "glm-4-flash")
-        self._settings["ai_system_prompt"] = await self.db.get_setting("ai_system_prompt", "")
-        self._settings["proxy_fallback"] = await self.db.get_setting("proxy_fallback", "false") == "true"
-        self._settings["heartbeat_interval"] = await self.db.get_setting("heartbeat_interval", "2")
-        self._settings["delay_min"] = await self.db.get_setting("delay_min", "5.0")
-        self._settings["delay_max"] = await self.db.get_setting("delay_max", "15.0")
-        self._settings["quiet_start"] = await self.db.get_setting("quiet_start", "01:00")
-        self._settings["quiet_end"] = await self.db.get_setting("quiet_end", "06:00")
-        
-        # 2. 加载外部短链系统配置
-        self._settings["slm_api_url"] = await self.db.get_setting("slm_api_url", "https://s.hubinwei.top")
-        self._settings["slm_api_key"] = await self.db.get_setting("slm_api_key", "")
-        
+
+        # 1-6. 一次性批量加载所有配置键（避免 ~20 次串行查询）
+        _d = {
+            "ai_base_url": "https://open.bigmodel.cn/api/paas/v4/",
+            "ai_model": "glm-4-flash",
+            "heartbeat_interval": "2",
+            "delay_min": "5.0",
+            "delay_max": "15.0",
+            "quiet_start": "01:00",
+            "quiet_end": "06:00",
+            "slm_api_url": "https://s.hubinwei.top",
+            "obfuscator_density": "0.1",
+            "obfuscator_symbols": "true",
+            "obfuscator_spacing": "true",
+            "obfuscator_shuffling": "true",
+            **self._maint_config,
+        }
+        _keys = [
+            "ai_api_key", "ai_base_url", "ai_model", "ai_system_prompt", "proxy_fallback",
+            "heartbeat_interval", "delay_min", "delay_max", "quiet_start", "quiet_end",
+            "slm_api_url", "slm_api_key", "license_key",
+            "obfuscator_density", "obfuscator_symbols", "obfuscator_spacing", "obfuscator_shuffling",
+            *self._maint_config.keys(),
+        ]
+        raw = await self.db.get_settings_bulk(_keys, _d)
+
+        self._settings["ai_api_key"] = _decrypt_api_key(raw["ai_api_key"])
+        self._settings["ai_base_url"] = raw["ai_base_url"]
+        self._settings["ai_model"] = raw["ai_model"]
+        self._settings["ai_system_prompt"] = raw["ai_system_prompt"]
+        self._settings["proxy_fallback"] = raw["proxy_fallback"] == "true"
+        self._settings["heartbeat_interval"] = raw["heartbeat_interval"]
+        self._settings["delay_min"] = raw["delay_min"]
+        self._settings["delay_max"] = raw["delay_max"]
+        self._settings["quiet_start"] = raw["quiet_start"]
+        self._settings["quiet_end"] = raw["quiet_end"]
+
+        self._settings["slm_api_url"] = raw["slm_api_url"]
+        self._settings["slm_api_key"] = raw["slm_api_key"]
+
         # 3. 加载授权配置
-        self._settings["license_key"] = await self.db.get_setting("license_key", "")
+        self._settings["license_key"] = raw["license_key"]
         am = await get_auth_manager()
         self._settings["hwid"] = await am.get_hwid()
 
@@ -68,14 +92,14 @@ class SettingsPage:
         self._settings["web_password_set"] = await is_password_set(self.db)
 
         # 5. 加载风控参数
-        self._settings["obfuscator_density"] = await self.db.get_setting("obfuscator_density", "0.1")
-        self._settings["obfuscator_symbols"] = await self.db.get_setting("obfuscator_symbols", "true") == "true"
-        self._settings["obfuscator_spacing"] = await self.db.get_setting("obfuscator_spacing", "true") == "true"
-        self._settings["obfuscator_shuffling"] = await self.db.get_setting("obfuscator_shuffling", "true") == "true"
+        self._settings["obfuscator_density"] = raw["obfuscator_density"]
+        self._settings["obfuscator_symbols"] = raw["obfuscator_symbols"] == "true"
+        self._settings["obfuscator_spacing"] = raw["obfuscator_spacing"] == "true"
+        self._settings["obfuscator_shuffling"] = raw["obfuscator_shuffling"] == "true"
 
         # 6. 加载养号配置与日志
         for key in self._maint_config.keys():
-            self._maint_config[key] = await self.db.get_setting(key, self._maint_config[key])
+            self._maint_config[key] = raw[key]
         
         # 启动养号日志流（含历史回放，仅 [BioWarming] 相关，幂等）
         if hasattr(self, "log_stream"):
@@ -308,16 +332,22 @@ class SettingsPage:
                    ft.OutlinedButton("移除密码", icon=icons.BLOCK, on_click=self._clear_password)]),
         ], spacing=15)
 
+        # 将低频的授权与访问安全收拢，避免一级菜单横向过多。
+        security_tab = ft.Column([
+            auth_tab,
+            ft.Divider(height=24, color=with_opacity(0.1, "onSurface")),
+            web_sec_tab,
+        ], spacing=10, scroll=ft.ScrollMode.AUTO)
+
         self.tabs = ft.Tabs(
             selected_index=0, animation_duration=300,
             tabs=[
-                ft.Tab(text="通用", icon=icons.SETTINGS_OUTLINED, content=general_tab),
+                ft.Tab(text="AI 与网络", icon=icons.SETTINGS_OUTLINED, content=general_tab),
                 ft.Tab(text="养号", icon=ft.icons.SHIELD_MOON_OUTLINED, content=maint_tab),
-                ft.Tab(text="守护", icon=ft.icons.AUTO_MODE_ROUNDED, content=daemon_tab),
-                ft.Tab(text="风控", icon=ft.icons.SHIELD_ROUNDED, content=obf_tab),
-                ft.Tab(text="授权", icon=icons.VPN_KEY_ROUNDED, content=auth_tab),
+                ft.Tab(text="任务守护", icon=ft.icons.AUTO_MODE_ROUNDED, content=daemon_tab),
+                ft.Tab(text="内容风控", icon=ft.icons.SHIELD_ROUNDED, content=obf_tab),
+                ft.Tab(text="授权与安全", icon=icons.SECURITY, content=security_tab),
                 ft.Tab(text="更新", icon=ft.icons.DOWNLOAD_ROUNDED, content=update_tab),
-                ft.Tab(text="安全", icon=icons.SECURITY, content=web_sec_tab),
             ],
             expand=True,
         )
@@ -419,7 +449,13 @@ class SettingsPage:
     async def _trigger_daemon_job(self, job_id: str):
         func = self.JOB_FUNCS.get(job_id)
         if func:
-            self._show_snackbar(f"正在触发: {job_id}"); asyncio.create_task(func()) if asyncio.iscoroutinefunction(func) else func()
+            self._show_snackbar(f"正在触发: {job_id}")
+            if asyncio.iscoroutinefunction(func):
+                task = asyncio.create_task(func())
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+            else:
+                func()
         else: self._show_snackbar("未找到执行函数", "error")
 
     async def _toggle_daemon_job(self, job_id: str, active: bool):
@@ -454,7 +490,7 @@ class SettingsPage:
 
     # 复用授权、更新、密码逻辑
     async def _verify_license_online(self, e):
-        btn = e.control if e else getattr(self, "_license_verify_btn", None)
+        btn = e.control
         try:
             if btn:
                 btn.disabled = True
@@ -472,7 +508,7 @@ class SettingsPage:
                 self.page.update()
 
     async def _manual_check_update(self, e):
-        btn = e.control if e else getattr(self, "_check_update_btn", None)
+        btn = e.control
         try:
             if btn:
                 btn.disabled = True
@@ -492,7 +528,7 @@ class SettingsPage:
                 self.page.update()
 
     async def _change_password(self, e):
-        btn = e.control if e else getattr(self, "_change_pwd_btn", None)
+        btn = e.control
         try:
             if btn:
                 btn.disabled = True

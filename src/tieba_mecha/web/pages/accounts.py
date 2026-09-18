@@ -45,30 +45,26 @@ class AccountsPage:
         self._matrix_page_size = 20
         self._matrix_filtered_count = 0
         
-        # 存活分析数据
-        self._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
-        self._survival_by_account = []
-        self._survival_search_text = ""
 
     async def load_data(self):
-        """加载数据"""
+        """加载数据（相互独立的查询并行执行）"""
         if not self.db:
             return
-        
-        # 加载账号
-        self._accounts = await list_accounts(self.db)
-        active_acc = await self.db.get_active_account()
+
+        # 并行加载互不依赖的数据
+        (
+            self._accounts,
+            active_acc,
+            self._proxies,
+        ) = await asyncio.gather(
+            list_accounts(self.db),
+            self.db.get_active_account(),
+            self.db.get_active_proxies(),
+        )
         self._active_id = active_acc.id if active_acc else None
-        
-        # 加载代理列表用于下拉框
-        self._proxies = await self.db.get_active_proxies()
 
         # 加载全吧库统计
         await self._refresh_matrix_stats()
-        
-        # 加载存活统计数据
-        self._survival_stats = await self.db.get_survival_stats()
-        self._survival_by_account = await self.db.get_survival_by_account()
 
         # [Fix 2] 预加载异常事件数据，避免首次进入 tab 时空白
         if hasattr(self, "exception_list"):
@@ -155,14 +151,8 @@ class AccountsPage:
             self._update_matrix_header()
             self.page.update()
 
-        # 存活分析
-        if hasattr(self, "survival_list") and current_tab == 2:
-            self.survival_list.controls = self._build_survival_items()
-            self._update_survival_header()
-            self.page.update()
-
         # 异常记录
-        if hasattr(self, "exception_list") and current_tab == 3:
+        if hasattr(self, "exception_list") and current_tab == 2:
             self.page.run_task(self._load_exception_events)
 
     def build(self) -> ft.Control:
@@ -180,11 +170,6 @@ class AccountsPage:
                     text="全域战略吧库",
                     icon=icons.HUB_ROUNDED,
                     content=self._build_strategic_tab(),
-                ),
-                ft.Tab(
-                    text="存活分析",
-                    icon=icons.MONITOR_HEART_ROUNDED,
-                    content=self._build_survival_tab(),
                 ),
                 ft.Tab(
                     text="异常记录",
@@ -232,6 +217,12 @@ class AccountsPage:
                     spacing=0,
                 ),
                 ft.Container(expand=True),
+                ft.OutlinedButton(
+                    "存活分析",
+                    icon=icons.MONITOR_HEART_ROUNDED,
+                    tooltip="在分析与风控中心查看账号存活与行为审计",
+                    on_click=lambda e: self._navigate("survival"),
+                ),
                 ft.Row([
                     ft.Text("Antigravity AI 矩阵指挥模块", size=10, color=with_opacity(0.3, "onSurface")),
                     ft.Icon(icons.SHIELD_ROUNDED, size=16, color=with_opacity(0.3, "onSurface")),
@@ -422,11 +413,6 @@ class AccountsPage:
             on_click=self._bulk_matrix_edit_tag,
             visible=False,
         )
-        self.matrix_bulk_tag_btn = ft.TextButton(
-            "批量修改标签", icon=icons.LABEL_ROUNDED,
-            on_click=self._bulk_matrix_edit_tag,
-            visible=False,
-        )
         self.matrix_bulk_bar = ft.Row([
             self.matrix_select_all_cb,
             self.matrix_bulk_toggle_target_btn,
@@ -476,213 +462,6 @@ class AccountsPage:
             ],
             spacing=10,
         )
-
-    def _build_survival_tab(self) -> ft.Control:
-        """存活分析标签页"""
-        # 存活率概览卡片
-        self.survival_rate_display = ft.Text("存活率: --%", size=14, weight=ft.FontWeight.BOLD, color="primary")
-        
-        self.survival_header_info = ft.Text(
-            "总发帖数: 0 | 存活: 0 | 阵亡: 0 | 未知: 0",
-            size=12,
-            color="onSurfaceVariant"
-        )
-        
-        self.survival_check_btn = ft.TextButton(
-            "🔍 批量检测存活",
-            icon=icons.REFRESH_ROUNDED,
-            on_click=lambda e: self.page.run_task(self._bulk_check_survival, e),
-            tooltip="检测所有帖子的存活状态",
-        )
-
-        self.survival_search_field = ft.TextField(
-            hint_text="搜索账号...",
-            prefix_icon=icons.SEARCH,
-            border_radius=10,
-            text_size=13,
-            on_change=self._on_survival_search_change,
-            bgcolor=with_opacity(0.05, "onSurface"),
-            border_color=with_opacity(0.1, "primary"),
-            expand=True,
-            height=45,
-        )
-        
-        self.survival_list = ft.ListView(
-            expand=True,
-            spacing=10,
-            padding=10,
-        )
-        
-        return ft.Column(
-            controls=[
-                ft.Row([
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("存活率", size=11, color="onSurfaceVariant"),
-                            self.survival_rate_display,
-                        ], spacing=2),
-                        padding=10,
-                        bgcolor=with_opacity(0.1, "primary"),
-                        border_radius=8,
-                    ),
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("总统计", size=11, color="onSurfaceVariant"),
-                            self.survival_header_info,
-                        ], spacing=2),
-                        padding=10,
-                        expand=True,
-                    ),
-                    self.survival_check_btn,
-                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Divider(color=with_opacity(0.1, "primary"), height=1),
-                self.survival_search_field,
-                ft.Container(
-                    content=self.survival_list,
-                    expand=True,
-                ),
-            ],
-            spacing=10,
-        )
-
-    def _on_survival_search_change(self, e):
-        self._survival_search_text = e.control.value
-        self.refresh_ui()
-
-    def _update_survival_header(self):
-        """更新存活分析头部信息"""
-        stats = self._survival_stats
-        total = stats.get("total", 0)
-        alive = stats.get("alive", 0)
-        dead = stats.get("dead", 0)
-        unknown = stats.get("unknown", 0)
-        
-        rate = (alive / total * 100) if total > 0 else 0
-        self.survival_rate_display.value = f"存活率: {rate:.1f}%"
-        self.survival_rate_display.color = "#4CAF50" if rate >= 80 else "#FF9800" if rate >= 50 else "#F44336"
-        
-        self.survival_header_info.value = f"总发帖数: {total} | 存活: {alive} | 阵亡: {dead} | 未知: {unknown}"
-
-    def _build_survival_items(self) -> list:
-        """构建存活分析列表项"""
-        items = []
-        
-        # 过滤
-        filtered = self._survival_by_account
-        if self._survival_search_text:
-            search = self._survival_search_text.lower()
-            filtered = [a for a in filtered if search in a.get("account_name", "").lower()]
-        
-        if not filtered:
-            items.append(ft.Container(
-                content=ft.Text("暂无发帖记录或存活数据", size=13, color="onSurfaceVariant"),
-                padding=20,
-                alignment=ft.alignment.center,
-            ))
-            return items
-        
-        for acc_stat in filtered:
-            total = acc_stat.get("total", 0)
-            alive = acc_stat.get("alive", 0)
-            dead = acc_stat.get("dead", 0)
-            unknown = acc_stat.get("unknown", 0)
-            rate = (alive / total * 100) if total > 0 else 0
-            
-            # 状态颜色
-            if rate >= 80:
-                status_color = "#4CAF50"
-                status_icon = icons.CHECK_CIRCLE_ROUNDED
-            elif rate >= 50:
-                status_color = "#FF9800"
-                status_icon = icons.WARNING_AMBER_ROUNDED
-            else:
-                status_color = "#F44336"
-                status_icon = icons.ERROR_OUTLINE
-            
-            card = ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.Text(acc_stat.get("account_name", "未知账号"), size=14, weight=ft.FontWeight.BOLD),
-                        ft.Container(expand=True),
-                        ft.Icon(status_icon, color=status_color, size=18),
-                        ft.Text(f"{rate:.0f}%", size=13, weight=ft.FontWeight.BOLD, color=status_color),
-                    ]),
-                    ft.Row([
-                        ft.Text(f"总发帖: {total}", size=12, color="onSurfaceVariant"),
-                        ft.Container(expand=True),
-                        ft.Text(f"✅存活: {alive}", size=12, color="#4CAF50"),
-                        ft.Text(f"❌阵亡: {dead}", size=12, color="#F44336"),
-                        ft.Text(f"❓未知: {unknown}", size=12, color="#9E9E9E"),
-                    ]),
-                    ft.Container(
-                        content=ft.ProgressBar(
-                            value=rate / 100,
-                            color=status_color,
-                            bgcolor=with_opacity(0.2, status_color),
-                            height=6,
-                        ),
-                        margin=ft.margin.only(top=5),
-                    ),
-                ], spacing=5),
-                padding=15,
-                bgcolor=with_opacity(0.05, "onSurface"),
-                border_radius=8,
-                border=ft.border.all(1, with_opacity(0.1, "primary")),
-            )
-            items.append(card)
-        
-        return items
-
-    async def _bulk_check_survival(self, e):
-        """批量检测所有帖子的存活状态"""
-        from ...core.post import check_post_survival
-
-        if not self._begin_op():
-            return
-
-        try:
-            # 获取所有有 posted_tid 的物料
-            materials = await self.db.get_materials(status="success")
-            targets = [m for m in materials if m.posted_tid and m.posted_tid != 0]
-
-            if not targets:
-                self._show_snackbar("没有需要检测的帖子", "warning")
-                return
-
-            self._open_progress_dialog("存活检测中...", determinate=True)
-            alive_count = 0
-            dead_count = 0
-            total = len(targets)
-
-            for i, m in enumerate(targets, 1):
-                try:
-                    status, reason = await check_post_survival(m.posted_tid)
-                    await self.db.update_material_survival_status(m.id, status, reason)
-
-                    if status == "alive":
-                        alive_count += 1
-                    else:
-                        dead_count += 1
-                except Exception as ex:
-                    await self.db.update_material_survival_status(m.id, "dead", str(ex))
-                    dead_count += 1
-
-                self._update_progress(f"检测中 {i}/{total}：✅{alive_count} ❌{dead_count}", i / total)
-                # 逐条限速，避免高频请求触发风控
-                await asyncio.sleep(0.3)
-
-            # 重新加载数据
-            self._survival_stats = await self.db.get_survival_stats()
-            self._survival_by_account = await self.db.get_survival_by_account()
-            self.refresh_ui()
-
-            self._show_snackbar(f"✅ 检测完成: 存活 {alive_count} 条, 阵亡 {dead_count} 条", "success")
-
-        except Exception as ex:
-            self._show_snackbar(f"❌ 检测失败: {str(ex)}", "error")
-        finally:
-            self._close_progress_dialog()
-            self._end_op()
 
     def _build_exception_tab(self) -> ft.Control:
         """异常记录标签页"""
@@ -1780,6 +1559,12 @@ class AccountsPage:
                                     on_click=lambda e, aid=acc.id: self.page.run_task(self._refresh_account_info, aid)
                                 ),
                                 ft.IconButton(
+                                    icon=icons.INFO_OUTLINED,
+                                    tooltip="查看账号概览与关注贴吧",
+                                    icon_color="primary",
+                                    on_click=lambda e, a=acc: self.page.run_task(self._show_account_detail, a)
+                                ),
+                                ft.IconButton(
                                     icon=icons.EDIT_DOCUMENT,
                                     tooltip="编辑账号信息",
                                     icon_color="primary",
@@ -1801,6 +1586,8 @@ class AccountsPage:
                 border_radius=10,
                 padding=10,
                 on_hover=self._on_item_hover,
+                tooltip="点击账号信息可查看概览、关注贴吧与删帖风险",
+                on_click=lambda e, a=acc: self.page.run_task(self._show_account_detail, a),
             )
             items.append(card)
 
@@ -1829,6 +1616,141 @@ class AccountsPage:
             e.control.update()
         except Exception:
             pass
+
+    async def _show_account_detail(self, account):
+        """打开账号概览与关注贴吧详情。"""
+        if not self.db:
+            return
+        from datetime import datetime
+
+        try:
+            forums, overview = await asyncio.gather(
+                self.db.get_forums(account.id),
+                self.db.get_account_overview(account.id),
+            )
+        except Exception as ex:
+            self._show_snackbar(f"加载账号详情失败: {ex}", "error")
+            return
+
+        display_name = account.user_name or account.name or f"账号-{account.id}"
+        total = overview["total"]
+        alive = overview["alive"]
+        dead = overview["dead"]
+        unknown = overview["unknown"]
+        deleted_by_forum = overview["deleted_by_forum"]
+        survival_rate = (alive / total * 100) if total else 0
+
+        def metric(label: str, value: str, color="onSurface"):
+            return ft.Container(
+                content=ft.Column([
+                    ft.Text(label, size=10, color="onSurfaceVariant"),
+                    ft.Text(value, size=18, weight=ft.FontWeight.BOLD, color=color),
+                ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=10,
+                border_radius=8,
+                bgcolor=with_opacity(0.04, "onSurface"),
+                expand=True,
+            )
+
+        forum_rows = []
+        for forum in forums:
+            deleted_count = deleted_by_forum.get(forum.fname, 0)
+            # “当天”判定需双条件：is_sign_today 可能因未触发每日重置而残留昨日状态
+            signed_today = bool(forum.is_sign_today) and forum.last_sign_date == datetime.now().date()
+            if signed_today:
+                status_label = {"success": "今日已签", "failure": "今日签到失败"}.get(forum.last_sign_status or "", "今日已签")
+            else:
+                status_label = "待签到"
+            row_controls = [
+                ft.Column([
+                    ft.Text(forum.fname, size=14, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        f"等级 Lv.{forum.level or 0}  · 连续签到 {forum.sign_count or 0} 天  · {status_label}",
+                        size=11,
+                        color="onSurfaceVariant",
+                    ),
+                ], expand=True, spacing=2),
+            ]
+            if deleted_count:
+                row_controls.extend([
+                    ft.Container(
+                        content=ft.Text(f"删帖 {deleted_count}", size=10, color="white"),
+                        bgcolor="error",
+                        border_radius=4,
+                        padding=ft.padding.symmetric(horizontal=6, vertical=3),
+                    ),
+                    ft.OutlinedButton(
+                        "取关",
+                        icon=icons.HEART_BROKEN,
+                        tooltip="仅让当前账号取消关注此贴吧",
+                        style=ft.ButtonStyle(color="error"),
+                        on_click=lambda e, fname=forum.fname: self.page.run_task(
+                            self._confirm_account_forum_unfollow, account.id, fname, detail_dialog
+                        ),
+                    ),
+                ])
+            forum_rows.append(
+                ft.Container(
+                    content=ft.Row(row_controls, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=with_opacity(0.06 if deleted_count else 0.02, "error" if deleted_count else "onSurface"),
+                )
+            )
+
+        forum_content = ft.Column(
+            forum_rows or [ft.Text("该账号暂无关注贴吧", color="onSurfaceVariant")],
+            spacing=6,
+            scroll=ft.ScrollMode.AUTO,
+            height=330,
+        )
+        detail_dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.ACCOUNT_CIRCLE, color="primary"), ft.Text(f"{display_name} · 账号详情")]),
+            content=ft.Container(
+                width=720,
+                content=ft.Column([
+                    ft.Text(f"UID: {account.user_id or '待验证'}  ·  状态: {account.status or 'unknown'}", size=12, color="onSurfaceVariant"),
+                    ft.Row([
+                        metric("成功发帖", str(total), "primary"),
+                        metric("存活", str(alive), "#4CAF50"),
+                        metric("被删", str(dead), "error"),
+                        metric("存活率", f"{survival_rate:.0f}%", "primary"),
+                        metric("关注贴吧", str(len(forums)), "secondary"),
+                    ], spacing=8),
+                    ft.Divider(height=20),
+                    ft.Row([
+                        ft.Text("关注贴吧", size=15, weight=ft.FontWeight.BOLD),
+                        ft.Text("仅对有删帖记录的贴吧显示取关按钮", size=11, color="onSurfaceVariant"),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    forum_content,
+                ], tight=True, spacing=10),
+            ),
+            actions=[ft.TextButton("关闭", on_click=lambda _: self.page.close(detail_dialog))],
+        )
+        self.page.open(detail_dialog)
+
+    async def _confirm_account_forum_unfollow(self, account_id: int, fname: str, detail_dialog):
+        """确认后仅对当前账号执行取关，保留其他账号的关注关系。"""
+        async def do_unfollow(_):
+            try:
+                self.page.close(confirm_dialog)
+                self.page.close(detail_dialog)
+                from ...core.batch_post import BatchPostManager
+                await BatchPostManager(self.db).unfollow_forums_bulk([fname], account_ids=[account_id])
+                self._show_snackbar(f"已让当前账号取消关注 '{fname}'", "success")
+                await self.load_data()
+            except Exception as ex:
+                self._show_snackbar(f"取消关注失败: {ex}", "error")
+
+        confirm_dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.HEART_BROKEN, color="error"), ft.Text("确认对当前账号取关？")]),
+            content=ft.Text(f"将仅让当前账号取消关注“{fname}”。其他账号的关注关系不会改变。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(confirm_dialog)),
+                ft.FilledButton("确认取关", icon=icons.HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
+            ],
+        )
+        self.page.open(confirm_dialog)
 
     async def _show_add_dialog(self, e):
         """显示添加账号对话框"""
@@ -1984,8 +1906,7 @@ class AccountsPage:
         from ...core.account import decrypt_value, encrypt_value
         
         # 从数据库获取完整账号对象（含加密凭据）
-        full_account = await self.db.get_accounts()
-        full_account = next((a for a in full_account if a.id == account.id), None)
+        full_account = await self.db.get_account(account.id)
         if not full_account:
             self._show_snackbar("无法获取账号信息", "error")
             return
@@ -2268,7 +2189,13 @@ class AccountsPage:
             self._open_progress_dialog("批量验证中...", determinate=True)
             results = []  # (显示名, 结果标签)
             for i, aid in enumerate(ids, 1):
-                acc = await refresh_account(self.db, aid)
+                try:
+                    acc = await refresh_account(self.db, aid)
+                except Exception as ex:
+                    results.append((f"账号#{aid}", f"❌ 网络异常"))
+                    self._update_progress(f"正在验证 {i}/{len(ids)}：账号#{aid}（异常）", i / len(ids))
+                    await log_warn(f"批量验证账号 #{aid} 异常: {ex}")
+                    continue
                 display = (acc.user_name or acc.name) if acc else f"账号#{aid}"
                 if acc is None:
                     results.append((display, "❌ 读取失败"))

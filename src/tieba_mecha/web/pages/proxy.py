@@ -329,10 +329,20 @@ class ProxyPage:
         self.page.open(dialog)
 
     async def _delete_proxy(self, pid: int):
-        if self.db:
-            await self.db.delete_proxy(pid)
-            await self.load_data()
-            self._show_snackbar("节点已从池中移除", "info")
+        if not self.db:
+            return
+        from ..components.toast import confirm_async
+        confirmed = await confirm_async(
+            self.page,
+            "确认移除该代理节点？",
+            "移除后，绑定该节点的账号将回退为直连，需重新部署代理。",
+            confirm_text="移除节点",
+        )
+        if not confirmed:
+            return
+        await self.db.delete_proxy(pid)
+        await self.load_data()
+        self._show_snackbar("节点已从池中移除", "info")
 
     async def _on_test_click(self, proxy, e):
         try:
@@ -417,7 +427,9 @@ class ProxyPage:
                 else:
                     fail += 1
                     fail_msgs.append(f"{p.host}:{p.port} - {msg}")
-                self._show_snackbar(f"测速中 {i}/{len(targets)}：通过 {ok} / 失败 {fail}", "info")
+                # 进度直接体现在按钮文本上，避免逐节点弹 toast
+                self._bulk_test_btn.text = f"测速中 {i}/{len(targets)}（过{ok}/败{fail}）"
+                self._bulk_test_btn.update()
 
             summary = f"批量测速完成：通过 {ok}，失败 {fail}"
             if fail_msgs:
@@ -433,8 +445,18 @@ class ProxyPage:
             self.refresh_ui()
 
     async def _bulk_delete_proxies(self, e):
-        if not self._selected_ids: return
+        if not self._selected_ids:
+            return
+        from ..components.toast import confirm_async
         count = len(self._selected_ids)
+        confirmed = await confirm_async(
+            self.page,
+            f"确认批量移除 {count} 个代理节点？",
+            "移除后，绑定这些节点的账号将回退为直连，需重新部署代理。",
+            confirm_text=f"移除 {count} 个节点",
+        )
+        if not confirmed:
+            return
         for pid in list(self._selected_ids):
             await self.db.delete_proxy(pid)
         self._selected_ids.clear()

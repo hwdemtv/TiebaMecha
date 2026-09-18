@@ -128,21 +128,34 @@ class SignPage:
             
             self.page.update()
 
-    def _toggle_mode(self, e):
-        """切换签到模式"""
+    def _set_mode(self, mode: str):
+        """选择签到模式；使用明确的双选入口，避免用户误触切换。"""
         if self._is_signing:
             self._show_snackbar("执行中禁止切换模式", "error")
             return
-            
-        self._mode = "matrix" if self._mode == "single" else "single"
+
+        self._mode = mode
         self.mode_text.value = "矩阵全扫模式" if self._mode == "matrix" else "单账号模式"
         self.mode_icon.name = GROUP_WORK if self._mode == "matrix" else PERSON
         self.mode_icon.color = COLORS.ERROR if self._mode == "matrix" else COLORS.PRIMARY
+
+        self.single_mode_btn.style = ft.ButtonStyle(
+            bgcolor="primary" if mode == "single" else None,
+            color="onPrimary" if mode == "single" else "primary",
+        )
+        self.matrix_mode_btn.style = ft.ButtonStyle(
+            bgcolor="secondary" if mode == "matrix" else None,
+            color="onPrimary" if mode == "matrix" else "secondary",
+        )
         
         # 切换设置面板可见性
         self.matrix_settings.visible = (self._mode == "matrix")
         
         self.refresh_ui()
+
+    def _toggle_mode(self, e):
+        """兼容已有调用方的模式切换入口。"""
+        self._set_mode("matrix" if self._mode == "single" else "single")
 
     def build(self) -> ft.Control:
         # 统计文本组件
@@ -154,18 +167,21 @@ class SignPage:
         self.mode_text = ft.Text("单账号模式", size=14, weight=ft.FontWeight.BOLD, color="primary")
         self.mode_icon = ft.Icon(PERSON, color="primary", size=18)
         
-        mode_switcher = ft.Container(
-            content=ft.Row([
-                self.mode_icon,
-                self.mode_text,
-                ft.Icon(SWAP_HORIZ, size=16, color="onSurfaceVariant")
-            ], spacing=5),
-            on_click=self._toggle_mode,
-            ink=True,  # 替代 cursor 作为可点击反馈
-            padding=ft.padding.symmetric(horizontal=12, vertical=6),
-            border=ft.border.all(1, with_opacity(0.3, "primary")),
-            border_radius=20,
-            bgcolor=with_opacity(0.1, "primary")
+        self.single_mode_btn = ft.FilledButton(
+            "单账号",
+            icon=PERSON,
+            tooltip="仅对当前活动账号的关注贴吧签到",
+            on_click=lambda e: self._set_mode("single"),
+        )
+        self.matrix_mode_btn = ft.OutlinedButton(
+            "矩阵全扫",
+            icon=GROUP_WORK,
+            tooltip="对所有账号及其关注贴吧执行签到",
+            on_click=lambda e: self._set_mode("matrix"),
+        )
+        mode_switcher = ft.Row(
+            [self.single_mode_btn, self.matrix_mode_btn],
+            spacing=6,
         )
         
         # 主内
@@ -780,4 +796,3 @@ class SignPage:
             shape=ft.RoundedRectangleBorder(radius=12)
         )
         self.page.open(dlg)
-

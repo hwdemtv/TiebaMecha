@@ -60,40 +60,44 @@ class DashboardPage:
         self._sign_progress_subscribed = True
 
     async def load_data(self):
-        """同步数据库数据"""
+        """同步数据库数据（相互独立的查询并行执行）"""
         if not self.db: return
-        
-        # 加载签到统计
-        self._stats = await get_sign_stats(self.db)
-        
-        # 加载全系统统计
-        accounts = await self.db.get_accounts()
+
+        # 并行加载互不依赖的统计
+        (
+            self._stats,
+            accounts,
+            proxies,
+            batch_tasks,
+            self._survival_stats,
+            account,
+            ai_key,
+        ) = await asyncio.gather(
+            get_sign_stats(self.db),
+            self.db.get_accounts(),
+            self.db.get_active_proxies(),
+            self.db.get_pending_batch_tasks(),
+            self.db.get_survival_stats(),
+            self.db.get_active_account(),
+            self.db.get_setting("ai_api_key", ""),
+        )
+
         self._sys_stats["accounts"] = len(accounts)
-        
-        proxies = await self.db.get_active_proxies()
         self._sys_stats["active_proxies"] = len(proxies)
-        
-        batch_tasks = await self.db.get_pending_batch_tasks()
         self._sys_stats["pending_batch"] = len(batch_tasks)
-        
-        # 加载存活统计数据
-        self._survival_stats = await self.db.get_survival_stats()
 
         # 加载守护进程状态
         from ...core.daemon import daemon_instance
         active_jobs = [j for j in daemon_instance.scheduler.get_jobs() if j.next_run_time]
         self._sys_stats["active_jobs"] = len(active_jobs)
-        
-        # 加载最近贴吧
-        account = await self.db.get_active_account()
+
+        # 加载最近贴吧（依赖上面的 account）
         if account:
-            forums = await self.db.get_forums(account.id)
-            self._recent_forums = forums[:10]
-        
+            self._recent_forums = (await self.db.get_forums(account.id))[:10]
+
         # 检查 AI API Key 是否已配置
-        ai_key = await self.db.get_setting("ai_api_key", "")
         self._ai_api_key_set = bool(ai_key and ai_key.strip())
-            
+
         # 页面挂载时启动日志流（含 50 条历史回放，幂等）
         if hasattr(self, "log_stream"):
             await self.log_stream.start(self.page)

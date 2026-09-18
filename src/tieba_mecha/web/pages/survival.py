@@ -15,7 +15,7 @@ from ..components.icons import (
     DELETE_OUTLINE, SHIELD_ROUNDED, WARNING_AMBER_ROUNDED,
     VERIFIED_ROUNDED, SPEED_ROUNDED, SCHEDULE_ROUNDED,
     MEMORY_ROUNDED, VPN_KEY_ROUNDED, TRENDING_UP_ROUNDED,
-    MONITOR_HEART_ROUNDED
+    MONITOR_HEART_ROUNDED, REFRESH_ROUNDED
 )
 
 if TYPE_CHECKING:
@@ -158,7 +158,9 @@ class SurvivalPage:
             await self._load_audit_data()
         except Exception as e:
             from ...core.logger import log_error
+            from ..components.toast import show_toast
             await log_error(f"加载存活分析数据失败: {e}")
+            show_toast(self.page, f"存活分析数据加载失败: {e}", "error")
 
     async def _load_audit_data(self):
         """加载行为审计报告"""
@@ -928,6 +930,15 @@ class SurvivalPage:
 
     def build(self) -> ft.Control:
         """构建页面"""
+        # 批量探测控件（本页为全站唯一"一键批量检测存活"入口）
+        self._surv_progress = ft.ProgressBar(value=0, visible=False, bar_height=2, color=COLORS.PRIMARY, expand=True)
+        self._surv_check_info = ft.Text("", size=11, color="onSurfaceVariant")
+        self._surv_check_btn = ft.OutlinedButton(
+            "批量检测存活",
+            icon=REFRESH_ROUNDED,
+            tooltip="逐一探测所有已发帖子是否仍然存活（限速执行）",
+            on_click=lambda e: self.page.run_task(self._bulk_check_survival),
+        )
         # 创建统计卡片容器（保存引用以便后续更新）
         self._stat_cards_container = ft.Container(
             content=ft.Row(self._build_stat_cards(), spacing=10),
@@ -948,6 +959,10 @@ class SurvivalPage:
                     padding=5,
                 ),
                 ft.Row([ft.Icon(ANALYTICS_OUTLINED, color=COLORS.PRIMARY, size=22), ft.Text("存活分析", size=18, weight=ft.FontWeight.BOLD, color=COLORS.PRIMARY)], spacing=8),
+                ft.Container(expand=True),
+                self._surv_progress,
+                self._surv_check_info,
+                self._surv_check_btn,
             ],
         )
 
@@ -988,6 +1003,64 @@ class SurvivalPage:
             padding=10,
             expand=True,
         )
+
+    async def _bulk_check_survival(self, e=None):
+        """批量探测所有已发帖子的存活状态（逐条限速，避免高频请求触发风控）"""
+        from ...core.logger import log_info
+        from ...core.post import check_post_survival
+        from ..components.toast import show_toast
+
+        if getattr(self, "_check_running", False):
+            return
+        self._check_running = True
+        btn = getattr(self, "_surv_check_btn", None)
+        if btn:
+            btn.disabled = True
+        self._surv_progress.visible = True
+        self.page.update()
+        alive = dead = 0
+        try:
+            materials = await self.db.get_materials(status="success")
+            targets = [m for m in materials if m.posted_tid and m.posted_tid != 0]
+            if not targets:
+                show_toast(self.page, "没有需要检测的帖子", "warning")
+                return
+            total = len(targets)
+            for i, m in enumerate(targets, 1):
+                try:
+                    status, reason = await check_post_survival(m.posted_tid)
+                    await self.db.update_material_survival_status(m.id, status, reason)
+                    if status == "alive":
+                        alive += 1
+                    else:
+                        dead += 1
+                except Exception as ex:
+                    await self.db.update_material_survival_status(m.id, "dead", str(ex))
+                    dead += 1
+                self._surv_progress.value = i / total
+                self._surv_check_info.value = f"检测中 {i}/{total}：✅{alive} ❌{dead}"
+                self.page.update()
+                # 逐条限速，避免高频请求触发风控
+                await asyncio.sleep(0.3)
+
+            show_toast(self.page, f"检测完成: 存活 {alive} 条, 阵亡 {dead} 条", "success")
+            await log_info(f"批量存活检测完成: 存活 {alive}, 阵亡 {dead}, 共 {total} 条")
+        finally:
+            self._check_running = False
+            self._surv_progress.visible = False
+            self._surv_progress.value = 0
+            self._surv_check_info.value = ""
+            if btn:
+                btn.disabled = False
+            # 刷新统计与列表
+            try:
+                self._stats = await self.db.get_survival_stats()
+                if self._stat_cards_container:
+                    self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
+                await self._load_page(1)
+            except Exception:
+                pass
+            self.page.update()
 
     def _navigate(self, page_name: str):
         if self.on_navigate:

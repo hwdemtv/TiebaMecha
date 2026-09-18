@@ -436,36 +436,45 @@ def test_update_matrix_header_stats():
     assert "覆盖率 50.0%" in page.matrix_header_info.value
 
 
-# ── 存活分析 ──
+# ── 存活分析（信息架构收敛后：账号页不再内置存活 Tab，改为跳转独立分析中心）──
 
-def test_survival_header_calculation():
+def test_survival_tab_replaced_by_jump_button():
+    """账号页应移除存活分析 Tab，保留跳转独立存活分析中心的入口按钮。"""
     fp, page = make_page()
-    page._build_survival_tab()
+    page.build()
 
-    page._survival_stats = {"total": 8, "alive": 7, "dead": 1, "unknown": 0}
-    page._update_survival_header()
-    assert page.survival_rate_display.value == "存活率: 87.5%"
+    tab_texts = [t.text for t in page.tabs.tabs]
+    assert "存活分析" not in tab_texts
+    assert tab_texts == ["账号档案中心", "全域战略吧库", "异常记录"]
 
-    page._survival_stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
-    page._update_survival_header()
-    assert page.survival_rate_display.value == "存活率: 0.0%"
+    # 孤儿实现应一并删除，不再残留半套死代码
+    assert not hasattr(page, "_build_survival_tab")
+    assert not hasattr(page, "_build_survival_items")
+    assert not hasattr(page, "_bulk_check_survival")
 
 
-def test_build_survival_items_empty_and_filter():
+@pytest.mark.asyncio
+async def test_load_data_no_longer_queries_survival_stats(monkeypatch):
+    """账号页 load_data 不应再拉取存活统计（职责已移交存活分析页）。"""
+    from unittest.mock import AsyncMock
+
+    import tieba_mecha.web.pages.accounts as accounts_mod
+
     fp, page = make_page()
-    page._build_survival_tab()
+    page.db = SimpleNamespace(
+        get_active_account=AsyncMock(return_value=None),
+        get_active_proxies=AsyncMock(return_value=[]),
+        get_forum_matrix_stats=AsyncMock(return_value=[]),
+        get_banned_forums_detail=AsyncMock(return_value=[]),
+        get_survival_stats=AsyncMock(return_value={}),
+        get_survival_by_account=AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(accounts_mod, "list_accounts", AsyncMock(return_value=[]))
 
-    page._survival_by_account = []
-    items = page._build_survival_items()
-    assert len(items) == 1  # 空状态提示
+    await page.load_data()
 
-    page._survival_by_account = [
-        {"account_name": "a1", "total": 10, "alive": 9, "dead": 1, "unknown": 0},
-        {"account_name": "b2", "total": 4, "alive": 1, "dead": 3, "unknown": 0},
-    ]
-    page._survival_search_text = "a1"
-    items = page._build_survival_items()
-    assert len(items) == 1
+    page.db.get_survival_stats.assert_not_awaited()
+    page.db.get_survival_by_account.assert_not_awaited()
 
 
 # ── 异常记录 ──
@@ -553,20 +562,11 @@ async def test_list_accounts_populates_last_verified():
     assert accounts[0].last_verified == ts
 
 
-def test_survival_search_field_exists_and_filters():
-    """存活分析页应有搜索入口，输入后按账号名过滤列表。"""
+def test_survival_search_moved_to_survival_center():
+    """账号维度存活搜索已随 Tab 一并移除，由独立存活分析页承接。"""
     fp, page = make_page()
-    page._build_survival_tab()
-    assert hasattr(page, "survival_search_field")
-
-    page._survival_by_account = [
-        {"account_name": "a1", "total": 10, "alive": 9, "dead": 1, "unknown": 0},
-        {"account_name": "b2", "total": 4, "alive": 1, "dead": 3, "unknown": 0},
-    ]
-    page._on_survival_search_change(FakeEvent(value="a1"))
-    assert page._survival_search_text == "a1"
-    items = page._build_survival_items()
-    assert len(items) == 1
+    assert not hasattr(page, "survival_search_field")
+    assert not hasattr(page, "_on_survival_search_change")
 
 
 def test_build_account_items_shows_hint_when_filter_empty():

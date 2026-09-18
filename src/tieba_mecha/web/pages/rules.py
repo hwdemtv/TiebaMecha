@@ -6,6 +6,7 @@ from ..flet_compat import COLORS
 from typing import List, Optional
 
 from ..components import create_gradient_button
+from ..components.toast import confirm_async
 from ..utils import with_opacity
 from ...core.logger import get_recent_logs, get_log_queue
 from ..components.icons import (
@@ -142,7 +143,7 @@ class RulesPage:
                     ], spacing=4, expand=True),
                     ft.Switch(value=is_active, active_color="primary",
                               on_change=lambda e, rid=r.id: self.page.run_task(self._toggle_rule, rid, e.control.value)),
-                    ft.IconButton(icon=DELETE_OUTLINE, icon_color="error",
+                    ft.IconButton(icon=DELETE_OUTLINE, icon_color="error", tooltip="删除该规则",
                                   on_click=lambda e, rid=r.id: self.page.run_task(self._delete_rule, rid)),
                 ]),
                 bgcolor=with_opacity(0.02, "primary" if is_active else "onSurface"),
@@ -176,7 +177,21 @@ class RulesPage:
         if self.db: await self.db.toggle_rule(rid, val); await self.load_data()
 
     async def _delete_rule(self, rid: int):
-        if self.db: await self.db.delete_auto_rule(rid); await self.load_data(); self._show_snackbar("规则已移除", "info")
+        if not self.db:
+            return
+        rule = next((r for r in self._rules if r.id == rid), None)
+        rule_desc = f"「{rule.fname}」的防御规则" if rule else "该防御规则"
+        confirmed = await confirm_async(
+            self.page,
+            "确认删除规则？",
+            f"删除 {rule_desc} 后，该贴吧被拦截内容的自动删帖防御将立即停止。",
+            confirm_text="删除规则",
+        )
+        if not confirmed:
+            return
+        await self.db.delete_auto_rule(rid)
+        await self.load_data()
+        self._show_snackbar("规则已移除，对应贴吧的自动删帖防御已停止", "warning")
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)

@@ -37,6 +37,14 @@ class SettingRepository:
         async with self.async_session() as session:
             setting = await session.get(Setting, key)
             return setting.value if setting else default
+
+    async def get_settings_bulk(self, keys: list[str], defaults: dict[str, str] | None = None) -> dict[str, str]:
+        """批量获取设置（单次查询）。缺失的键回退到 defaults（再退到空串）。"""
+        defaults = defaults or {}
+        async with self.async_session() as session:
+            result = await session.execute(select(Setting).where(Setting.key.in_(keys)))
+            found = {s.key: s.value for s in result.scalars().all()}
+        return {k: found.get(k, defaults.get(k, "")) for k in keys}
     async def set_setting(self, key: str, value: str) -> None:
         """保存设置"""
         async with self.async_session() as session:

@@ -97,6 +97,12 @@ class AccountRepository:
         async with self.async_session() as session:
             result = await session.execute(select(Account).order_by(Account.id))
             return list(result.scalars().all())
+
+    async def get_account(self, account_id: int) -> Account | None:
+        """按 ID 获取单个账号"""
+        async with self.async_session() as session:
+            return await session.get(Account, account_id)
+
     async def get_active_account(self) -> Account | None:
         """获取当前活跃账号 (带多峰收敛保护)"""
         async with self.async_session() as session:

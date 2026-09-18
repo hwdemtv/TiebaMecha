@@ -175,9 +175,11 @@ class MaterialRepository:
             account_stats = {}
             for account_id, account_name, status, count in result.all():
                 if account_id not in account_stats:
+                    # 账号已被删除时 posted_account_id 为 NULL，显示“未知账号”
+                    display_name = account_name or (f"账号-{account_id}" if account_id is not None else "未知账号")
                     account_stats[account_id] = {
                         "account_id": account_id,
-                        "account_name": account_name or f"账号{account_id}",
+                        "account_name": display_name,
                         "total": 0,
                         "alive": 0,
                         "dead": 0,
@@ -187,6 +189,37 @@ class MaterialRepository:
                 account_stats[account_id]["total"] += count
             
             return list(account_stats.values())
+
+    async def get_account_overview(self, account_id: int) -> dict:
+        """返回账号详情页所需的发帖统计及各贴吧删帖数量。"""
+        async with self.async_session() as session:
+            base_where = [
+                MaterialPool.status == "success",
+                MaterialPool.posted_tid.isnot(None),
+                MaterialPool.posted_tid != 0,
+                MaterialPool.posted_account_id == account_id,
+            ]
+            status_result = await session.execute(
+                select(MaterialPool.survival_status, func.count(MaterialPool.id))
+                .where(*base_where)
+                .group_by(MaterialPool.survival_status)
+            )
+            stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
+            for status, count in status_result.all():
+                if status in stats:
+                    stats[status] = count
+                stats["total"] += count
+
+            deleted_result = await session.execute(
+                select(MaterialPool.posted_fname, func.count(MaterialPool.id))
+                .where(*base_where, MaterialPool.survival_status == "dead")
+                .where(MaterialPool.posted_fname.isnot(None))
+                .group_by(MaterialPool.posted_fname)
+            )
+            stats["deleted_by_forum"] = {
+                fname: count for fname, count in deleted_result.all() if fname
+            }
+            return stats
 
     async def get_survival_examples(
         self,

@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **账号概览与关注贴吧详情**：账号列表点击卡片或信息按钮打开账号详情弹窗——概览展示成功发帖/存活/被删/存活率/关注贴吧数；关注贴吧逐行展示等级、连续签到天数与当天签到状态；存在删帖记录的贴吧显示红色"删帖 N"标签并提供"取关"按钮，二次确认后仅对当前账号执行取关（各账号独立凭证，数据库只清理成功条目，其他账号关注关系不受影响）。实现：账号详情 UI（accounts.py）、账号维度统计与按吧删帖聚合（`get_account_overview`）、支持限定账号的批量取关（`unfollow_forums_bulk(account_ids=...)`）。
+
+### Added
 - **存活分析 → 发帖策略反馈闭环**：死亡原因分流——吧务删除（贴吧侧风险）继续自动关停火力目标；系统风控删除（内容侧风险）不再关吧，改为路由给 AI 策略：存活 ≥48h 的帖子标题自动注入 AI 改写 prompt 作风格正例、被系统删除的标题作反例（few-shot），系统删除聚集时自动告警并建议深度改写。新增 daemon 周期任务 `survival_governance_job`（12h，settings `survival_governance_enabled=false` 可关闭）。
 - **行为审计接回控制回路**：新增 daemon 周期任务 `behavior_audit_job`（12h）→ `audit_and_govern`：风险评分 ≥ 阈值（默认 5.0，settings `audit_risk_threshold`）的账号自动下调发帖权重（每次 -3、下限 1，写入 weight_history，`audit_auto_adjust_weight=false` 可关闭）并推送通知。
 - **风控状态持久化**：新增 `breaker_state` 表，渐进式失败熔断器状态跨任务/跨进程存续（发帖/关注/取关三场景独立 scope）；内容相似度检测器从 `batch_post_logs` 回种 24h 历史发帖（成功日志 data_json 现记录正文），"24h 回溯检测"跨任务生效。
@@ -17,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auto-Bump 每日一次判重失效**：自顶成功后误写 `mat.last_date`（模型字段实为 `bump_last_date`，动态属性不落库），scheduled/matrix_loop 模式同一天会重复自顶。
 - **行为审计风险评分数学错误**：原实现直接累加"档位分×权重"，理论满分仅 2.8，与 0-10 量表声明及 5.0 高风险阈值不符（高风险告警永不触发）。现按理论满分归一，全维度最高档得 10 分。
 - **发帖正文分段丢失（回归修复）**：撤销 7835929 引入的 `\n`→`[br]` 转换与 `rich_text=1` 参数——`[br]` 会被贴吧服务端静默丢弃导致正文连成一行。已用线上帖子实证：裸 `\n` 发帖在存储层保留分段、Web 端渲染为 `<p>` 分段。现恢复为仅做 CR/CRLF→LF 规范化后原样发送（`content_to_web_bbcode` 更名 `normalize_web_content`）。
+- **Web UI 逐页巡检修复**：账号页存活分析子标签中已删账号的物料卡片渲染为"账号None"（数据层对 NULL `posted_account_id` 拼接字符串，现显示"未知账号"）；批量发帖左栏策略/开关标签大面积截断（策略下拉改纵向堆叠并加宽左栏）；任务队列状态列 `COMPLETED/RUNNING` 被裁切（改中文标签 + 表格支持横向滚动）；已发归档库标题列一字一行竖排（定宽单行省略）；账号批量验证单个网络异常导致整批中止且无提示（逐个捕获并汇总）；存活分析页 `load_data` 失败无任何用户提示（补 toast）；代理批量测速逐节点弹 toast 刷屏（改为按钮文本进度）；帖子管理双删除图标无法区分（本地移除改圆形叉图标）。
+- **环境失步**：`aiohttp_socks` 已在 pyproject 声明但本机 venv 未安装，导致代理连通性检测持续报 `No module named 'aiohttp_socks'` 并污染行为审计评分。
 
 ### Removed
 - **插件系统**：移除 plugin_loader 与插件中心页面。README 宣传的 7 个事件钩子在代码中从未被调度（插件仅能手动运行），属无效扩展面。
@@ -24,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **死代码**：移除无调用方的全局 `RateLimiter`（锁内 sleep 隐患）与 `ProxyWarmupManager.SAFE_ACTIONS/is_action_safe` 白名单；修正 proxy_warmup_hours 配置失实注释（预热期固定 48h）。
 
 ### Changed
+- **信息架构收敛（第一轮）**：账号页移除与侧栏重复的"存活分析"Tab，头部保留跳转独立分析中心的入口；签到页隐式点击切换改为明确的"单账号｜矩阵全扫"分段控件；设置页一级 Tab 由 7 个收敛为 6 个（"授权与安全"合并，其余按任务导向重命名）；矩阵发帖底部菜单更名为"任务中心/待发物料/已发归档/运行日志"；帖子页明确"发布新帖"与"帖子管理与监控"分区，批量操作按钮补文字。同步清理账号页随 Tab 失效的约 200 行孤儿代码。
+- **侧栏视觉分组与高亮同步**：侧边导航按"指挥中心 / 资源管理 / 执行中心 / 分析与风控 / 系统"分组展示组标题；程序化跳转（页面内跳转按钮、首页磁贴）现在会同步侧栏高亮，与实际页面保持一致。
+- **危险操作二次确认**：代理池单节点移除与批量移除、自动化规则删除——原先点击即执行，现统一弹确认框并说明影响范围（绑定账号回退直连 / 删帖防御立即停止）。
+- **Web UI 性能与整洁**：设置页/批量发帖/账号页/指挥中心的 `load_data` 由串行 await 改为并行 gather（设置项合并为单次批量查询 `get_settings_bulk`）；批量发帖删除无引用的死方法与从未挂载的 `forum_pool_column` 子树、移除约 10 处生产路径 `print`（错误路径改 `log_warn/log_error`）；账号页编辑对话框由全表扫描改为按 ID 单查（新增 `get_account`）；设置页手动触发守护任务的 `asyncio.create_task` 保活引用。
+
+### Fixed
+- **批量检测存活入口断链**：账号页存活 Tab 移除后，全站唯一的"一键批量检测存活"入口随之丢失（独立存活分析页此前只读展示）。现已将该能力移植至存活分析页头部（带进度条与限速），收敛后仍为单一入口。
 - **组件单源化收尾**：存活分析删物料、批量发帖清空物料池、帖子批量删除三处手写确认对话框统一接入 `confirm_async`。
 - **去重**：自动回帖兜底模板（两份 35 条字面量）、签到浏览伪装（两份相同代码块）、AI 改写 user_prompt（含/不含 URL 两份）分别收敛为单一实现。
 - **仓库解耦**：官网 website/ 移出本仓库跟踪（本地保留，请迁移至独立仓库）；scratch/ 诊断脚本、output/ 爬取产物、根目录导出 CSV 与生成图标一并移出跟踪。

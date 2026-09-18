@@ -61,72 +61,28 @@ class TiebaMechaApp:
         self.page.window.min_width = 1000
         self.page.window.min_height = 650
 
-        # 侧边导航栏 (Compact Aesthetic)
-        self.nav_rail = ft.NavigationRail(
-            selected_index=0,
-            label_type=ft.NavigationRailLabelType.ALL,
-            min_width=80,
-            min_extended_width=160,
-            bgcolor=with_opacity(0.1, "surface"),
-            destinations=[
-                # --- 📊 监控中心 ---
-                ft.NavigationRailDestination(
-                    icon=icons.RADAR,
-                    selected_icon=icons.RADAR,
-                    label="指挥中心",
-                ),
-                # --- 👤 账号资源 ---
-                ft.NavigationRailDestination(
-                    icon=icons.ACCOUNT_CIRCLE_OUTLINED,
-                    selected_icon=icons.ACCOUNT_CIRCLE,
-                    label="账号列表",
-                ),
-                ft.NavigationRailDestination(
-                    icon=icons.VPN_LOCK_OUTLINED,
-                    selected_icon=icons.VPN_LOCK,
-                    label="代理池",
-                ),
-
-                # --- ⚡ 核心执行 ---
-                ft.NavigationRailDestination(
-                    icon=icons.BOLT_OUTLINED,
-                    selected_icon=icons.BOLT,
-                    label="全域签到",
-                ),
-                ft.NavigationRailDestination(
-                    icon=icons.SEND_ROUNDED,
-                    selected_icon=icons.SEND_ROUNDED,
-                    label="批量发帖",
-                ),
-                ft.NavigationRailDestination(
-                    icon=icons.FORUM_OUTLINED,
-                    selected_icon=icons.FORUM,
-                    label="帖子管理",
-                ),
-
-                # --- 🤖 智能策略 ---
-                ft.NavigationRailDestination(
-                    icon=icons.SHIELD_OUTLINED,
-                    selected_icon=icons.SHIELD,
-                    label="自动化规则",
-                ),
-
-                # --- ⚙️ 系统设置 ---
-                ft.NavigationRailDestination(
-                    icon=icons.SETTINGS_OUTLINED,
-                    selected_icon=icons.SETTINGS,
-                    label="全局设置",
-                ),
-
-                # --- 📊 存活分析 ---
-                ft.NavigationRailDestination(
-                    icon=icons.ANALYTICS_OUTLINED,
-                    selected_icon=icons.ANALYTICS,
-                    label="存活分析",
-                ),
-            ],
-            on_change=self._on_nav_change,
-        )
+        # 分组式侧边导航：None 表示无标题的顶级入口
+        # (组标题, [页面键...])
+        self._nav_groups = [
+            (None, ["dashboard"]),
+            ("资源管理", ["accounts", "proxy"]),
+            ("执行中心", ["sign", "batch_post", "posts"]),
+            ("分析与风控", ["survival", "rules"]),
+            ("系统", ["settings"]),
+        ]
+        # 页面键 → (默认图标, 选中图标, 标签)
+        self._nav_items = {
+            "dashboard": (icons.RADAR, icons.RADAR, "指挥中心"),
+            "accounts": (icons.ACCOUNT_CIRCLE_OUTLINED, icons.ACCOUNT_CIRCLE, "账号列表"),
+            "proxy": (icons.VPN_LOCK_OUTLINED, icons.VPN_LOCK, "代理池"),
+            "sign": (icons.BOLT_OUTLINED, icons.BOLT, "全域签到"),
+            "batch_post": (icons.SEND_ROUNDED, icons.SEND_ROUNDED, "批量发帖"),
+            "posts": (icons.FORUM_OUTLINED, icons.FORUM, "帖子管理"),
+            "survival": (icons.ANALYTICS_OUTLINED, icons.ANALYTICS, "存活分析"),
+            "rules": (icons.SHIELD_OUTLINED, icons.SHIELD, "自动化规则"),
+            "settings": (icons.SETTINGS_OUTLINED, icons.SETTINGS, "全局设置"),
+        }
+        self._selected_page = "dashboard"
 
         # 通知铃铛（延迟绑定 on_click）
         from .components.notification_bell import NotificationBell
@@ -135,12 +91,19 @@ class TiebaMechaApp:
             on_click=lambda _: self.page.run_task(self._show_notifications)
         )
 
-        # 将铃铛设置为侧边栏头部
-        self.nav_rail.leading = ft.Container(
-            content=self.notification_bell,
-            padding=ft.padding.only(top=20, bottom=10),
-            alignment=ft.alignment.center,
+        # 分组侧边导航栏（自定义结构，支持组标题与选中态同步）
+        self.nav_rail = ft.Container(
+            width=80,
+            bgcolor=with_opacity(0.1, "surface"),
+            padding=ft.padding.only(top=6, bottom=10),
+            content=ft.Column(
+                spacing=0,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
+            ),
         )
+        self._rebuild_nav()
 
         # 内容预览区
         self.content_area = ft.Container(
@@ -162,6 +125,58 @@ class TiebaMechaApp:
                 spacing=0,
             )
         )
+
+    def _rebuild_nav(self):
+        """根据 _selected_page 重建侧栏控件（登录页隐藏前后的重建都走这里）"""
+        bell = ft.Container(
+            content=self.notification_bell,
+            padding=ft.padding.only(bottom=8),
+            alignment=ft.alignment.center,
+        )
+        controls: list = [bell]
+        for title, keys in self._nav_groups:
+            if title:
+                controls.append(ft.Container(
+                    content=ft.Text(
+                        title, size=9, weight=ft.FontWeight.W_500,
+                        color=with_opacity(0.45, "onSurfaceVariant"),
+                    ),
+                    padding=ft.padding.only(top=9, bottom=3),
+                    alignment=ft.alignment.center,
+                ))
+            for key in keys:
+                icon, selected_icon, label = self._nav_items[key]
+                selected = self._selected_page == key
+                controls.append(ft.Container(
+                    content=ft.Column([
+                        ft.Icon(
+                            selected_icon if selected else icon,
+                            size=21,
+                            color="primary" if selected else "onSurfaceVariant",
+                        ),
+                        ft.Text(
+                            label, size=10,
+                            weight=ft.FontWeight.BOLD if selected else ft.FontWeight.W_500,
+                            color="primary" if selected else "onSurfaceVariant",
+                        ),
+                    ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    width=72,
+                    padding=ft.padding.symmetric(vertical=5),
+                    border_radius=10,
+                    bgcolor=with_opacity(0.09, "primary") if selected else None,
+                    on_click=lambda e, k=key: self.page.run_task(self._navigate, k),
+                ))
+        self.nav_rail.content.controls = controls
+        try:
+            self.nav_rail.update()
+        except Exception:
+            pass  # 首次构建时尚未挂载到页面
+
+    def _set_selected(self, page_name: str):
+        """同步侧栏高亮（程序化跳转与点击都走这里，避免高亮与实际页面脱节）"""
+        if page_name in self._nav_items and self._selected_page != page_name:
+            self._selected_page = page_name
+            self._rebuild_nav()
 
     async def initialize(self, db: Database):
         """初始化数据库和其他异步资源"""
@@ -283,25 +298,12 @@ class TiebaMechaApp:
         except (asyncio.CancelledError, Exception):
             pass
 
-    def _on_nav_change(self, e):
-        """处理导航切换"""
-        dest_map = {
-            0: "dashboard",
-            1: "accounts",
-            2: "proxy",
-            3: "sign",
-            4: "batch_post",
-            5: "posts",
-            6: "rules",
-            7: "settings",
-            8: "survival",
-        }
-        page_name = dest_map.get(e.control.selected_index, "dashboard")
-        self.page.run_task(self._navigate, page_name)
-
     async def _navigate(self, page_name: str):
         """页面路由跳转核心逻辑"""
         try:
+            # 同步侧栏高亮（含程序化跳转）
+            self._set_selected(page_name)
+
             # 导航离开时清理旧页面（取消订阅、停止后台任务等）
             old_page_obj = self._pages_cache.get(self.current_page)
             if old_page_obj and hasattr(old_page_obj, "cleanup"):
