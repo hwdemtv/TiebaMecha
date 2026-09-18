@@ -77,6 +77,68 @@ def format_duration(seconds: float) -> str:
     return f"约 {hours} 小时 {minutes} 分钟"
 
 
+# MaterialPool.title 为 String(500)，超过即无效
+_IMPORT_TITLE_MAX = 500
+
+
+@dataclass
+class ImportScanReport:
+    """物料导入预扫结果（索引进 pairs 原始列表）。"""
+
+    total: int = 0
+    empty_entries: list[int] = field(default_factory=list)      # 标题正文全空
+    missing_title: list[int] = field(default_factory=list)      # 标题为空
+    overlong_title: list[int] = field(default_factory=list)     # 标题超 DB 上限
+    duplicate_groups: list[list[int]] = field(default_factory=list)
+    with_links: list[int] = field(default_factory=list)         # 含链接/短链
+
+    @property
+    def has_warnings(self) -> bool:
+        return bool(
+            self.empty_entries or self.missing_title or self.overlong_title
+            or self.duplicate_groups or self.with_links
+        )
+
+    def valid_indices(self) -> list[int]:
+        """可导入的条目（非空、标题合规），重复项默认保留。"""
+        bad = set(self.empty_entries) | set(self.overlong_title)
+        return [i for i in range(self.total) if i not in bad]
+
+    def dedup_indices(self) -> list[int]:
+        """在有效项基础上每组重复只保留第一条。"""
+        dup_extra = {i for group in self.duplicate_groups for i in group[1:]}
+        return [i for i in self.valid_indices() if i not in dup_extra]
+
+
+def scan_import_pairs(pairs: list[tuple[str, str]]) -> ImportScanReport:
+    """对导入前的 (标题, 正文) 列表做质量扫描。纯函数，不触 UI/DB。"""
+    report = ImportScanReport(total=len(pairs))
+    seen: dict[str, int] = {}
+    groups: dict[str, list[int]] = {}
+
+    for idx, (title, content) in enumerate(pairs):
+        t = (title or "").strip()
+        c = (content or "").strip()
+        if not t and not c:
+            report.empty_entries.append(idx)
+            continue
+        if not t:
+            report.missing_title.append(idx)
+        if len(t) > _IMPORT_TITLE_MAX:
+            report.overlong_title.append(idx)
+        if _URL_RE.search(t) or _URL_RE.search(c):
+            report.with_links.append(idx)
+        key = f"{_normalize_text(t)}|{_normalize_text(c)}"
+        if key:
+            if key in seen:
+                groups[key].append(idx)
+            else:
+                seen[key] = idx
+                groups[key] = [idx]
+    report.duplicate_groups = [g for g in groups.values() if len(g) > 1]
+    return report
+
+
 def _is_quiet_hour(dt: datetime) -> bool:
     return _QUIET_START <= dt.hour < _QUIET_END
 

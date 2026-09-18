@@ -12,7 +12,7 @@ from ...core.batch_post import BatchPostTask, BatchPostManager
 from ...core.link_manager import SmartLinkConnector
 from ...core.ai_optimizer import AIOptimizer
 from .batch_post.launch_config import LaunchConfig, LaunchConfigError
-from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport
+from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport, scan_import_pairs
 
 def _format_schedule_display(task) -> str:
     """格式化任务的调度信息显示"""
@@ -1114,6 +1114,81 @@ class BatchPostPage:
         await self._refresh_material_table()
         if e: self._show_snackbar("物料池已全库排空", "success")
 
+    async def _resolve_import_pairs(self, pairs: list):
+        """导入预检：扫描质量并弹预览确认。
+
+        返回最终要导入的 (标题, 正文) 列表；用户取消返回 None。
+        空内容/超长标题在两种导入选项下都会被剔除（写入即无效）。
+        """
+        if not pairs:
+            return pairs
+        scan = scan_import_pairs(pairs)
+        if not scan.has_warnings:
+            return pairs
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+
+        def _resolve_import(choice):
+            if not future.done():
+                future.set_result(choice)
+            try:
+                self.page.close(preview_dialog)
+            except Exception:
+                pass
+
+        def color_of(icon):
+            return {"⚠️": "orange", "❌": "error"}.get(icon, "primary")
+
+        issue_rows = []
+        if scan.empty_entries:
+            issue_rows.append(("⚠️", f"{len(scan.empty_entries)} 条内容为空（将被跳过）"))
+        if scan.missing_title:
+            preview_ids = scan.missing_title[:8]
+            more = "…" if len(scan.missing_title) > 8 else ""
+            issue_rows.append(("⚠️", f"{len(scan.missing_title)} 条缺标题（将仅发正文，序号 {preview_ids}{more}）"))
+        if scan.overlong_title:
+            issue_rows.append(("❌", f"{len(scan.overlong_title)} 条标题超过 500 字（超出字段上限，将被跳过）"))
+        if scan.duplicate_groups:
+            extra = sum(len(g) - 1 for g in scan.duplicate_groups)
+            issue_rows.append(("⚠️", f"{len(scan.duplicate_groups)} 组完全重复（去重可减少 {extra} 条，同内容重复投放易触发风控）"))
+        if scan.with_links:
+            issue_rows.append(("ℹ️", f"{len(scan.with_links)} 条含链接/短链（建议导入后执行短链同步）"))
+
+        content = ft.Column([
+            ft.Text(f"共解析 {scan.total} 条，导入前请确认：", size=12, weight=ft.FontWeight.BOLD),
+            *[
+                ft.Row([
+                    ft.Icon(name=icons.WARNING_AMBER_ROUNDED if icon == "⚠️" else
+                            (icons.ERROR_ROUNDED if icon == "❌" else icons.INFO_OUTLINED),
+                            color=color_of(icon), size=15),
+                    ft.Text(msg, size=11, expand=True, selectable=True),
+                ], spacing=6)
+                for icon, msg in issue_rows
+            ],
+        ], spacing=6, tight=True)
+
+        valid_n = len(scan.valid_indices())
+        dedup_n = len(scan.dedup_indices())
+        preview_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("物料导入预检"),
+            content=ft.Container(content=content, width=480),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: _resolve_import(None)),
+                ft.TextButton(f"导入去重后 {dedup_n} 条", on_click=lambda _: _resolve_import("dedup")),
+                ft.FilledButton(f"导入 {valid_n} 条", on_click=lambda _: _resolve_import("all")),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(preview_dialog)
+        choice = await future
+        if choice is None:
+            return None
+        if choice == "dedup":
+            return [pairs[i] for i in scan.dedup_indices()]
+        return [pairs[i] for i in scan.valid_indices()]
+
     def _open_batch_paste_dialog(self, e):
         """打开批量粘贴导入对话框"""
         paste_content = ft.TextField(
@@ -1157,7 +1232,13 @@ class BatchPostPage:
                 self._show_snackbar("未解析到有效内容", "warning")
                 return
 
-            added_count = await self.db.add_materials_bulk(pairs)
+            final_pairs = await self._resolve_import_pairs(pairs)
+            if final_pairs is None:
+                return  # 用户取消
+            if not final_pairs:
+                self._show_snackbar("没有可导入的有效内容", "warning")
+                return
+            added_count = await self.db.add_materials_bulk(final_pairs)
             await self._refresh_material_table()
             self.page.close(dialog)
             self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")
@@ -1713,10 +1794,35 @@ class BatchPostPage:
         render_forums()
     async def _open_firepower_dialog(self, initial_tab: int = 0):
         """[火力配置主页面] 本地自留区与全域轰炸组独立锁定"""
-        
+
+        def _risk_badge(risk):
+            """风险画像徽标：覆盖账号数 · 发帖数 · 删帖数(率)。"""
+            if not risk:
+                return ""
+            parts = [f"覆盖{risk['cover_accounts']}"]
+            if risk["posted_count"]:
+                parts.append(f"发{risk['posted_count']}")
+                if risk["dead_count"]:
+                    parts.append(f"删{risk['dead_count']}({risk['dead_rate']:.0%})")
+            return " · ".join(parts)
+
+        def _is_risky(risk):
+            """高风险判定：已封禁，或发帖样本≥3且删帖率≥50%。"""
+            if not risk:
+                return False
+            if risk["is_banned"]:
+                return True
+            return risk["posted_count"] >= 3 and risk["dead_rate"] >= 0.5
+
         # 获取数据
         local_forums = await self.db.get_all_unique_forums()
         target_groups = await self.db.get_target_pool_groups()
+        # 风险画像聚合（覆盖/发帖/删帖），失败时降级为无徽标不阻断弹窗
+        risk_map = {}
+        try:
+            risk_map = {s["fname"]: s for s in await self.db.get_forum_risk_stats()}
+        except Exception:
+            pass
         
         # ===== 两个独立的选中集合 =====
         # 本地自留区选中：若上次有持久化选择则沿用，否则默认选中所有安全吧
@@ -1735,7 +1841,11 @@ class BatchPostPage:
             # 汇总警告（延迟到 UI 渲染后显示）
             _local_warn_count = len(stale_fnames) + len(banned_selected)
         else:
-            local_selected = {f['fname'] for f in local_forums if f['is_post_target']}
+            # 默认选中所有安全贴吧；高风险（删帖率≥50%）贴吧默认排除
+            local_selected = {
+                f['fname'] for f in local_forums
+                if f['is_post_target'] and not _is_risky(risk_map.get(f['fname']))
+            }
             _local_warn_count = 0
         global_selected = set(self._temp_global_fnames)  # 全域轰炸组选中
         
@@ -1776,20 +1886,35 @@ class BatchPostPage:
                     fn = f['fname']
                     is_safe = f['is_post_target']
                     if keyword and keyword.lower() not in fn.lower(): continue
+                    risk = risk_map.get(fn)
+                    badge = _risk_badge(risk)
+                    badge_text = f"  ({badge})" if badge else ""
                     is_checked = fn in local_selected
+                    item_disabled = False
                     # [修复] 被选中但非安全的贴吧添加⚠️警告标识，提醒用户状态变化
-                    if is_checked and not is_safe:
-                        label_text = f"⚠️ {fn} [非安全]"
+                    if f['is_banned']:
+                        label_text = f"⛔ {fn} [已封禁]{badge_text}"
+                        item_color = "error"
+                        item_disabled = True
+                    elif is_checked and not is_safe:
+                        label_text = f"⚠️ {fn} [非安全]{badge_text}"
                         item_color = "orange"
+                    elif _is_risky(risk):
+                        # 高风险（删帖率≥50%）默认禁选；持久化已选的保留并标红
+                        label_text = f"🔴 {fn} [高风险]{badge_text}"
+                        item_color = "error"
+                        item_disabled = not is_checked
                     elif is_safe:
-                        label_text = f"🛡️ {fn} [安全]"
+                        label_text = f"🛡️ {fn} [安全]{badge_text}"
                         item_color = "green"
                     else:
-                        label_text = fn
+                        label_text = f"{fn}{badge_text}"
                         item_color = "onSurface"
                     local_container.controls.append(
                         ft.Checkbox(
                             label=label_text, value=is_checked, data=fn, on_change=on_local_item_check,
+                            disabled=item_disabled,
+                            tooltip="高风险贴吧（删帖率高或已封禁），默认禁选；如需投放请先在存活分析复核" if item_disabled else None,
                             fill_color="green" if is_safe else ("orange" if is_checked else None),
                             label_style=ft.TextStyle(color=item_color, size=11, weight=ft.FontWeight.W_500 if is_safe else None)
                         )
@@ -1805,6 +1930,7 @@ class BatchPostPage:
             safe_fnames = {f['fname'] for f in local_forums if f['is_post_target']}
             for cb in local_container.controls:
                 if isinstance(cb, ft.Checkbox):
+                    if cb.disabled: continue  # 封禁/高风险禁选项不参与全选
                     fn = cb.data
                     if select_all:
                         # 全选时仅勾选安全贴吧，跳过不安全的
@@ -1949,18 +2075,28 @@ class BatchPostPage:
                     controls = [group_header]
 
                     if is_expanded and fnames:
-                        # 展开显示所有贴吧名称，每个贴吧带独立 Checkbox
+                        # 展开显示所有贴吧名称，每个贴吧带独立 Checkbox + 风险徽标
                         forum_items = []
                         for fn in fnames[:30]:
+                            risk = risk_map.get(fn)
+                            badge = _risk_badge(risk)
+                            badge_text = f"  ({badge})" if badge else ""
+                            is_banned_fn = bool(risk and risk["is_banned"])
+                            is_risky_fn = _is_risky(risk)
                             forum_items.append(
                                 ft.Row([
                                     ft.Checkbox(
                                         value=fn in global_selected,
                                         data=fn,
                                         on_change=on_single_forum_check,
+                                        disabled=is_banned_fn,
+                                        tooltip="已封禁贴吧，禁止选择" if is_banned_fn else None,
                                         fill_color="orange",
-                                        label=fn,
-                                        label_style=ft.TextStyle(size=10),
+                                        label=f"{'⛔ ' if is_banned_fn else '🔴 ' if is_risky_fn else ''}{fn}{badge_text}",
+                                        label_style=ft.TextStyle(
+                                            size=10,
+                                            color="error" if is_banned_fn or is_risky_fn else None,
+                                        ),
                                     ),
                                 ], spacing=0)
                             )
@@ -3117,7 +3253,13 @@ class BatchPostPage:
                 self._show_snackbar("文件内容为空或格式不匹配，未导入任何数据", "warning")
                 return
 
-            added_count = await self.db.add_materials_bulk(pairs)
+            final_pairs = await self._resolve_import_pairs(pairs)
+            if final_pairs is None:
+                return  # 用户取消
+            if not final_pairs:
+                self._show_snackbar("没有可导入的有效内容", "warning")
+                return
+            added_count = await self.db.add_materials_bulk(final_pairs)
 
             await self._refresh_material_table()
             self._show_snackbar(f"成功导入 {added_count} 条文案物料", "success")

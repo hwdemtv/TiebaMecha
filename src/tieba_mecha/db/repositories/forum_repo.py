@@ -312,9 +312,57 @@ class ForumRepository:
             )
             return [
                 {
-                    "fid": row.fid, 
-                    "fname": row.fname, 
+                    "fid": row.fid,
+                    "fname": row.fname,
                     "is_post_target": bool(row[2]),
                     "is_banned": bool(row[3])
                 } for row in result.all()
             ]
+
+    async def get_forum_risk_stats(self) -> list[dict]:
+        """按吧聚合风险画像：覆盖账号数 / 历史发帖数 / 删帖数 / 是否封禁。
+
+        数据来源：Forum 表（覆盖与封禁）+ MaterialPool 已发记录（发帖与存活），
+        单条 SQL 各自聚合后在内存合并，供发帖页风险可视化与默认禁选使用。
+        """
+        from sqlalchemy import case, func
+        from ..models import MaterialPool
+        async with self.async_session() as session:
+            forum_result = await session.execute(
+                select(
+                    Forum.fname,
+                    func.count(func.distinct(Forum.account_id)),
+                    func.max(Forum.is_post_target),
+                    func.max(Forum.is_banned),
+                )
+                .where(Forum.is_hidden == False)
+                .group_by(Forum.fname)
+            )
+            post_result = await session.execute(
+                select(
+                    MaterialPool.posted_fname,
+                    func.count(MaterialPool.id),
+                    func.sum(case((MaterialPool.survival_status == "dead", 1), else_=0)),
+                )
+                .where(MaterialPool.posted_fname.isnot(None))
+                .group_by(MaterialPool.posted_fname)
+            )
+
+        post_map = {
+            row[0]: (int(row[1] or 0), int(row[2] or 0))
+            for row in post_result.all()
+        }
+        stats = []
+        for fname, cover, is_target, is_banned in forum_result.all():
+            posted, dead = post_map.get(fname, (0, 0))
+            dead_rate = round(dead / posted, 3) if posted > 0 else 0.0
+            stats.append({
+                "fname": fname,
+                "cover_accounts": int(cover or 0),
+                "posted_count": posted,
+                "dead_count": dead,
+                "dead_rate": dead_rate,
+                "is_post_target": bool(is_target),
+                "is_banned": bool(is_banned),
+            })
+        return stats

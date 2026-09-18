@@ -210,3 +210,45 @@ class TestPreflightService:
                 account_ids=[1, 2], local_fnames=["吧A"], post_count=1))
         assert report.stats["accounts_no_proxy"] and len(report.stats["accounts_no_proxy"]) == 1
         assert any(i.code == "accounts_no_proxy" for i in report.warnings)
+
+
+class TestScanImportPairs:
+    def _scan(self, pairs):
+        from tieba_mecha.web.pages.batch_post.preflight import scan_import_pairs
+        return scan_import_pairs(pairs)
+
+    def test_clean_batch_has_no_warnings(self):
+        scan = self._scan([("标题1", "内容1"), ("标题2", "内容2")])
+        assert not scan.has_warnings
+        assert scan.valid_indices() == [0, 1]
+
+    def test_empty_and_missing_title(self):
+        scan = self._scan([("", ""), ("", "只有正文"), ("标题", "内容")])
+        assert scan.empty_entries == [0]
+        assert scan.missing_title == [1]
+        assert scan.valid_indices() == [1, 2]
+
+    def test_overlong_title_invalid(self):
+        scan = self._scan([("T" * 501, "内容")])
+        assert scan.overlong_title == [0]
+        assert scan.valid_indices() == []
+
+    def test_duplicate_groups_and_dedup(self):
+        scan = self._scan([
+            ("A", "内容X"),
+            ("A", "内容X"),          # 完全重复
+            ("B", "内容Y"),
+            ("B", "内容Y"),          # 完全重复
+            ("B", "内容Y"),          # 三连重复
+        ])
+        assert scan.duplicate_groups == [[0, 1], [2, 3, 4]]
+        assert scan.dedup_indices() == [0, 2]
+
+    def test_whitespace_normalized_dup(self):
+        scan = self._scan([("A B", "x  y"), ("AB", "xy")])
+        assert len(scan.duplicate_groups) == 1
+
+    def test_link_detection(self):
+        scan = self._scan([("看这个", "https://example.com 好东西"), ("普通", "无链接")])
+        assert scan.with_links == [0]
+        assert scan.valid_indices() == [0, 1]
