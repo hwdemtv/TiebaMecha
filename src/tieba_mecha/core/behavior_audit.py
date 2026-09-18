@@ -195,19 +195,23 @@ class BehaviorAuditor:
     ) -> float:
         """
         综合风险评分 (0-10)，各维度加权：
-        - 签到异常：20%
-        - 时间集中度：25%
-        - 内容重复度：25%
-        - 操作间隔：15%
-        - 代理健康：15%
+        - 签到异常：20%（档位上限 2.0）
+        - 时间集中度：25%（档位上限 3.0）
+        - 内容重复度：25%（档位上限 3.0）
+        - 操作间隔：15%（档位上限 3.0）
+        - 代理健康：15%（档位上限 3.0）
+
+        每维度按危险程度取档位分，加权求和后按理论满分归一到 0-10。
+        （历史 bug：曾直接累加 档位分×权重，理论满分仅 2.8，
+        与 0-10 量表声明及 5.0 高风险阈值不符，高风险告警永不触发。）
         """
-        score = 0.0
+        raw = 0.0
 
         # 签到异常评分
         if sign_rate > 0.95:
-            score += 2.0 * 0.20
+            raw += 2.0 * 0.20
         elif sign_rate < 0.3:
-            score += 1.5 * 0.20
+            raw += 1.5 * 0.20
 
         # 时间集中度评分
         if hour_distribution:
@@ -215,33 +219,35 @@ class BehaviorAuditor:
             if total > 0:
                 peak_ratio = max(hour_distribution.values()) / total
                 if peak_ratio > 0.6:
-                    score += 3.0 * 0.25
+                    raw += 3.0 * 0.25
                 elif peak_ratio > 0.4:
-                    score += 1.5 * 0.25
+                    raw += 1.5 * 0.25
 
         # 内容重复度评分
         if content_variety < 0.5:
-            score += 3.0 * 0.25
+            raw += 3.0 * 0.25
         elif content_variety < 0.7:
-            score += 2.0 * 0.25
+            raw += 2.0 * 0.25
         elif content_variety < 0.85:
-            score += 1.0 * 0.25
+            raw += 1.0 * 0.25
 
         # 操作间隔评分
         if 0 < avg_interval < 3:
-            score += 3.0 * 0.15
+            raw += 3.0 * 0.15
         elif 0 < avg_interval < 5:
-            score += 1.5 * 0.15
+            raw += 1.5 * 0.15
 
         # 代理健康评分
         if proxy_fails > 10:
-            score += 3.0 * 0.15
+            raw += 3.0 * 0.15
         elif proxy_fails > 5:
-            score += 2.0 * 0.15
+            raw += 2.0 * 0.15
         elif proxy_fails > 2:
-            score += 1.0 * 0.15
+            raw += 1.0 * 0.15
 
-        return min(10.0, score)
+        # 理论满分 = Σ(各维度档位上限 × 权重) = 2.8
+        max_raw = 2.0 * 0.20 + 3.0 * 0.25 + 3.0 * 0.25 + 3.0 * 0.15 + 3.0 * 0.15
+        return min(10.0, raw / max_raw * 10)
 
 
 async def audit_all_accounts(db: Database, days: int = 7) -> list[dict[str, Any]]:
@@ -274,5 +280,67 @@ async def audit_all_accounts(db: Database, days: int = 7) -> list[dict[str, Any]
                 f"(风险评分: {report['risk_score']}/10, "
                 f"告警数: {len(report.get('alerts', []))})"
             )
+
+    return reports
+
+
+async def audit_and_govern(db: Database, days: int = 7) -> list[dict[str, Any]]:
+    """
+    行为审计 + 自动治理（daemon 周期任务入口，闭环"审计 → 调度权重"）。
+
+    对风险评分达到阈值的矩阵账号自动下调 post_weight（每次 -3，下限 1），
+    使其在本发帖调度中的选中概率降低；下调写入 weight_history（source=
+    behavior_audit），可追溯、可通过权重重算恢复。相关设置：
+    - audit_auto_adjust_weight: 是否启用自动下调（默认 true）
+    - audit_risk_threshold: 高风险阈值（默认 5.0，0-10）
+    """
+    reports = await audit_all_accounts(db, days=days)
+    if not reports:
+        return reports
+
+    try:
+        auto_adjust = (await db.get_setting("audit_auto_adjust_weight", "true")).lower() != "false"
+    except Exception:
+        auto_adjust = True
+    try:
+        threshold = float(await db.get_setting("audit_risk_threshold", "5.0"))
+    except Exception:
+        threshold = 5.0
+
+    if not auto_adjust:
+        return reports
+
+    for report in reports:
+        if report.get("risk_score", 0) < threshold:
+            continue
+        account_id = report.get("account_id")
+        account_name = report.get("account_name", f"账号-{account_id}")
+        try:
+            account = await db.get_account_by_id(account_id)
+            if not account:
+                continue
+            old_weight = account.post_weight or 5
+            new_weight = max(1, old_weight - 3)
+            if new_weight >= old_weight:
+                continue  # 已在下限，无需调整
+            await db.update_account_weight(account_id, new_weight, source="behavior_audit")
+            await log_warn(
+                f"📉 风险治理：账号 [{account_name}] 评分 {report['risk_score']}/10，"
+                f"发帖权重 {old_weight} → {new_weight}（来源: behavior_audit）"
+            )
+            try:
+                await db.add_notification(
+                    type="warning",
+                    title="行为风险自动治理",
+                    message=(
+                        f"账号 [{account_name}] 风险评分 {report['risk_score']}/10，"
+                        f"已自动下调发帖权重 {old_weight} → {new_weight}。"
+                        f"主要告警：{'；'.join(report.get('alerts', [])[:3])}"
+                    ),
+                )
+            except Exception:
+                pass  # 通知失败不影响治理本身
+        except Exception as e:
+            await log_warn(f"风险治理账号 [{report.get('account_name')}] 失败: {e}")
 
     return reports

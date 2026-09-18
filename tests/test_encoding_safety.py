@@ -191,9 +191,11 @@ async def test_manual_post_encoding_safety():
                     assert isinstance(body, bytes)
                     payload = urllib.parse.parse_qs(body.decode("utf-8"), encoding="utf-8")
                     content_value = payload["content"][0]
-                    # 换行已按贴吧 Web 表单规范转换为 [br] BBCode, 不得残留原始 \r\n
+                    # 换行规范化为 LF 后原样发送（贴吧 Web 表单 API 保留 LF 分段），
+                    # 不得残留 \r，也不得转换为 [br]（会被服务端丢弃导致连成一行）
                     assert "\r" not in content_value
+                    assert "[br]" not in content_value
                     zero_width = ("​", "‌", "‍", "﻿")
                     cleaned = "".join(ch for ch in content_value if ch not in zero_width)
-                    # 原文 4 处换行 (\r\n\r\n / \r / \n) 均应转换为 [br]
-                    assert cleaned.count("[br]") == 4
+                    # 原文 4 处换行 (\r\n\r\n / \r / \n) 均应保留为 LF
+                    assert cleaned.count("\n") == 4

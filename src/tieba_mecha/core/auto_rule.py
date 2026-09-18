@@ -2,7 +2,7 @@
 import re
 from typing import List
 from ..db.crud import Database
-from ..db.models import AutoRule, PostCache
+from ..db.models import AutoRule
 from .account import get_account_credentials
 from .client_factory import create_client
 from .logger import log_info, log_warn, log_error

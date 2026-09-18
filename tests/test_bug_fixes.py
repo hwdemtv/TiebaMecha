@@ -279,7 +279,6 @@ class TestNoBareExceptInPages:
 
     @pytest.mark.parametrize("module_path", [
         "tieba_mecha.web.pages.batch_post_page",
-        "tieba_mecha.web.pages.crawl",
         "tieba_mecha.web.pages.sign",
     ])
     def test_no_bare_except(self, module_path):

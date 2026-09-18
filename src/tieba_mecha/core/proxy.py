@@ -10,11 +10,8 @@ class ProxyWarmupManager:
     代理预热管理器：新绑定代理的账号在预热期内只允许低风险操作（签到、浏览），
     不允许发帖/顶贴，避免 IP 突变触发百度关联检测。
 
-    预热期默认 48 小时，可在 settings 表中配置 proxy_warmup_hours。
+    预热期固定 48 小时（构造参数可调）。
     """
-
-    # 预热期内允许的操作白名单
-    SAFE_ACTIONS = {"sign", "browse", "warmup"}
 
     def __init__(self, warmup_hours: int = 48):
         self.warmup_hours = warmup_hours
@@ -36,10 +33,6 @@ class ProxyWarmupManager:
             return elapsed < self.warmup_hours * 3600
         except Exception:
             return False
-
-    def is_action_safe(self, action: str) -> bool:
-        """检查操作是否在预热期白名单内"""
-        return action in self.SAFE_ACTIONS
 
     async def get_remaining_hours(self, db: Database, account_id: int) -> float:
         """获取预热剩余小时数，0 表示已过预热期"""

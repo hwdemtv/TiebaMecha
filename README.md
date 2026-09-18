@@ -243,11 +243,9 @@ tieba web --port 9006
 | **全域签到** | 批量签到、统计追踪、贴吧同步 |
 | **帖子管理** | 帖子搜索、删除、加精、置顶操作 |
 | **帖子存活分析** | 帖子存活追踪、死亡原因分类、按账号/贴吧/原因筛选 |
-| **数据爬取** | 帖子爬取、用户画像、历史记录 |
 | **自动化规则** | 关键词监控、自动删帖、正则匹配 |
 | **拟人化养号** | 自动浏览、随性点赞、权重维护、定时调度 |
 | **矩阵发帖** | 战术向导配置、物料池管理、AI 改写、定时任务、自动回帖 |
-| **插件系统** | 扩展功能加载与管理 |
 | **系统设置** | AI 配置、全局参数、安全选项（Web 密码管理）、定时任务调度 |
 | **新手引导** | 首次使用向导，引导完成账号导入与基础配置 |
 
@@ -279,11 +277,6 @@ tieba post search "关键词" --forum "贴吧名"
 tieba post delete 12345678 --forum "贴吧名"
 tieba post good 12345678 --forum "贴吧名"    # 加精
 tieba post good 12345678 --forum "贴吧名" --undo  # 取消加精
-
-# ========== 数据爬取 ==========
-tieba crawl threads "贴吧名" --pages 5 --output ./output
-tieba crawl user 123456789 --posts
-tieba crawl history --limit 20
 
 # ========== Web 服务 ==========
 tieba web --port 9006 --host 0.0.0.0
@@ -351,6 +344,8 @@ tieba web --port 9006 --host 0.0.0.0
 | 批量发帖轮询 | 每 30 分钟 | 检查并执行到期的定时发帖任务 |
 | 自动回帖 (Auto-Bump) | 每 20 分钟 | 维护已发帖子的热度 |
 | 拟人养号 (BioWarming) | 每 4 小时 | 模拟真人浏览互动 |
+| 行为审计治理 | 每 12 小时 | 风险评分异常的账号自动下调发帖权重（可在 settings 关闭 `audit_auto_adjust_weight`） |
+| 存活反馈治理 | 每 12 小时 | 死亡原因分流（吧务删除关停火力目标、系统删除转 AI 策略）+ 聚集告警 |
 | 授权心跳 | 每 6 小时 | 校验 Pro 授权状态 |
 | 更新检测 | 每 12 小时 | 检查 GitHub Releases 新版本 |
 
@@ -370,14 +365,12 @@ TiebaMecha/
 │   │   ├── batch_post.py    # 矩阵发帖核心 & Auto-Bump & 渐进式熔断
 │   │   ├── behavior_audit.py # 行为审计模块（风险评分 + 异常检测）
 │   │   ├── client_factory.py # 账号级设备指纹客户端工厂
-│   │   ├── crawl.py         # 数据爬取引擎
 │   │   ├── daemon.py        # 后台守护进程 (APScheduler)
 │   │   ├── link_manager.py  # 短链管理连接器
 │   │   ├── logger.py        # 异步日志 & UI 实时流
 │   │   ├── maintenance.py   # BioWarming 拟人养号引擎（搜索 + 翻页模拟）
 │   │   ├── notification.py  # 全域通知中心
 │   │   ├── obfuscator.py    # 零宽字符混淆器 + 语序打乱
-│   │   ├── plugin_loader.py # 插件沙箱加载器
 │   │   ├── post.py          # 帖子操作
 │   │   ├── proxy.py         # 代理管理 + 预热期机制
 │   │   ├── sign.py          # 签到引擎（含浏览伪装）
@@ -385,17 +378,16 @@ TiebaMecha/
 │   │   ├── auth.py          # 授权 & 硬件指纹验证
 │   │   └── web_auth.py      # Web 密码认证 (PBKDF2)
 │   ├── db/                  # 数据库层
-│   │   ├── models.py        # SQLAlchemy 模型 (15 张表)
-│   │   └── crud.py          # 异步 CRUD 操作 (45+ 方法)
+│   │   ├── models.py        # SQLAlchemy 模型 (14 张表)
+│   │   └── crud.py          # 数据库门面 + Repository 组合 (45+ 方法)
 │   ├── web/                 # Web UI (Flet)
 │   │   ├── app.py           # 主应用 & 路由管理
-│   │   ├── components/      # UI 组件 (HUD、通知铃铛、主题等)
-│   │   └── pages/           # 页面模块 (13 个页面)
+│   │   ├── components/      # UI 组件 (HUD、通知铃铛、toast、主题等)
+│   │   └── pages/           # 页面模块 (11 个页面)
 │   └── assets/              # 静态资源 (图标等)
 ├── data/                    # 数据目录（不纳入版本控制）
 │   └── tieba_mecha.db       # SQLite 数据库
-├── plugins/                 # 插件目录
-├── tests/                   # 测试用例 (30+ 自动化测试)
+├── tests/                   # 测试用例 (600+ 自动化测试)
 ├── scripts/                 # 实用脚本
 ├── docs/                    # 项目文档
 ├── .env.example             # 环境变量模板
@@ -475,56 +467,6 @@ TiebaMecha 内置十重反检测机制，最大程度模拟真人行为、降低
 - **自动检测异常**：分析签到率、发帖时间分布、内容多样性、操作间隔等维度
 - **风险评分**：综合 5 个维度计算 0-10 风险评分
 - **改进建议**：针对检测到的异常提供具体的风险降低建议
-
----
-
-## 🔌 插件开发
-
-TiebaMecha 支持插件扩展。在 `plugins/` 目录下创建 Python 文件：
-
-```python
-# plugins/my_plugin.py
-from tieba_mecha.core.plugin_loader import PluginBase
-
-class MyPlugin(PluginBase):
-    name = "我的插件"
-    description = "插件描述"
-    version = "1.1.1"
-    author = "Your Name"
-
-    async def on_load(self):
-        """插件加载时调用"""
-        print("插件已加载")
-
-    async def on_unload(self):
-        """插件卸载时调用"""
-        print("插件已卸载")
-
-    async def on_post_success(self, tid: int, fname: str, account_id: int):
-        """发帖成功后的回调"""
-        print(f"帖子发布成功: TID={tid} @ {fname} by Account#{account_id}")
-
-    async def on_post_failed(self, error: str, fname: str):
-        """发帖失败后的回调"""
-        print(f"发帖失败: {fname} - {error}")
-
-    async def on_sign_complete(self, fname: str, success: bool):
-        """签到完成后的回调"""
-        status = "成功" if success else "失败"
-        print(f"签到{status}: {fname}")
-```
-
-### 可用钩子列表
-
-| 钩子函数 | 触发时机 | 参数 |
-|----------|----------|------|
-| `on_load()` | 插件加载 | 无 |
-| `on_unload()` | 插件卸载 | 无 |
-| `on_post_success()` | 发帖成功 | `tid`, `fname`, `account_id` |
-| `on_post_failed()` | 发帖失败 | `error`, `fname` |
-| `on_sign_complete()` | 签到完成 | `fname`, `success` |
-| `on_material_added()` | 物料添加 | `material_id`, `title` |
-| `on_account_expired()` | 账号失效 | `account_id`, `reason` |
 
 ---
 

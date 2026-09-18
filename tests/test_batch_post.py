@@ -4,49 +4,7 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tieba_mecha.core.batch_post import RateLimiter, BatchPostTask, BatchPostManager
-
-
-class TestRateLimiter:
-    """Tests for RateLimiter class."""
-
-    def test_rate_limiter_initialization(self):
-        """Test RateLimiter initializes correctly."""
-        limiter = RateLimiter(rpm=8)  # 实际默认 RPM 为 8（保守值）
-        assert limiter.rpm == 8
-        assert limiter.timestamps == []
-
-    def test_rate_limiter_custom_rpm(self):
-        """Test RateLimiter with custom RPM."""
-        limiter = RateLimiter(rpm=30)
-        assert limiter.rpm == 30
-
-    @pytest.mark.asyncio
-    async def test_rate_limiter_allows_under_limit(self):
-        """Test that requests under the limit are allowed immediately."""
-        limiter = RateLimiter(rpm=5)
-
-        # Should not wait for first few requests
-        for _ in range(5):
-            await limiter.wait_if_needed()
-
-        assert len(limiter.timestamps) == 5
-
-    @pytest.mark.asyncio
-    async def test_rate_limiter_timestamp_cleanup(self):
-        """Test that old timestamps are cleaned up."""
-        limiter = RateLimiter(rpm=8)  # 保守值
-
-        # Add some "old" timestamps (simulate time passing)
-        import time
-        old_time = time.time() - 120  # 2 minutes ago
-        limiter.timestamps = [old_time, old_time + 30]
-
-        # Trigger a wait check
-        await limiter.wait_if_needed()
-
-        # Old timestamps should be cleaned
-        assert len(limiter.timestamps) == 1
+from tieba_mecha.core.batch_post import BatchPostTask, BatchPostManager
 
 
 class TestBatchPostTask:

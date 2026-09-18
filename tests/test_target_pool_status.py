@@ -245,8 +245,11 @@ class TestMaterialSurvivalMarking:
         assert target[0].is_post_target is False
         assert "吧务删除" in target[0].ban_reason
 
-    async def test_dead_by_system_marks_forum_banned(self, db):
-        """帖子被系统风控删除 → Forum 标记封禁"""
+    async def test_dead_by_system_does_not_ban_forum(self, db):
+        """帖子被系统风控删除 → 不封禁贴吧（内容侧风险，路由给 AI 改写策略）。
+
+        历史行为：系统删除也会封吧。存活反馈闭环改为死亡原因分流——
+        关吧解决不了内容风控问题，反而无谓损失火力目标。"""
         acc = await db.add_account(name="test_acc2", bduss="y" * 192)
         await db.add_forum(fid=2, fname="sys_forum", account_id=acc.id)
         from tieba_mecha.db.models import MaterialPool
@@ -268,8 +271,7 @@ class TestMaterialSurvivalMarking:
         forums = await db.get_forums(account_id=acc.id)
         target = [f for f in forums if f.fname == "sys_forum"]
         assert len(target) == 1
-        assert target[0].is_banned is True
-        assert target[0].is_post_target is False
+        assert target[0].is_banned is False
 
     async def test_alive_does_not_mark_forum_banned(self, db):
         """帖子存活 → 不标记封禁"""

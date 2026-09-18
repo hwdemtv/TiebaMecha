@@ -15,11 +15,9 @@ from ..models import (
     BatchPostLog,
     BatchPostTask,
     CaptchaEvent,
-    CrawlTask,
     Forum,
     MaterialPool,
     Notification,
-    PostCache,
     Proxy,
     Setting,
     SignLog,
@@ -189,6 +187,98 @@ class MaterialRepository:
                 account_stats[account_id]["total"] += count
             
             return list(account_stats.values())
+
+    async def get_survival_examples(
+        self,
+        fname: str | None = None,
+        positive_limit: int = 5,
+        negative_limit: int = 5,
+        alive_hours: int = 48,
+        days: int = 14,
+    ) -> dict[str, list[str]]:
+        """
+        存活反馈样本（供 AI 改写 few-shot 注入）：
+        - positive: 存活 ≥ alive_hours 小时的帖子标题（优先本吧，不足则全局补齐）
+        - negative: 近 days 天被系统风控删除 (deleted_by_system) 的标题
+
+        Returns:
+            {"positive": [标题...], "negative": [标题...]}
+        """
+        from datetime import datetime, timedelta
+
+        positive: list[str] = []
+
+        async def _query_alive(name_filter: str | None, limit: int) -> list[str]:
+            async with self.async_session() as session:
+                from sqlalchemy import func
+                stmt = (
+                    select(MaterialPool.title)
+                    .where(
+                        MaterialPool.survival_status == "alive",
+                        MaterialPool.posted_time.isnot(None),
+                        MaterialPool.posted_time <= datetime.now() - timedelta(hours=alive_hours),
+                        MaterialPool.title.isnot(None),
+                        MaterialPool.title != "",
+                    )
+                    .order_by(MaterialPool.posted_time.desc())
+                    .limit(limit)
+                )
+                if name_filter:
+                    stmt = stmt.where(MaterialPool.posted_fname == name_filter)
+                rows = await session.execute(stmt)
+                return [r.title for r in rows.all() if r.title]
+
+        try:
+            if fname:
+                positive = await _query_alive(fname, positive_limit)
+            if len(positive) < positive_limit:
+                seen = set(positive)
+                for t in await _query_alive(None, positive_limit * 2):
+                    if t not in seen:
+                        positive.append(t)
+                        seen.add(t)
+                    if len(positive) >= positive_limit:
+                        break
+        except Exception as e:
+            logger.warning(f"查询存活正例失败: {e}")
+
+        negative: list[str] = []
+        try:
+            async with self.async_session() as session:
+                stmt = (
+                    select(MaterialPool.title)
+                    .where(
+                        MaterialPool.survival_status == "dead",
+                        MaterialPool.death_reason == "deleted_by_system",
+                        MaterialPool.posted_time >= datetime.now() - timedelta(days=days),
+                        MaterialPool.title.isnot(None),
+                        MaterialPool.title != "",
+                    )
+                    .order_by(MaterialPool.posted_time.desc())
+                    .limit(negative_limit)
+                )
+                rows = await session.execute(stmt)
+                negative = [r.title for r in rows.all() if r.title]
+        except Exception as e:
+            logger.warning(f"查询系统删除反例失败: {e}")
+
+        return {"positive": positive, "negative": negative}
+
+    async def get_death_reason_stats(self, days: int = 14) -> dict[str, int]:
+        """近 N 天按死亡原因统计已死物料数量（存活治理决策依据）"""
+        from datetime import datetime, timedelta
+        async with self.async_session() as session:
+            from sqlalchemy import func
+            result = await session.execute(
+                select(MaterialPool.death_reason, func.count(MaterialPool.id))
+                .where(
+                    MaterialPool.survival_status == "dead",
+                    MaterialPool.posted_time >= datetime.now() - timedelta(days=days),
+                )
+                .group_by(MaterialPool.death_reason)
+            )
+            return {reason or "unknown": count for reason, count in result.all()}
+
     async def get_materials_paginated(
         self,
         survival_status: str | None = None,
@@ -445,11 +535,13 @@ class MaterialRepository:
                 m.death_reason = death_reason
                 m.last_checked_at = datetime.now()
 
-                # 联动标记：帖子被删除时，标记该账号在该贴吧为封禁/风控状态
+                # 联动标记：死亡原因分流（存活反馈闭环）
+                # - 吧务删除 → 贴吧侧风险：标记该账号在该贴吧封禁并关闭火力目标
+                # - 系统风控删除 → 内容侧风险：关吧无法解决，路由给 AI 改写策略
+                #   （存活样本注入/聚集告警），不在此处封禁贴吧
                 # (banned_by_mod 仅兼容历史数据, 当前分类器只产出 deleted_by_mod)
                 ban_reason_map = {
                     "banned_by_mod": "存活探测：帖子被吧务删除",
-                    "deleted_by_system": "存活探测：帖子被系统风控删除",
                     "deleted_by_mod": "存活探测：帖子被吧务删除",
                 }
                 if status == "dead" and death_reason in ban_reason_map and m.posted_account_id and m.posted_fname:

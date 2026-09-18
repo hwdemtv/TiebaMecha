@@ -318,7 +318,7 @@ async def add_thread(
         (是否成功, 消息, tid)
     """
     from .obfuscator import Obfuscator
-    from .web_poster import build_web_headers, content_to_web_bbcode, build_thread_payload, prewarm_and_commit_thread
+    from .web_poster import build_web_headers, normalize_web_content, build_thread_payload, prewarm_and_commit_thread
     import httpx
     creds = await get_account_credentials(db)
     if not creds:
@@ -348,7 +348,7 @@ async def add_thread(
             safe_title = obf.inject_zero_width_chars(title, density=0.2)
             safe_content = obf.obfuscate_all(content)
 
-            post_body = build_thread_payload(fname, forum.fid, client.account.tbs, safe_title, content_to_web_bbcode(safe_content))
+            post_body = build_thread_payload(fname, forum.fid, client.account.tbs, safe_title, normalize_web_content(safe_content))
 
             async with httpx.AsyncClient(proxy=proxy_url) as http_client:
                 res_json = await prewarm_and_commit_thread(

@@ -529,21 +529,18 @@ class SurvivalPage:
         self.page.open(dialog)
 
     def _confirm_delete(self, m, parent_dialog):
-        """显示删除确认弹窗"""
+        """关闭详情弹窗后弹统一确认框，确认后执行删除"""
         self.page.close(parent_dialog)
-        confirm = ft.AlertDialog(
-            title=ft.Text("确认删除"),
-            content=ft.Text(f"确定要删除物料 #{m.id} 吗？此操作不可撤销。"),
-            actions=[
-                ft.TextButton("取消", on_click=lambda e: self.page.close(confirm)),
-                ft.TextButton("删除", style=ft.ButtonStyle(color="error"), on_click=lambda e: self.page.run_task(self._do_delete, m.id, confirm)),
-            ],
-        )
-        self.page.open(confirm)
 
-    async def _do_delete(self, material_id: int, confirm_dialog):
+        async def _run():
+            from ..components.toast import confirm_async
+            if await confirm_async(self.page, "确认删除", f"确定要删除物料 #{m.id} 吗？此操作不可撤销。", confirm_text="删除"):
+                await self._do_delete(m.id)
+
+        self.page.run_task(_run)
+
+    async def _do_delete(self, material_id: int):
         """执行删除"""
-        self.page.close(confirm_dialog)
         if self.db:
             from ...core.logger import log_info
             await log_info(f"用户删除物料 #{material_id}")

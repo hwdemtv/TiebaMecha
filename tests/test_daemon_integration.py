@@ -34,6 +34,10 @@ class TestDaemonIntegration:
             assert "batch_post_job" in job_ids
             assert "update_check_job" in job_ids
             assert "auth_check_job" in job_ids
+            assert "auto_bump_job" in job_ids
+            # 反馈闭环周期任务（行为审计治理 + 存活反馈治理）
+            assert "behavior_audit_job" in job_ids
+            assert "survival_governance_job" in job_ids
             
             daemon.stop()
             assert daemon._started is False

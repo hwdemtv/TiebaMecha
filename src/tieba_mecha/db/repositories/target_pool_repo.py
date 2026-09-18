@@ -15,11 +15,9 @@ from ..models import (
     BatchPostLog,
     BatchPostTask,
     CaptchaEvent,
-    CrawlTask,
     Forum,
     MaterialPool,
     Notification,
-    PostCache,
     Proxy,
     Setting,
     SignLog,
@@ -39,15 +37,21 @@ class TargetPoolRepository:
 
         自动判定规则（只关闭，不自动打开，避免覆盖用户手动设置）：
         - 被封禁 → is_post_target=False
-        - 有被吧务删帖记录 → is_post_target=False
+        - 有被吧务删帖等"贴吧侧风险"记录 → is_post_target=False
         - 安全状态不自动恢复，需用户手动在 UI 中重新开启
+
+        死亡原因分流（存活反馈闭环）：
+        - deleted_by_system（系统风控删除）是内容问题而非贴吧问题，
+          关吧无法解决——路由给 AI 改写策略（存活样本注入/深度改写建议），
+          不在此处关停贴吧。
 
         Returns: 更新的记录数
         """
         from sqlalchemy import func, update as sa_update
         async with self.async_session() as session:
-            # 获取有被删帖记录的贴吧名集合（帖子阵亡且非用户自删/探测异常）
-            _excluded_reasons = ["deleted_by_user", "captcha_required", "error"]
+            # 获取有贴吧侧风险删帖记录的贴吧名集合
+            # （排除用户自删/探测异常，以及内容侧风险的系统删除）
+            _excluded_reasons = ["deleted_by_user", "captcha_required", "error", "deleted_by_system"]
             dead_stmt = (
                 select(MaterialPool.posted_fname)
                 .where(

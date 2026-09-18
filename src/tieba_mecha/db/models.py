@@ -95,48 +95,6 @@ class SignLog(Base):
     )
 
 
-class CrawlTask(Base):
-    """爬取任务"""
-
-    __tablename__ = "crawl_tasks"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    task_type: Mapped[str] = mapped_column(String(50), nullable=False, comment="任务类型: threads/user/posts")
-    target: Mapped[str] = mapped_column(String(200), nullable=False, comment="目标: 贴吧名/用户ID等")
-    status: Mapped[str] = mapped_column(String(20), default="pending", comment="状态: pending/running/completed/failed")
-    result_path: Mapped[str] = mapped_column(String(500), default="", comment="结果文件路径")
-    total_count: Mapped[int] = mapped_column(Integer, default=0, comment="已爬取数量")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="完成时间")
-    account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
-    
-    __table_args__ = (
-        Index("ix_crawl_tasks_created_at", "created_at"),  # 按时间排序
-        Index("ix_crawl_tasks_account_id", "account_id"),  # 按账号查询
-    )
-
-
-class PostCache(Base):
-    """帖子缓存 (用于批量操作)"""
-
-    __tablename__ = "post_cache"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tid: Mapped[int] = mapped_column(Integer, nullable=False, comment="主题帖ID")
-    pid: Mapped[int] = mapped_column(Integer, nullable=False, comment="回复ID")
-    fname: Mapped[str] = mapped_column(String(100), nullable=False, comment="贴吧名称")
-    title: Mapped[str] = mapped_column(String(500), default="", comment="帖子标题")
-    author_id: Mapped[int] = mapped_column(Integer, default=0, comment="作者ID")
-    author_name: Mapped[str] = mapped_column(String(100), default="", comment="作者名称")
-    is_selected: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否选中")
-    cached_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="缓存时间")
-    
-    __table_args__ = (
-        Index("ix_post_cache_fname", "fname"),  # 按贴吧名称查询
-        Index("ix_post_cache_cached_at", "cached_at"),  # 按缓存时间排序
-    )
-
-
 class Setting(Base):
     """全局设置"""
 
@@ -415,4 +373,23 @@ class BatchPostLog(Base):
         Index("ix_batch_post_logs_created_at", "created_at"),
         Index("ix_batch_post_logs_task_id", "task_id"),
         Index("ix_batch_post_logs_fname_status", "fname", "status"),  # 矩阵统计按吧+状态聚合
+    )
+
+
+class BreakerState(Base):
+    """风控熔断器持久化状态（跨任务/跨进程存续，24h 回溯设计意图的落地载体）"""
+
+    __tablename__ = "breaker_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="账号ID")
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, default="post", comment="熔断场景: post/follow/unfollow")
+    fail_streak: Mapped[int] = mapped_column(Integer, default=0, comment="连续失败次数")
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最近一次失败时间")
+    breaker_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="熔断截止时间（NULL 表示未熔断）")
+    trigger_times_json: Mapped[str] = mapped_column(Text, default="[]", comment="24h 内触发时间戳列表 JSON")
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "scope", name="uq_breaker_account_scope"),
+        Index("ix_breaker_state_until", "breaker_until"),
     )

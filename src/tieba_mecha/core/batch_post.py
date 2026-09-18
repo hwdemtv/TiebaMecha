@@ -23,36 +23,10 @@ from .logger import log_info, log_warn, log_error
 from .auth import get_auth_manager, AuthStatus
 
 
-class RateLimiter:
-    """基于滑动时间窗的动态令牌限流器 (支持并发安全)"""
-    def __init__(self, rpm: int = 15):
-        self.rpm: int = rpm
-        self.timestamps: list[float] = []
-        self._lock: asyncio.Lock = asyncio.Lock()
-        
-    async def wait_if_needed(self):
-        async with self._lock:
-            now: float = time.time()
-            # 淘汰一分钟之前的记录
-            self.timestamps = [t for t in self.timestamps if now - t < 60]
-            
-            if len(self.timestamps) >= self.rpm:
-                # 基于最早时间戳计算休眠时长
-                wait_time: float = 60 - (now - self.timestamps[0]) + 1
-                await log_warn(f"触发内部速率安全墙 (>{self.rpm}帖/分)，流控休眠 {wait_time:.1f} 秒...")
-                await asyncio.sleep(wait_time)
-                # 唤醒后刷新时间记录以修正窗口
-                now = time.time()
-                self.timestamps = [t for t in self.timestamps if now - t < 60]
-                
-            self.timestamps.append(now)
-
-
 class PerAccountRateLimiter:
     """
     每账号独立RPM限制器。
     每个账号有独立的滑动时间窗，避免全局限流导致资源竞争。
-    相比全局 RateLimiter，更精细化控制每个账号的发帖频率。
     """
     def __init__(self, rpm: int = 5):
         """
@@ -292,6 +266,54 @@ class ContentSimilarityDetector:
             if len(self._history) > 100:
                 self._history = self._history[-100:]
 
+    async def seed_from_db(self, db, limit: int = 100) -> int:
+        """
+        从 batch_post_logs 回种历史内容（修复：状态原先仅存内存，任务结束即丢，
+        "24h 回溯检测"跨任务失效）。发帖成功时会把 title/content 写入日志的
+        data_json，这里重建 bigram 历史。失败静默返回 0（退化为内存模式）。
+
+        Returns:
+            回种的历史条数
+        """
+        try:
+            from datetime import datetime, timedelta
+            from sqlalchemy import select as _select
+            from ..db.models import BatchPostLog
+            cutoff = datetime.now() - timedelta(hours=self.window_hours)
+            async with db.async_session() as session:
+                result = await session.execute(
+                    _select(BatchPostLog.title, BatchPostLog.data_json, BatchPostLog.created_at)
+                    .where(
+                        BatchPostLog.status == "success",
+                        BatchPostLog.created_at >= cutoff,
+                    )
+                    .order_by(BatchPostLog.created_at.desc())
+                    .limit(limit)
+                )
+                rows = result.all()
+            seeded = 0
+            for row in reversed(rows):
+                try:
+                    data = json.loads(row.data_json or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    data = {}
+                content = data.get("content", "")
+                if not row.title and not content:
+                    continue
+                ts = row.created_at.timestamp() if row.created_at else time.time()
+                async with self._lock:
+                    self._history.append((self._bigrams(f"{row.title or ''} {content}"), ts))
+                seeded += 1
+            async with self._lock:
+                # 与内存上限一致
+                self._history = self._history[-100:]
+            if seeded:
+                await log_info(f"内容相似度检测器已回种 {seeded} 条历史发帖（{self.window_hours:.0f}h 窗口）")
+            return seeded
+        except Exception as e:
+            await log_warn(f"相似度历史回种失败（退化为内存模式）: {e}")
+            return 0
+
 class FailureCircuitBreaker:
     """
     渐进式连续失败熔断器：
@@ -299,18 +321,86 @@ class FailureCircuitBreaker:
     - 第 2 次触发（24h 内）：暂停 2 小时
     - 第 3 次触发（24h 内）：暂停 6 小时
     避免一刀切导致误杀，也防止短时间内反复触发。
+
+    传入 db 时状态持久化到 breaker_state 表（跨任务/跨进程存续），
+    每次 execute_task 开始先 await load() 回种内存；不传 db 则退化为纯内存实现（测试友好）。
     """
-    def __init__(self, max_consecutive_failures: int = 5, base_cooldown: int = 30):
+    def __init__(self, max_consecutive_failures: int = 5, base_cooldown: int = 30,
+                 db=None, scope: str = "post"):
         """
         Args:
             max_consecutive_failures: 连续失败多少次触发熔断
             base_cooldown: 基础熔断时长（分钟），逐级倍增
+            db: Database 实例（可选，用于持久化）
+            scope: 熔断场景标识（post/follow/unfollow），不同场景独立计数
         """
         self.max_consecutive_failures: int = max_consecutive_failures
         self.base_cooldown: int = base_cooldown
+        self.db = db
+        self.scope: str = scope
         self._failure_counts: dict[int, tuple[int, float]] = {}  # {account_id: (count, last_failure_time)}
         self._trigger_history: dict[int, list[float]] = {}  # {account_id: [trigger_timestamps]}
+        self._breaker_until: dict[int, float] = {}  # {account_id: breaker_until_epoch}
         self._lock: asyncio.Lock = asyncio.Lock()
+
+    # ---------- 持久化 ----------
+
+    async def load(self) -> None:
+        """从 breaker_state 表回种内存状态（未配置 db 时为空操作）"""
+        if not self.db:
+            return
+        try:
+            from sqlalchemy import select as _select
+            from ..db.models import BreakerState
+            async with self.db.async_session() as session:
+                result = await session.execute(
+                    _select(BreakerState).where(BreakerState.scope == self.scope)
+                )
+                for row in result.scalars().all():
+                    last_ts = row.last_failure_at.timestamp() if row.last_failure_at else 0.0
+                    self._failure_counts[row.account_id] = (row.fail_streak or 0, last_ts)
+                    try:
+                        triggers = json.loads(row.trigger_times_json or "[]")
+                    except (json.JSONDecodeError, TypeError):
+                        triggers = []
+                    self._trigger_history[row.account_id] = [float(t) for t in triggers]
+                    if row.breaker_until:
+                        self._breaker_until[row.account_id] = row.breaker_until.timestamp()
+        except Exception as e:
+            await log_warn(f"熔断状态回种失败（退化为内存模式）: {e}")
+
+    async def _persist(self, account_id: int) -> None:
+        """将单账号状态写透到 breaker_state 表"""
+        if not self.db:
+            return
+        try:
+            from datetime import datetime as _dt
+            from sqlalchemy import select as _select
+            from ..db.models import BreakerState
+            count, last_time = self._failure_counts.get(account_id, (0, 0.0))
+            until_epoch = self._breaker_until.get(account_id)
+            async with self.db.async_session() as session:
+                row = (await session.execute(
+                    _select(BreakerState).where(
+                        BreakerState.account_id == account_id,
+                        BreakerState.scope == self.scope,
+                    )
+                )).scalar_one_or_none()
+                if row is None:
+                    if count <= 0 and until_epoch is None:
+                        return
+                    row = BreakerState(account_id=account_id, scope=self.scope)
+                    session.add(row)
+                row.fail_streak = count
+                row.last_failure_at = _dt.fromtimestamp(last_time) if last_time > 0 else None
+                row.breaker_until = _dt.fromtimestamp(until_epoch) if until_epoch else None
+                row.trigger_times_json = json.dumps(self._trigger_history.get(account_id, []))
+                await session.commit()
+        except Exception as e:
+            # 持久化失败不影响内存熔断逻辑
+            await log_warn(f"熔断状态持久化失败（账号 {account_id}）: {e}")
+
+    # ---------- 熔断逻辑 ----------
 
     def _get_cooldown_minutes(self, account_id: int) -> int:
         """根据 24h 内触发次数计算渐进式冷却时长"""
@@ -344,6 +434,7 @@ class FailureCircuitBreaker:
                 self._failure_counts[account_id] = (1, now)
 
             count, _ = self._failure_counts[account_id]
+            triggered = False
             if count >= self.max_consecutive_failures:
                 cooldown = self._get_cooldown_minutes(account_id)
                 self._trigger_history.setdefault(account_id, []).append(now)
@@ -351,35 +442,32 @@ class FailureCircuitBreaker:
                 self._trigger_history[account_id] = [
                     t for t in self._trigger_history[account_id] if now - t < 86400
                 ]
+                self._breaker_until[account_id] = now + cooldown * 60
+                triggered = True
                 await log_error(
                     f"🚨 渐进式熔断：账号 [{account_id}] 连续失败 {count} 次，"
                     f"暂停 {cooldown} 分钟（24h 内第 {len(self._trigger_history[account_id])} 次触发）。"
                     f"请检查账号状态或网络。"
                 )
-                return True
-            return False
+            await self._persist(account_id)
+            return triggered
 
     async def record_success(self, account_id: int):
         """记录一次成功，重置失败计数"""
         async with self._lock:
-            if account_id in self._failure_counts:
-                del self._failure_counts[account_id]
+            self._failure_counts.pop(account_id, None)
+            self._breaker_until.pop(account_id, None)
+            await self._persist(account_id)
 
     def is_in_cooldown(self, account_id: int) -> bool:
         """检查账号是否处于熔断中"""
-        if account_id not in self._failure_counts:
+        until = self._breaker_until.get(account_id)
+        if until is None:
             return False
-
-        count: int
-        last_time: float
-        count, last_time = self._failure_counts[account_id]
-        if count < self.max_consecutive_failures:
-            return False
-
-        cooldown = self._get_cooldown_minutes(account_id)
-        elapsed: float = time.time() - last_time
-        if elapsed >= cooldown * 60:
-            del self._failure_counts[account_id]
+        if time.time() >= until:
+            # 熔断到期，清理内存标记（下次写透由 record_* 触发）
+            self._breaker_until.pop(account_id, None)
+            self._failure_counts.pop(account_id, None)
             return False
         return True
 
@@ -1078,16 +1166,19 @@ class BatchPostManager:
         af_tracker = AccountForumCooldown(cooldown_seconds=600)  # 10分钟独立冷却
         # 验证码熔断器：检测验证码后自动暂停账号
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
-        # 内容重复度检测器：避免发送高度相似内容（24h窗口）
+        # 内容重复度检测器：避免发送高度相似内容（24h窗口，从发帖日志回种历史）
         similarity_detector = ContentSimilarityDetector(similarity_threshold=0.7, window_hours=24.0)
-        # 渐进式连续失败熔断器：连续失败N次后暂停，24h内重复触发逐级加重
-        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=5, base_cooldown=30)
+        await similarity_detector.seed_from_db(self.db)
+        # 渐进式连续失败熔断器：连续失败N次后暂停，24h内重复触发逐级加重（状态持久化跨任务存续）
+        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=5, base_cooldown=30, db=self.db, scope="post")
+        await failure_breaker.load()
         # 根据时段调整发帖延迟（复用顶部已创建的 time_dispatcher）
         delay_min, delay_max = time_dispatcher.get_adjusted_delay(task.delay_min, task.delay_max)
 
         # [重构核心] 智能化调度与多账号 Failover 循环体系
         material_ptr = 0
         consecutive_no_account_skips = 0  # 连续"无可用账号"跳过计数，用于检测死锁
+        survival_example_cache: dict[str, dict] = {}  # {fname: 存活反馈样本}（存活→AI 策略闭环）
         while task.progress < actual_total and material_ptr < len(pending_materials):
             current_material = pending_materials[material_ptr]
             
@@ -1187,8 +1278,21 @@ class BatchPostManager:
                 if task.use_ai:
                     optimizer = AIOptimizer(self.db)
                     try:
+                        # 存活反馈闭环：存活标题作风格正例、被系统删除标题作反例注入 prompt
+                        if current_target_fname not in survival_example_cache:
+                            try:
+                                survival_example_cache[current_target_fname] = await self.db.get_survival_examples(
+                                    fname=current_target_fname
+                                )
+                            except Exception as surv_err:
+                                await log_warn(f"存活样本查询失败（跳过注入）: {surv_err}")
+                                survival_example_cache[current_target_fname] = {"positive": [], "negative": []}
+                        surv_examples = survival_example_cache[current_target_fname]
+                        if not surv_examples["positive"] and not surv_examples["negative"]:
+                            surv_examples = None
                         s_ai, opt_t, opt_c, _ = await asyncio.wait_for(
-                            optimizer.optimize_post(title, content, persona=task.ai_persona),
+                            optimizer.optimize_post(title, content, persona=task.ai_persona,
+                                                    survival_examples=surv_examples),
                             timeout=30.0
                         )
                         if s_ai:
@@ -1225,7 +1329,7 @@ class BatchPostManager:
                         proxy_url = await build_proxy_url_from_model(self.db, proxy_id)
 
                         # 请求头：统一走 core/web_poster 的单源构建
-                        from .web_poster import build_web_headers, content_to_web_bbcode, build_thread_payload, prewarm_and_commit_thread
+                        from .web_poster import build_web_headers, normalize_web_content, build_thread_payload, prewarm_and_commit_thread
                         headers = build_web_headers(bduss, stoken, quoted_fname, ua)
                         # 安全提示：headers 中包含敏感凭证(BDUSS/STOKEN)，禁止在日志中打印此对象
 
@@ -1239,7 +1343,7 @@ class BatchPostManager:
                                 getattr(forum_info, 'fid', 0),
                                 client.account.tbs,
                                 title,
-                                content_to_web_bbcode(safe_content),
+                                normalize_web_content(safe_content),
                             )
 
                             res_json = await prewarm_and_commit_thread(
@@ -1261,7 +1365,7 @@ class BatchPostManager:
                                     posted_account_id=account_id, posted_time=datetime.now(),
                                     task_id=str(task.id)
                                 )
-                                # --- 集成：流水持久化 ---
+                                # --- 集成：流水持久化（content 供相似度检测器跨任务回种） ---
                                 await self.db.add_batch_post_log(
                                     task_id=str(task.id),
                                     account_id=account_id,
@@ -1270,7 +1374,7 @@ class BatchPostManager:
                                     title=title,
                                     tid=tid,
                                     status="success",
-                                    data={"progress": task.progress, "total": task.total}
+                                    data={"progress": task.progress, "total": task.total, "content": safe_content}
                                 )
                                 acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
                                 await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
@@ -1417,7 +1521,8 @@ class BatchPostManager:
         # ---- 反风控组件初始化 ----
         rate_limiter = PerAccountRateLimiter(rpm=8)
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
-        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60)
+        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60, db=self.db, scope="follow")
+        await failure_breaker.load()
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
         # 1. 识别受影响的账号
@@ -1565,7 +1670,8 @@ class BatchPostManager:
         # ---- 反风控组件初始化 ----
         rate_limiter = PerAccountRateLimiter(rpm=8)           # 每账号8次/分
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
-        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60)
+        failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60, db=self.db, scope="unfollow")
+        await failure_breaker.load()
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
         # 1. 确定要操作的账号
@@ -1740,6 +1846,29 @@ class BatchPostManager:
             f"批量关注完成：成功 {len(result['success'])}, 失败 {len(result['failed'])}, 跳过 {len(result['skipped'])}"
         )
         return result
+
+
+# 自顶兜底文案模板（AI 生成失败或固定模板模式共用）
+BUMP_FALLBACK_TEMPLATES = [
+    "路过", "看了", "点赞", "顶", "收藏",
+    "不错的", "可以", "好贴", "来了", "路过~",
+    "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
+    "内容不错，赞", "有意思", "帮顶一下", "可以可以",
+    "这个确实可以", "路过支持", "mark一下", "看看再说",
+    "内容挺充实的", "感谢分享", "不错的帖子",
+    "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
+    "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
+    "👍", "✨👍", "好帖", "顶", "已阅", "mark",
+]
+BUMP_EMOJIS = ["[赞]", "✨", "👍", "👍👍", ""]
+
+
+def make_templated_bump_content(title: str = "") -> str:
+    """从兜底模板生成一条自顶内容（20% 概率带上标题关键词前缀）"""
+    base_text = random.choice(BUMP_FALLBACK_TEMPLATES)
+    if random.random() < 0.2 and title:
+        base_text = f"{title[:8]} 还行，{base_text}"
+    return f"{base_text} {random.choice(BUMP_EMOJIS)}"
 
 
 class AutoBumpManager:
@@ -1963,46 +2092,14 @@ class AutoBumpManager:
                                 await log_info(f"物料 [{material.id}] AI生成自顶内容: {bump_content}")
                             else:
                                 # AI生成失败时使用兜底模板
-                                templates = [
-                                    "路过", "看了", "点赞", "顶", "收藏",
-                                    "不错的", "可以", "好贴", "来了", "路过~",
-                                    "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
-                                    "内容不错，赞", "有意思", "帮顶一下", "可以可以",
-                                    "这个确实可以", "路过支持", "mark一下", "看看再说",
-                                    "内容挺充实的", "感谢分享", "不错的帖子",
-                                    "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
-                                    "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
-                                    "👍", "✨👍", "好帖", "顶", "已阅", "mark",
-                                ]
-                                emojis = ["[赞]", "✨", "👍", "👍👍", ""]
-                                base_text = random.choice(templates)
-                                if random.random() < 0.2:
-                                    keyword = (material.title or "")[:8]
-                                    base_text = f"{keyword} 还行，{base_text}"
-                                bump_content = f"{base_text} {random.choice(emojis)}"
+                                bump_content = make_templated_bump_content(material.title or "")
                                 await log_warn(f"物料 [{material.id}] AI生成失败，使用模板: {ai_err}")
                         except Exception as gen_err:
                             await log_error(f"自顶内容生成异常: {gen_err}")
                             bump_content = "路过，看了下挺好的"
                     else:
                         # 固定模板模式
-                        templates = [
-                            "路过", "看了", "点赞", "顶", "收藏",
-                            "不错的", "可以", "好贴", "来了", "路过~",
-                            "看了下，还行", "写得挺好的", "收藏了", "支持楼主",
-                            "内容不错，赞", "有意思", "帮顶一下", "可以可以",
-                            "这个确实可以", "路过支持", "mark一下", "看看再说",
-                            "内容挺充实的", "感谢分享", "不错的帖子",
-                            "看完了，内容挺充实的，赞一个", "写得不错，已收藏",
-                            "感谢楼主的整理，辛苦了", "认真看完了，支持一下",
-                            "👍", "✨👍", "好帖", "顶", "已阅", "mark",
-                        ]
-                        emojis = ["[赞]", "✨", "👍", "👍👍", ""]
-                        base_text = random.choice(templates)
-                        if random.random() < 0.2:
-                            keyword = (material.title or "")[:8]
-                            base_text = f"{keyword} 还行，{base_text}"
-                        bump_content = f"{base_text} {random.choice(emojis)}"
+                        bump_content = make_templated_bump_content(material.title or "")
 
                     success = await self.post_manager.reply_to_thread(
                         target_account_id, 
@@ -2020,7 +2117,7 @@ class AutoBumpManager:
                             if mat:
                                 mat.bump_count = (mat.bump_count or 0) + 1
                                 mat.last_bumped_at = datetime.now()
-                                mat.last_date = today
+                                mat.bump_last_date = today
                                 
                                 # 矩阵轮换模式：更新账号索引
                                 if bump_mode == "matrix_loop":

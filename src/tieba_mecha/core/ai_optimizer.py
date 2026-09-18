@@ -32,6 +32,26 @@ _LONG_TAIL_SUFFIXES = [
 
 logger = logging.getLogger(__name__)
 
+# 输出相似度自检阈值：改写结果与原文的 bigram Jaccard 超过该值视为"AI 摆烂"
+SELF_CHECK_SIMILARITY_THRESHOLD = 0.75
+
+
+def _bigram_jaccard(text_a: str, text_b: str, min_len: int = 20) -> float:
+    """
+    字符级 bigram Jaccard 相似度（与 batch_post.ContentSimilarityDetector 同口径）。
+    归一化后任一侧长度不足 min_len 时返回 0（短文本天然高相似，不具判断意义）。
+    """
+    def _normalize(t: str) -> str:
+        return re.sub(r'[^\w一-鿿]', '', t or '').lower()
+
+    a, b = _normalize(text_a), _normalize(text_b)
+    if len(a) < min_len or len(b) < min_len:
+        return 0.0
+    bg_a = {a[i:i + 2] for i in range(len(a) - 1)}
+    bg_b = {b[i:i + 2] for i in range(len(b) - 1)}
+    union = len(bg_a | bg_b)
+    return len(bg_a & bg_b) / union if union else 0.0
+
 
 def _encrypt_api_key(value: str) -> str:
     """加密 API Key 后存储"""
@@ -199,9 +219,15 @@ class AIOptimizer:
         return random.choice(pool)
 
     @require_pro
-    async def optimize_post(self, title: str, content: str, persona: str = None) -> Tuple[bool, str, str, str]:
+    async def optimize_post(self, title: str, content: str, persona: str = None,
+                            survival_examples: dict | None = None) -> Tuple[bool, str, str, str]:
         """
         优化帖子内容
+
+        Args:
+            survival_examples: 存活反馈样本 {"positive": [存活标题], "negative": [被系统删除标题]}，
+                               注入 prompt 作风格 few-shot（存活→策略闭环的一环）
+
         返回: (是否成功, 优化后的标题, 优化后的内容, 错误信息)
         """
         # persona 为 None 时自动根据时段轮换选择
@@ -265,21 +291,6 @@ class AIOptimizer:
                 f"可以选择其中一个融入标题，也可以自行创造类似的长尾变体。\n"
             )
 
-        user_prompt = (
-            f"请根据选定人格（{p_config['name']}）改写以下帖子：\n\n"
-            f"原始标题：{title}\n\n"
-            f"原始内容：{content}\n\n"
-            "要求：\n"
-            "1. 标题 SEO 友好，融入长尾关键词、情绪词或数字（如适用）。\n"
-            "2. 核心关键词在第一段自然出现，正文中再自然嵌入 1-2 个变体。\n"
-            "3. 内容口语化、去 AI 化痕迹，长短句交替，有呼吸感。\n"
-            "4. 描述文字与链接之间保持 2 个换行符，确保链接独立。\n"
-            "5. 即使原文内容较长，改写时也要尽量精炼，贴合人格设定。\n"
-            "6. 单个关键词全文最多出现 3 次，避免堆砌。\n"
-            f"{long_tail_hint}"
-            "请直接返回 JSON：{\"title\": \"...\", \"content\": \"...\"}"
-        )
-
         # ── 链接保护：改写前提取所有 URL，替换为占位符 ──
         original_urls = _URL_PATTERN.findall(content)
         url_placeholders = {}
@@ -289,47 +300,77 @@ class AIOptimizer:
             url_placeholders[placeholder] = url_match
             protected_content = protected_content.replace(url_match, placeholder, 1)
 
-        # 如果内容含 URL，用占位符版本重建 user_prompt
+        # 内容含 URL 时改用占位符版本，并追加链接保护规则
+        link_rule = ""
         if original_urls:
-            user_prompt = (
-                f"请根据选定人格（{p_config['name']}）改写以下帖子：\n\n"
-                f"原始标题：{title}\n\n"
-                f"原始内容：{protected_content}\n\n"
-                "要求：\n"
-                "1. 标题 SEO 友好，融入长尾关键词、情绪词或数字（如适用）。\n"
-                "2. 核心关键词在第一段自然出现，正文中再自然嵌入 1-2 个变体。\n"
-                "3. 内容口语化、去 AI 化痕迹，长短句交替，有呼吸感。\n"
-                "4. 描述文字与链接之间保持 2 个换行符，确保链接独立。\n"
-                "5. 即使原文内容较长，改写时也要尽量精炼，贴合人格设定。\n"
-                "6. 单个关键词全文最多出现 3 次，避免堆砌。\n"
-                f"{long_tail_hint}"
-                "7. 【重要】内容中的 __TIEBAMECHA_LINK_N__ 占位符必须原样保留，不可修改、删除或合并。\n\n"
-                "请直接返回 JSON：{\"title\": \"...\", \"content\": \"...\"}"
+            link_rule = (
+                "7. 【重要】内容中的 __TIEBAMECHA_LINK_N__ 占位符必须原样保留，不可修改、删除或合并。\n"
             )
+        effective_content = protected_content if original_urls else content
+
+        # ── 存活反馈 few-shot：存活良好的标题作风格正例，被系统删除的作反例 ──
+        survival_hint = ""
+        if survival_examples:
+            pos = [t for t in (survival_examples.get("positive") or []) if t][:5]
+            neg = [t for t in (survival_examples.get("negative") or []) if t][:3]
+            hint_parts = []
+            if pos:
+                hint_parts.append(
+                    "以下标题来自近期存活良好的帖子，仅用于把握风格与长度，严禁抄袭或复用：\n"
+                    + "\n".join(f"- {t}" for t in pos)
+                )
+            if neg:
+                hint_parts.append(
+                    "以下标题近期被平台风控删除，请避免类似的开头与结构：\n"
+                    + "\n".join(f"- {t}" for t in neg)
+                )
+            if hint_parts:
+                survival_hint = "【存活参考】\n" + "\n".join(hint_parts) + "\n"
+
+        user_prompt = (
+            f"请根据选定人格（{p_config['name']}）改写以下帖子：\n\n"
+            f"原始标题：{title}\n\n"
+            f"原始内容：{effective_content}\n\n"
+            "要求：\n"
+            "1. 标题 SEO 友好，融入长尾关键词、情绪词或数字（如适用）。\n"
+            "2. 核心关键词在第一段自然出现，正文中再自然嵌入 1-2 个变体。\n"
+            "3. 内容口语化、去 AI 化痕迹，长短句交替，有呼吸感。\n"
+            "4. 描述文字与链接之间保持 2 个换行符，确保链接独立。\n"
+            "5. 即使原文内容较长，改写时也要尽量精炼，贴合人格设定。\n"
+            "6. 单个关键词全文最多出现 3 次，避免堆砌。\n"
+            f"{long_tail_hint}"
+            f"{survival_hint}"
+            f"{link_rule}"
+            "请直接返回 JSON：{\"title\": \"...\", \"content\": \"...\"}"
+        )
 
         url = f"{config['base_url'].rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {config['api_key']}",
             "Content-Type": "application/json"
         }
-        # 基础请求体（不含 response_format，后续按需添加）
-        data = {
-            "model": config["model"],
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.85,
-        }
-        # response_format 并非所有兼容 API 都支持，首次尝试带，失败后去掉重试
-        data_with_format = {**data, "response_format": {"type": "json_object"}}
+
+        def _build_req(user_prompt_text: str, with_format: bool) -> dict:
+            req = {
+                "model": config["model"],
+                "temperature": 0.85,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt_text}
+                ],
+            }
+            if with_format:
+                req["response_format"] = {"type": "json_object"}
+            return req
 
         last_error = ""
         use_format = True
+        current_user_prompt = user_prompt
+        similarity_retried = False
 
         for attempt in range(DEFAULT_MAX_RETRIES + 1):
             try:
-                req_data = data_with_format if use_format else data
+                req_data = _build_req(current_user_prompt, use_format)
                 session = await self._get_session()
                 async with session.post(url, headers=headers, json=req_data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                         if resp.status != 200:
@@ -400,6 +441,23 @@ class AIOptimizer:
                         optimized_title, optimized_content = self._enforce_keyword_density(
                             optimized_title, optimized_content, title
                         )
+
+                        # ── 输出相似度自检：防 AI 摆烂（近似原文的"改写"既无价值又撞重复检测） ──
+                        similarity = _bigram_jaccard(content, optimized_content)
+                        if similarity > SELF_CHECK_SIMILARITY_THRESHOLD:
+                            if not similarity_retried:
+                                similarity_retried = True
+                                current_user_prompt = user_prompt + (
+                                    "\n【重要】上一次输出与原文过于相似，本次必须彻底重组句式、"
+                                    "调整叙述顺序与用词，不得保留原文的连续表述。"
+                                )
+                                logger.warning(
+                                    f"AI 改写与原文相似度 {similarity:.2f} > {SELF_CHECK_SIMILARITY_THRESHOLD}，使用强化指令重试"
+                                )
+                                continue
+                            return False, title, content, (
+                                f"AI 改写与原文相似度过高 ({similarity:.2f})，放弃本次改写（回退原文+混淆）"
+                            )
 
                         return True, optimized_title, optimized_content, ""
             except asyncio.TimeoutError:

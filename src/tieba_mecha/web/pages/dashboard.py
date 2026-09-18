@@ -22,9 +22,9 @@ from ..utils import with_opacity
 from ...core.sign import get_sign_stats
 from ...core.logger import get_log_queue
 from ..components.icons import (
-    ACCOUNT_CIRCLE, VPN_LOCK, FORUM, SETTINGS, 
+    ACCOUNT_CIRCLE, VPN_LOCK, FORUM, SETTINGS,
     EDIT_NOTE_ROUNDED, OPEN_IN_NEW, AUTO_AWESOME,
-    RADAR, CHECK_CIRCLE_ROUNDED, SYNC_PROBLEM_ROUNDED,
+    CHECK_CIRCLE_ROUNDED, SYNC_PROBLEM_ROUNDED,
     AUTO_AWESOME_MOTION_ROUNDED, SCHEDULE_ROUNDED,
     TERMINAL_ROUNDED, SIGNAL_CELLULAR_ALT, NETWORK_CHECK_ROUNDED,
     GROUP, FLASH_ON_ROUNDED, POWER_SETTINGS_NEW_ROUNDED,
@@ -297,13 +297,6 @@ class DashboardPage:
                     "subtitle": "CONTENT OPS",
                     "tooltip": "管理云端贴子、历史发布的引流软文等物料储备。",
                     "on_click": lambda e: self._navigate("posts"),
-                },
-                {
-                    "title": "数据爬取",
-                    "icon": RADAR,
-                    "subtitle": "DATA PROBE",
-                    "tooltip": "采集目标贴吧数据，探测竞品或提取目标用户。",
-                    "on_click": lambda e: self._navigate("crawl"),
                 },
                 {
                     "title": "守护任务",

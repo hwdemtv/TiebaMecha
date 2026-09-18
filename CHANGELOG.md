@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.1/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **存活分析 → 发帖策略反馈闭环**：死亡原因分流——吧务删除（贴吧侧风险）继续自动关停火力目标；系统风控删除（内容侧风险）不再关吧，改为路由给 AI 策略：存活 ≥48h 的帖子标题自动注入 AI 改写 prompt 作风格正例、被系统删除的标题作反例（few-shot），系统删除聚集时自动告警并建议深度改写。新增 daemon 周期任务 `survival_governance_job`（12h，settings `survival_governance_enabled=false` 可关闭）。
+- **行为审计接回控制回路**：新增 daemon 周期任务 `behavior_audit_job`（12h）→ `audit_and_govern`：风险评分 ≥ 阈值（默认 5.0，settings `audit_risk_threshold`）的账号自动下调发帖权重（每次 -3、下限 1，写入 weight_history，`audit_auto_adjust_weight=false` 可关闭）并推送通知。
+- **风控状态持久化**：新增 `breaker_state` 表，渐进式失败熔断器状态跨任务/跨进程存续（发帖/关注/取关三场景独立 scope）；内容相似度检测器从 `batch_post_logs` 回种 24h 历史发帖（成功日志 data_json 现记录正文），"24h 回溯检测"跨任务生效。
+- **AI 改写输出相似度自检**：改写结果与原文 bigram Jaccard > 0.75 视为无效改写，先以强化指令重试一次，仍近似则放弃并回退原文+混淆，防"AI 摆烂"输出既无改写价值又撞重复检测。
+
+### Fixed
+- **Auto-Bump 每日一次判重失效**：自顶成功后误写 `mat.last_date`（模型字段实为 `bump_last_date`，动态属性不落库），scheduled/matrix_loop 模式同一天会重复自顶。
+- **行为审计风险评分数学错误**：原实现直接累加"档位分×权重"，理论满分仅 2.8，与 0-10 量表声明及 5.0 高风险阈值不符（高风险告警永不触发）。现按理论满分归一，全维度最高档得 10 分。
+- **发帖正文分段丢失（回归修复）**：撤销 7835929 引入的 `\n`→`[br]` 转换与 `rich_text=1` 参数——`[br]` 会被贴吧服务端静默丢弃导致正文连成一行。已用线上帖子实证：裸 `\n` 发帖在存储层保留分段、Web 端渲染为 `<p>` 分段。现恢复为仅做 CR/CRLF→LF 规范化后原样发送（`content_to_web_bbcode` 更名 `normalize_web_content`）。
+
+### Removed
+- **插件系统**：移除 plugin_loader 与插件中心页面。README 宣传的 7 个事件钩子在代码中从未被调度（插件仅能手动运行），属无效扩展面。
+- **数据爬取模块**：移除 core/crawl、Web 数据爬取页面、crawl_tasks/post_cache 表模型与 `tieba crawl` CLI 命令组。该模块与核心自动化零集成，产出仅为本地导出文件。注意：随之一并移除"爬取帖子导入物料池"入口。
+- **死代码**：移除无调用方的全局 `RateLimiter`（锁内 sleep 隐患）与 `ProxyWarmupManager.SAFE_ACTIONS/is_action_safe` 白名单；修正 proxy_warmup_hours 配置失实注释（预热期固定 48h）。
+
+### Changed
+- **组件单源化收尾**：存活分析删物料、批量发帖清空物料池、帖子批量删除三处手写确认对话框统一接入 `confirm_async`。
+- **去重**：自动回帖兜底模板（两份 35 条字面量）、签到浏览伪装（两份相同代码块）、AI 改写 user_prompt（含/不含 URL 两份）分别收敛为单一实现。
+- **仓库解耦**：官网 website/ 移出本仓库跟踪（本地保留，请迁移至独立仓库）；scratch/ 诊断脚本、output/ 爬取产物、根目录导出 CSV 与生成图标一并移出跟踪。
+
 ## [1.3.2] - 2026-05-09
 
 ### Added

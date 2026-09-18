@@ -1236,24 +1236,21 @@ class BatchPostPage:
 
     async def _clear_all_materials(self, e=None):
         if e is not None:
-            # 用户手动触发：先弹确认框，防止误触清空全部物料
-            async def do_clear(_):
-                try:
-                    self.page.close(dialog)
-                    await self._clear_all_materials(e=None)
-                    self._show_snackbar("物料池已全库排空", "success")
-                except Exception as ex:
-                    self._show_snackbar(f"清空失败: {ex}", "error")
-
-            dialog = ft.AlertDialog(
-                title=ft.Row([ft.Icon(icons.DELETE_FOREVER, color="error"), ft.Text("确认摧毁总计划？")]),
-                content=ft.Text("将清空物料池中的全部物料（含排期池与归档库），此操作不可恢复。"),
-                actions=[
-                    ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
-                    ft.FilledButton("确认清空", icon=icons.DELETE_FOREVER, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=lambda ev: self.page.run_task(do_clear, ev)),
-                ],
+            # 用户手动触发：先弹统一确认框，防止误触清空全部物料
+            from ..components.toast import confirm_async
+            confirmed = await confirm_async(
+                self.page,
+                "确认摧毁总计划？",
+                "将清空物料池中的全部物料（含排期池与归档库），此操作不可恢复。",
+                confirm_text="确认清空",
             )
-            self.page.open(dialog)
+            if not confirmed:
+                return
+            try:
+                await self._clear_all_materials(e=None)
+                self._show_snackbar("物料池已全库排空", "success")
+            except Exception as ex:
+                self._show_snackbar(f"清空失败: {ex}", "error")
             return
 
         await self.db.clear_materials()

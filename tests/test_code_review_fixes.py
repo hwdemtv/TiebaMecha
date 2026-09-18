@@ -769,22 +769,6 @@ class TestDockerSecurity:
 class TestCrudDeleteImport:
     """Tests that crud.py uses properly imported delete from sqlalchemy."""
 
-    async def test_clear_post_cache_uses_imported_delete(self, db):
-        """Test clear_post_cache works with top-level imported delete."""
-        from tieba_mecha.db.models import PostCache
-
-        # Add some cached posts first
-        await db.cache_posts([
-            {"tid": 111, "pid": 222, "fname": "test_forum", "title": "test"},
-        ])
-
-        # Should not raise
-        await db.clear_post_cache()
-
-        # Verify cache is empty
-        cached = await db.get_cached_posts()
-        assert len(cached) == 0
-
     async def test_delete_account_cascade(self, db):
         """Test delete_account cascades to forums (uses imported delete)."""
         acc = await db.add_account(name="to_delete", bduss="bduss")

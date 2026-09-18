@@ -688,65 +688,53 @@ class PostsPage:
         # 收集选中帖子对应的贴吧名
         tids = list(self._selected)
 
-        def close_dlg(e):
-            self.page.close(dialog)
-            self.page.update()
-
-        async def start_batch_delete(e):
-            self.page.close(dialog)
-
-            self.loading_indicator.visible = True
-            self.loading_indicator.value = 0
-            self.page.update()
-
-            total = len(tids)
-            count = 0
-            success_tids = []
-
-            # 按贴吧分组处理
-            for t in self._threads:
-                if t.tid in tids:
-                    fname = getattr(t, 'fname', None) or self._current_fname
-                    if not fname:
-                        continue
-
-                    success, msg = await delete_thread(self.db, fname, t.tid)
-                    count += 1
-                    self.loading_indicator.value = count / total
-                    self.page.update()
-
-                    if success:
-                        success_tids.append(t.tid)
-                    else:
-                        self._show_snackbar(f"TID {t.tid} 删除异常: {msg}", "error")
-
-            # 批量删除本地记录
-            if success_tids:
-                await self.db.delete_thread_records_bulk(success_tids)
-
-            self._show_snackbar(f"批量清理完成，成功抹除 {len(success_tids)} 个目标", "success")
-            self._selected.clear()
-            self.loading_indicator.visible = False
-
-            # 重新加载本地缓存
-            await self._load_cached_threads()
-            self._update_toolbar()
-            self.page.update()
-
-        dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.WARNING_AMBER_ROUNDED, color="error"), ft.Text("确认批量物理抹除？")]),
-            content=ft.Text(f"您已标记 {len(self._selected)} 个帖子。此操作将从贴吧服务器物理删除相关内容，由机甲控制核心执行，具有不可逆性。", size=13),
-            actions=[
-                ft.TextButton("取消", on_click=close_dlg),
-                ft.FilledButton(
-                    "确认执行", 
-                    icon=icons.DELETE_FOREVER, 
-                    on_click=start_batch_delete, 
-                    style=ft.ButtonStyle(bgcolor=COLORS.ERROR, color=COLORS.WHITE)
-                ),
-            ],
+        from ..components.toast import confirm_async
+        confirmed = await confirm_async(
+            self.page,
+            "确认批量物理抹除？",
+            f"您已标记 {len(self._selected)} 个帖子。此操作将从贴吧服务器物理删除相关内容，由机甲控制核心执行，具有不可逆性。",
+            confirm_text="确认执行",
         )
-        self.page.open(dialog)
+        if not confirmed:
+            return
+
+        self.loading_indicator.visible = True
+        self.loading_indicator.value = 0
+        self.page.update()
+
+        total = len(tids)
+        count = 0
+        success_tids = []
+
+        # 按贴吧分组处理
+        for t in self._threads:
+            if t.tid in tids:
+                fname = getattr(t, 'fname', None) or self._current_fname
+                if not fname:
+                    continue
+
+                success, msg = await delete_thread(self.db, fname, t.tid)
+                count += 1
+                self.loading_indicator.value = count / total
+                self.page.update()
+
+                if success:
+                    success_tids.append(t.tid)
+                else:
+                    self._show_snackbar(f"TID {t.tid} 删除异常: {msg}", "error")
+
+        # 批量删除本地记录
+        if success_tids:
+            await self.db.delete_thread_records_bulk(success_tids)
+
+        self._show_snackbar(f"批量清理完成，成功抹除 {len(success_tids)} 个目标", "success")
+        self._selected.clear()
+        self.loading_indicator.visible = False
+
+        # 重新加载本地缓存
+        await self._load_cached_threads()
+        self._update_toolbar()
+        self.page.update()
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)

@@ -319,6 +319,28 @@ async def do_auto_bump_task():
     manager = AutoBumpManager(db)
     await manager.process_all_candidates()
 
+async def do_behavior_audit_task():
+    """行为审计 + 风险自动治理（审计 → 自动下调发帖权重的控制回路）"""
+    db = await get_db()
+    try:
+        if (await db.get_setting("behavior_audit_enabled", "true")).lower() == "false":
+            return
+    except Exception:
+        pass
+    from .behavior_audit import audit_and_govern
+    await audit_and_govern(db)
+
+async def do_survival_governance_task():
+    """存活治理：死亡原因分流 + 系统删除聚集告警（存活→策略反馈闭环）"""
+    db = await get_db()
+    try:
+        if (await db.get_setting("survival_governance_enabled", "true")).lower() == "false":
+            return
+    except Exception:
+        pass
+    from .survival_feedback import run_survival_governance
+    await run_survival_governance(db)
+
 async def do_maintenance_task():
     """执行拟人化养号维护任务的内部包裹"""
     db = await get_db()
@@ -407,6 +429,10 @@ class TiebaMechaDaemon:
             asyncio.create_task(do_auth_check_task())
 
             self.scheduler.add_job(do_auto_bump_task, 'interval', minutes=20, id="auto_bump_job", replace_existing=True)
+
+            # 行为审计治理 + 存活反馈治理（均为幂等策略任务，12h 周期）
+            self.scheduler.add_job(do_behavior_audit_task, 'interval', hours=12, id="behavior_audit_job", replace_existing=True)
+            self.scheduler.add_job(do_survival_governance_task, 'interval', hours=12, id="survival_governance_job", replace_existing=True)
 
             # 尝试从库热加载签到 + 养号间隔
             db = await get_db()

@@ -16,7 +16,7 @@ from tieba_mecha.core.web_poster import (
     DEFAULT_WEB_UA,
     build_thread_payload,
     build_web_headers,
-    content_to_web_bbcode,
+    normalize_web_content,
 )
 
 
@@ -77,18 +77,22 @@ class TestWebPoster:
         h = build_web_headers("B", "S", "x", ua="MyUA")
         assert h["User-Agent"] == "MyUA"
 
-    def test_content_to_bbcode(self):
-        assert content_to_web_bbcode("a\r\nb\rc\nd") == "a[br]b[br]c[br]d"
-        assert content_to_web_bbcode("plain") == "plain"
+    def test_normalize_web_content(self):
+        # 贴吧 Web 表单 API 接受并保留原始 LF；CR/CRLF 必须规范化，但不做 [br] 转换
+        assert normalize_web_content("a\r\nb\rc\nd") == "a\nb\nc\nd"
+        assert normalize_web_content("plain") == "plain"
 
     def test_payload_roundtrip(self):
         import urllib.parse
-        body = build_thread_payload("测试吧", 123, "TBS", "标题", "内容[br]二行")
+        body = build_thread_payload("测试吧", 123, "TBS", "标题", "内容\n二行")
         parsed = urllib.parse.parse_qs(body.decode("utf-8"))
         assert parsed["kw"] == ["测试吧"]
         assert parsed["fid"] == ["123"]
         assert parsed["tbs"] == ["TBS"]
         assert parsed["anonymous"] == ["0"]
+        assert parsed["content"] == ["内容\n二行"]
+        # rich_text 会走富文本管线丢弃换行，不得携带
+        assert "rich_text" not in parsed
 
 
 @pytest.mark.asyncio

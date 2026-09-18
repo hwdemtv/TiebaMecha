@@ -177,7 +177,6 @@ def _install_stubs():
                 "__init__": lambda self, db=None: None,
                 "get_tactical_advice": staticmethod(lambda msg: ""),
             }),
-            "RateLimiter": type("RateLimiter", (), {}),
         },
         "tieba_mecha.core.link_manager": {
             "SmartLinkConnector": type("SmartLinkConnector", (), {"__init__": lambda self, db=None: None}),

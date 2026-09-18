@@ -66,6 +66,24 @@ def _parse_sign_result(result_raw):
     return False, str(err) if err else "签到失败", is_already_signed, is_forum_invalid, err_code
 
 
+async def _browse_disguise(client, fname: str, probability: float = 0.20):
+    """
+    [防检测] 签到前随机浏览伪装：以一定概率先读吧首页并抽 1 帖深读，
+    模拟真实用户"先逛再签"。浏览失败静默忽略，不影响签到主流程。
+    """
+    if random.random() >= probability:
+        return
+    try:
+        threads = await client.get_threads(fname, pn=1)
+        if threads and threads.objs:
+            sample = random.sample(threads.objs[:5], min(1, len(threads.objs[:5])))
+            for t in sample:
+                await client.get_posts(t.tid, pn=1)
+                await asyncio.sleep(random.uniform(3, 8))
+    except Exception:
+        pass
+
+
 async def get_follow_forums(db: Database, account_id: int | None = None) -> list[ForumInfo]:
     creds = await get_account_credentials(db, account_id)
     if not creds:
@@ -300,16 +318,7 @@ async def sign_all_forums(
         for forum in forums:
             try:
                 # [防检测] 签到前随机浏览伪装（20%概率，模拟真实用户先逛再签到）
-                if random.random() < 0.20:
-                    try:
-                        threads = await client.get_threads(forum.fname, pn=1)
-                        if threads and threads.objs:
-                            sample = random.sample(threads.objs[:5], min(1, len(threads.objs[:5])))
-                            for t in sample:
-                                await client.get_posts(t.tid, pn=1)
-                                await asyncio.sleep(random.uniform(3, 8))
-                    except Exception:
-                        pass  # 浏览失败不影响签到
+                await _browse_disguise(client, forum.fname)
 
                 # 针对底层网络抖动（如 Can not write request body）增加一次自动重试
                 try:
@@ -491,16 +500,7 @@ async def sign_all_accounts(
             for forum in forums:
                 try:
                     # [防检测] 签到前随机浏览伪装（20%概率）
-                    if random.random() < 0.20:
-                        try:
-                            threads = await client.get_threads(forum.fname, pn=1)
-                            if threads and threads.objs:
-                                sample = random.sample(threads.objs[:5], min(1, len(threads.objs[:5])))
-                                for t in sample:
-                                    await client.get_posts(t.tid, pn=1)
-                                    await asyncio.sleep(random.uniform(3, 8))
-                        except Exception:
-                            pass
+                    await _browse_disguise(client, forum.fname)
 
                     # 针对底层网络抖动增加一次自动重试
                     try:
