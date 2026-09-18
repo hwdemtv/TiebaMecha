@@ -323,7 +323,8 @@ class TestAddLog:
         bp._add_log(data)
         assert len(bp._log_raw_items) == 1
         assert bp._log_raw_items[0][1] == "success"
-        assert len(bp.log_list.controls) == 1
+        # 默认"异常/关键"视图下，成功卡片只进缓存不进可见列表
+        assert len(bp.log_list.controls) == 0
 
     def test_error_card_added(self):
         bp = _make_page()
@@ -341,13 +342,14 @@ class TestAddLog:
         bp = _make_page()
         bp._add_log("纯文本信息")
         assert len(bp._log_raw_items) == 1
-        assert bp._log_raw_items[0][1] == "info"
+        # 纯文本均为任务级公告，归入"异常/关键"视图
+        assert bp._log_raw_items[0][1] == "key"
 
     def test_text_fallback_error(self):
         bp = _make_page()
         bp._add_log("错误信息", type="error")
         assert len(bp._log_raw_items) == 1
-        assert bp._log_raw_items[0][1] == "error"
+        assert bp._log_raw_items[0][1] == "key"
 
     def test_max_100_items_limit(self):
         bp = _make_page()
@@ -462,7 +464,8 @@ class TestOnClearLogs:
         bp._add_log({"status": "success", "account_name": "a", "fname": "b", "title": "t", "tid": 1, "progress": 1, "total": 1})
         bp._add_log({"status": "error", "fname": "b", "msg": "err"})
         assert len(bp._log_raw_items) == 2
-        assert len(bp.log_list.controls) == 2
+        # 默认"异常/关键"视图：错误可见、成功被过滤
+        assert len(bp.log_list.controls) == 1
 
         await bp._on_clear_logs(MagicMock())
 

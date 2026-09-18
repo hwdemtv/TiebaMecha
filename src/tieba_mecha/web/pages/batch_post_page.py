@@ -219,7 +219,7 @@ class BatchPostPage:
                 except Exception:
                     pass
                 log_data = {
-                    "status": log.status,
+                    "status": "skipped" if log.status == "skip" else log.status,
                     "account_name": log.account_name,
                     "fname": log.fname,
                     "title": log.title,
@@ -2830,12 +2830,14 @@ class BatchPostPage:
         self._log_filter_dropdown = ft.Dropdown(
             width=120, height=48, text_size=13,
             options=[
+                ft.dropdown.Option("key", "⚠️ 异常/关键"),
                 ft.dropdown.Option("all", "全部"),
                 ft.dropdown.Option("success", "✅ 成功"),
                 ft.dropdown.Option("error", "❌ 失败"),
                 ft.dropdown.Option("skipped", "⏭ 跳过"),
             ],
-            value="all",
+            value="key",
+            tooltip="默认只展示异常与关键节点，切到“全部”查看完整流水",
             on_change=self._on_log_filter_change,
         )
         self._log_stats_text = ft.Text("✅0  ❌0  ⏭0", size=11, color="onSurfaceVariant", weight=ft.FontWeight.W_500)
@@ -3075,8 +3077,15 @@ class BatchPostPage:
             ft.DataCell(
                 ft.Row([
                     ft.IconButton(
-                        icons.DELETE_OUTLINE, 
-                        icon_color="error", 
+                        icons.COPY_ALL,
+                        icon_color="primary",
+                        icon_size=18,
+                        tooltip="复制此任务配置（启动前需重新确认）",
+                        on_click=lambda _: self.page.run_task(self._on_copy_task, t)
+                    ),
+                    ft.IconButton(
+                        icons.DELETE_OUTLINE,
+                        icon_color="error",
                         icon_size=18,
                         tooltip="删除任务",
                         on_click=lambda _: self.page.run_task(self._on_delete_task, t)
@@ -3084,6 +3093,55 @@ class BatchPostPage:
                 ], spacing=0)
             ),
         ])
+
+    async def _on_copy_task(self, t):
+        """一键复制历史任务配置到当前表单。
+
+        历史任务不区分本地/全域组，目标统一归入全域组；
+        账号/贴吧/排期都会在启动前的预检摘要中重新确认。
+        """
+        try:
+            fnames = json.loads(t.fnames_json) if getattr(t, "fnames_json", None) else ([t.fname] if t.fname else [])
+            account_ids = json.loads(t.accounts_json) if getattr(t, "accounts_json", None) else []
+        except Exception:
+            self._show_snackbar("任务配置解析失败，无法复制", "error")
+            return
+
+        self._temp_local_fnames = []
+        self._temp_global_fnames = [fn for fn in fnames if fn]
+        self._selected_account_ids = set(account_ids)
+        self._save_account_selection()
+
+        if t.total:
+            self.post_count.value = str(t.total)
+        if t.delay_min is not None:
+            self.min_delay.value = str(t.delay_min)
+        if t.delay_max is not None:
+            self.max_delay.value = str(t.delay_max)
+        self.use_ai_switch.value = bool(t.use_ai)
+        if t.ai_persona:
+            self.ai_persona_dropdown.value = t.ai_persona
+
+        copied_schedule = getattr(t, "schedule_type", "once") or "once"
+        if copied_schedule in ("daily", "weekly", "interval"):
+            self.use_schedule.value = True
+            self.schedule_type_dropdown.value = copied_schedule
+            if copied_schedule == "interval" and getattr(t, "interval_hours", 0):
+                self.interval_hours.value = str(t.interval_hours)
+            if copied_schedule == "weekly" and getattr(t, "schedule_day_of_week", None) is not None:
+                self.schedule_day_of_week.value = str(t.schedule_day_of_week)
+        else:
+            # once 任务复制为立即执行，避免载入过去的时间点
+            self.use_schedule.value = False
+        self._update_schedule_visibility(self.schedule_type_dropdown.value or "once")
+
+        self._update_forum_select_btn()
+        self._refresh_account_pool()
+        self.page.update()
+        self._show_snackbar(
+            f"已载入任务 #{t.id} 配置（账号 {len(account_ids)} · 贴吧 {len(self._temp_global_fnames)}）。"
+            "目标已归入全域组，启动前请通过预检摘要重新核对账号、贴吧与排期",
+            "success")
 
     async def _on_delete_task(self, task):
         task_id = task.id
@@ -3731,10 +3789,10 @@ class BatchPostPage:
                     margin=ft.padding.only(bottom=5)
                 )
         else:
-            # 兼容模式：纯文本输出
+            # 兼容模式：纯文本输出（均为任务级公告，归入"异常/关键"视图）
             color = "onSurfaceVariant" if type == "info" else "error"
             icon = icons.INFO_OUTLINED if type == "info" else icons.WARNING_AMBER
-            status_str = type  # "info" 或 "error"
+            status_str = "key"
             
             log_item = ft.Container(
                 content=ft.Row([
@@ -3753,7 +3811,7 @@ class BatchPostPage:
         
         # 根据当前筛选决定是否插入可见列表
         current_filter = self._log_filter_dropdown.value
-        if current_filter == "all" or status_str == current_filter or (current_filter == "error" and status_str not in ("success", "skipped")):
+        if self._log_matches_filter(status_str, current_filter):
             self.log_list.controls.insert(0, log_item)
             if len(self.log_list.controls) > 100:
                 self.log_list.controls.pop()
@@ -3772,12 +3830,23 @@ class BatchPostPage:
         except Exception:
             pass
 
+    @staticmethod
+    def _log_matches_filter(status_str: str, filter_val: str) -> bool:
+        """流水条目与筛选值匹配。"key"=异常+关键节点（默认视图）。"""
+        if filter_val == "all":
+            return True
+        if filter_val == "key":
+            return status_str not in ("success", "info")
+        if filter_val == "error":
+            return status_str not in ("success", "skipped")
+        return status_str == filter_val
+
     async def _on_log_filter_change(self, e):
         """流水筛选下拉框变更"""
         filter_val = e.control.value
         self.log_list.controls.clear()
         for log_item, status in reversed(self._log_raw_items):
-            if filter_val == "all" or status == filter_val or (filter_val == "error" and status not in ("success", "skipped")):
+            if self._log_matches_filter(status, filter_val):
                 self.log_list.controls.insert(0, log_item)
         self.log_list.update()
 
@@ -3809,7 +3878,7 @@ class BatchPostPage:
                 except Exception:
                     pass
                 log_data = {
-                    "status": log.status,
+                    "status": "skipped" if log.status == "skip" else log.status,
                     "account_name": log.account_name,
                     "fname": log.fname,
                     "title": log.title,
