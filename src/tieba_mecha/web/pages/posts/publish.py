@@ -37,7 +37,6 @@ class PublishTabMixin:
             border_color=with_opacity(0.2, "primary"),
             options=[],
             on_change=self._on_post_account_change,
-            expand=True,
             tooltip="选择用哪个账号发布（默认当前活跃账号）",
         )
         self.post_forum = ft.Dropdown(
@@ -46,7 +45,6 @@ class PublishTabMixin:
             border_color=with_opacity(0.2, "primary"),
             options=[],
             on_change=self._on_forum_change,
-            expand=True,
         )
         self.post_title = ft.TextField(
             label="帖子标题",
