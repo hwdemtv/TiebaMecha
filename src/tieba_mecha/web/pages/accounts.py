@@ -676,10 +676,16 @@ class AccountsPage:
     def _show_follow_forum_dialog(self, e):
         """显示关注贴吧弹窗"""
         async def on_follow(ev):
+            if not self._begin_op():
+                return
             forum_input.disabled = True
             submit_btn.disabled = True
             submit_btn.text = "关注中..."
             self.page.update()
+            self._open_progress_dialog("批量关注执行中...", determinate=True)
+
+            async def report_progress(done, total):
+                self._update_progress(f"关注进度 {done}/{total}", (done / total) if total else None)
 
             try:
                 # 解析输入：支持逗号分隔、换行分隔、空格分隔
@@ -708,8 +714,9 @@ class AccountsPage:
                 # 调用关注 API
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
-                result = await pm.follow_forums_bulk(fnames)
+                result = await pm.follow_forums_bulk(fnames, progress_callback=report_progress)
 
+                self._close_progress_dialog()
                 # 关闭弹窗
                 self.page.close(dialog)
 
@@ -717,6 +724,10 @@ class AccountsPage:
                 success_count = len(result["success"])
                 failed_count = len(result["failed"])
                 skipped_count = len(result["skipped"])
+
+                if any(f.get("reason") == "已有批量关注/取关任务在执行" for f in result["failed"]):
+                    self._show_snackbar("ℹ️ 已有批量关注/取关任务在执行，本次未执行", "info")
+                    return
 
                 if success_count > 0:
                     self._show_snackbar(f"✅ 成功关注 {success_count} 个贴吧", "success")
@@ -735,6 +746,9 @@ class AccountsPage:
                 submit_btn.disabled = False
                 submit_btn.text = "确认关注"
                 self.page.update()
+            finally:
+                self._close_progress_dialog()
+                self._end_op()
 
         forum_input = ft.TextField(
             hint_text="输入要关注的贴吧名称",
@@ -838,6 +852,8 @@ class AccountsPage:
     async def _on_unfollow_forum(self, fname: str):
         """取消关注：所有账号取关该贴吧"""
         async def do_unfollow(e):
+            if not self._begin_op():
+                return
             try:
                 self.page.close(dialog)
                 from ...core.batch_post import BatchPostManager
@@ -845,6 +861,9 @@ class AccountsPage:
                 res = await pm.unfollow_forums_bulk([fname])
                 ok, bad = len(res["success"]), len(res["failed"])
                 skipped = len(res.get("skipped", []))
+                if any(f.get("reason") == "已有批量关注/取关任务在执行" for f in res["failed"]):
+                    self._show_snackbar("ℹ️ 已有批量关注/取关任务在执行，本次未执行", "info")
+                    return
                 if ok:
                     self._show_snackbar(f"✅ 已取消关注 '{fname}'（{ok} 个账号）", "success")
                 if bad:
@@ -857,6 +876,8 @@ class AccountsPage:
                 self.refresh_ui()
             except Exception as ex:
                 self._show_snackbar(f"❌ 取消关注失败: {str(ex)}", "error")
+            finally:
+                self._end_op()
 
         dialog = ft.AlertDialog(
             title=ft.Row([ft.Icon(icons.HEART_BROKEN, color="error"), ft.Text("确认取消关注？")]),
@@ -1028,18 +1049,24 @@ class AccountsPage:
         fnames = list(self._matrix_selected_fnames)
 
         async def do_unfollow(e):
+            if not self._begin_op():
+                return
             try:
                 self.page.close(dialog)
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
                 res = await pm.unfollow_forums_bulk(fnames)
                 ok, bad = len(res["success"]), len(res["failed"])
-                if bad:
+                if any(f.get("reason") == "已有批量关注/取关任务在执行" for f in res["failed"]):
+                    self._show_snackbar("ℹ️ 已有批量关注/取关任务在执行，本次未执行", "info")
+                elif bad:
                     self._show_snackbar(f"⚠️ 批量取关完成：成功 {ok} 项，失败 {bad} 项（失败记录已保留）", "warning")
                 else:
                     self._show_snackbar(f"✅ 已批量取消关注 {len(fnames)} 个贴吧（{ok} 项）", "success")
             except Exception as ex:
                 self._show_snackbar(f"❌ 批量取关失败: {str(ex)}", "error")
+            finally:
+                self._end_op()
             self._matrix_selected_fnames.clear()
             await self._refresh_matrix_stats()
             self._update_matrix_bulk_bar()
@@ -1450,10 +1477,12 @@ class AccountsPage:
             elif status == "error": status_color = COLORS.AMBER
             elif status == "banned": status_color = COLORS.RED_ACCENT_400
             
-            # 查找关联代理名称
-            proxy_info = "直连"
+            # 查找关联代理名称；未绑定代理的账号以裸连模式运行，存在关联风险
+            proxy_info = "裸连 (存在关联风险)"
+            proxy_risk = True
             if acc.proxy_id:
                 p = next((p for p in self._proxies if p.id == acc.proxy_id), None)
+                proxy_risk = False
                 if p:
                     proxy_info = f"{p.protocol}://{p.host}"
                 else:
@@ -1518,8 +1547,14 @@ class AccountsPage:
                                         tooltip=f"设备指纹: {getattr(acc, 'cuid', '')}",
                                     ),
                                     ft.Container(width=10),
-                                    ft.Icon(icons.LANGUAGE, size=12, color="onSurfaceVariant"),
-                                    ft.Text(f"代理: {proxy_info}", color="onSurfaceVariant", size=11),
+                                    ft.Icon(icons.LANGUAGE, size=12, color="amber" if proxy_risk else "onSurfaceVariant"),
+                                    ft.Text(
+                                        f"代理: {proxy_info}",
+                                        color="amber" if proxy_risk else "onSurfaceVariant",
+                                        size=11,
+                                        weight=ft.FontWeight.BOLD if proxy_risk else None,
+                                        tooltip="未绑定代理，多账号同 IP 出口存在关联风控风险，建议尽快绑定代理" if proxy_risk else None,
+                                    ),
                                     ft.Container(width=10),
                                     ft.Icon(icons.STAR_HALF_ROUNDED, size=12, color="primary"),
                                     ft.Text(
@@ -1745,12 +1780,16 @@ class AccountsPage:
     async def _confirm_account_forum_unfollow(self, account_id: int, fname: str, detail_dialog):
         """确认后仅对当前账号执行取关，保留其他账号的关注关系。"""
         async def do_unfollow(_):
+            if not self._begin_op():
+                return
             try:
                 self.page.close(confirm_dialog)
                 self.page.close(detail_dialog)
                 from ...core.batch_post import BatchPostManager
                 res = await BatchPostManager(self.db).unfollow_forums_bulk([fname], account_ids=[account_id])
-                if res["success"]:
+                if any(f.get("reason") == "已有批量关注/取关任务在执行" for f in res["failed"]):
+                    self._show_snackbar("ℹ️ 已有批量关注/取关任务在执行，本次未执行", "info")
+                elif res["success"]:
                     self._show_snackbar(f"已让当前账号取消关注 '{fname}'", "success")
                 elif res["skipped"]:
                     self._show_snackbar(f"当前账号被跳过：{res['skipped'][0].get('reason', '未知原因')}", "warning")
@@ -1761,6 +1800,8 @@ class AccountsPage:
                 await self.load_data()
             except Exception as ex:
                 self._show_snackbar(f"取消关注失败: {ex}", "error")
+            finally:
+                self._end_op()
 
         confirm_dialog = ft.AlertDialog(
             title=ft.Row([ft.Icon(icons.HEART_BROKEN, color="error"), ft.Text("确认对当前账号取关？")]),

@@ -51,6 +51,45 @@ class BatchTaskRepository:
                 )
             )
             return list(result.scalars().all())
+    async def get_batch_task(self, task_id) -> Optional[BatchPostTask]:
+        """按主键获取单个批量任务"""
+        async with self.async_session() as session:
+            return await session.get(BatchPostTask, task_id)
+    async def get_scheduled_batch_tasks(self) -> list[BatchPostTask]:
+        """获取所有未执行的批量任务（含未到期），供精确调度注册触发器"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(BatchPostTask).where(BatchPostTask.status == "pending")
+            )
+            return list(result.scalars().all())
+    async def claim_batch_task(self, task_id) -> bool:
+        """原子认领任务：仅当仍处于 pending 时置为 running。
+
+        精确触发与轮询兜底可能同时到达，认领失败的一方直接放弃，
+        避免同一任务被并发执行两次。
+        """
+        async with self.async_session() as session:
+            result = await session.execute(
+                update(BatchPostTask)
+                .where(BatchPostTask.id == task_id, BatchPostTask.status == "pending")
+                .values(status="running")
+            )
+            await session.commit()
+            return (result.rowcount or 0) > 0
+    async def reset_running_batch_tasks(self) -> int:
+        """把遗留的 running 任务复位为 pending（进程启动时的崩溃恢复）。
+
+        单进程部署下启动时不可能有任务真正在跑，running 只可能是上次
+        异常退出（断电/kill）留下的残值；不复位会导致任务永久卡死。
+        """
+        async with self.async_session() as session:
+            result = await session.execute(
+                update(BatchPostTask)
+                .where(BatchPostTask.status == "running")
+                .values(status="pending")
+            )
+            await session.commit()
+            return result.rowcount or 0
     async def update_batch_task(self, task_id: int, **kwargs) -> None:
         """更新任务状态及进度"""
         async with self.async_session() as session:

@@ -308,7 +308,8 @@ class BatchPostCenterPage:
         ], spacing=10, expand=True)
 
     def _build_task_row(self, t, index):
-        status_color = {"pending": "orange", "running": "primary", "completed": "green", "failed": "error"}.get(t.status, "onSurface")
+        status_color = {"pending": "orange", "running": "primary", "completed": "green",
+                        "failed": "error", "stopped": "onSurfaceVariant"}.get(t.status, "onSurface")
 
         # 优化贴吧列表显示
         try:
@@ -358,7 +359,9 @@ class BatchPostCenterPage:
             ft.DataCell(ft.Icon(icons.AUTO_AWESOME, color="primary", size=16) if t.use_ai else ft.Text("-")),
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(_format_schedule_display(t))),
-            ft.DataCell(ft.Text({"pending": "待执行", "running": "运行中", "completed": "已完成", "failed": "失败"}.get(t.status, t.status), color=status_color, weight=ft.FontWeight.BOLD)),
+            ft.DataCell(ft.Text({"pending": "待执行", "running": "运行中", "completed": "已完成",
+                                 "failed": "失败", "stopped": "已停止"}.get(t.status, t.status),
+                                color=status_color, weight=ft.FontWeight.BOLD)),
             ft.DataCell(ft.Text(f"{t.progress}/{t.total}")),
             ft.DataCell(
                 ft.Row([
@@ -369,6 +372,16 @@ class BatchPostCenterPage:
                         tooltip="复制此任务配置（到批量发帖页，启动前需重新确认）",
                         on_click=lambda _: self.page.run_task(self._on_copy_task, t)
                     ),
+                    # 失败/停止的任务可以原位重新激活，无需删除重建
+                    *([
+                        ft.IconButton(
+                            icons.RESTORE,
+                            icon_color="teal",
+                            icon_size=18,
+                            tooltip="重新激活：进度归零、复位为待执行并立即排队",
+                            on_click=lambda _: self.page.run_task(self._on_reactivate_task, t)
+                        )
+                    ] if t.status in ("failed", "stopped") else []),
                     ft.IconButton(
                         icons.DELETE_OUTLINE,
                         icon_color="error",
@@ -382,37 +395,85 @@ class BatchPostCenterPage:
 
     async def _on_copy_task(self, t):
         """复制历史任务配置：写入交接键并跳回批量发帖页，由预检摘要重新确认。"""
-        try:
-            fnames = json.loads(t.fnames_json) if getattr(t, "fnames_json", None) else ([t.fname] if t.fname else [])
-            account_ids = json.loads(t.accounts_json) if getattr(t, "accounts_json", None) else []
-        except Exception:
-            self._show_snackbar("任务配置解析失败，无法复制", "error")
-            return
+        # 优先读创建时的 LaunchConfig 快照（完整保留 local/global 分组、
+        # 策略、排期时刻）；旧任务无快照时降级为从展示字段反推
+        config = None
+        raw_snapshot = getattr(t, "config_json", None)
+        if raw_snapshot:
+            try:
+                snapshot = json.loads(raw_snapshot)
+                if isinstance(snapshot, dict) and (snapshot.get("global_fnames") or snapshot.get("local_fnames")):
+                    config = snapshot
+            except Exception:
+                config = None
 
-        schedule_type = getattr(t, "schedule_type", "once") or "once"
-        config = {
-            "account_ids": account_ids,
-            "local_fnames": [],
-            "global_fnames": [fn for fn in fnames if fn],
-            "strategy": t.strategy,
-            "pairing_mode": t.pairing_mode,
-            "post_count": t.total,
-            "delay_min": t.delay_min,
-            "delay_max": t.delay_max,
-            "use_ai": bool(t.use_ai),
-            "ai_persona": t.ai_persona or "normal",
-            "use_schedule": schedule_type in ("daily", "weekly", "interval"),
-            "schedule_type": schedule_type,
-            "interval_hours": getattr(t, "interval_hours", 0) or 0,
-            "schedule_day_of_week": getattr(t, "schedule_day_of_week", None),
-            "reset_strategy": getattr(t, "reset_strategy", "new_only") or "new_only",
-        }
+        if config:
+            # 快照的 schedule_time 是完整时刻，daily/weekly 回填只需要 HH:MM
+            st_str = config.get("schedule_time")
+            if config.get("schedule_type") in ("daily", "weekly") and isinstance(st_str, str) and len(st_str) >= 16:
+                config["schedule_time_hm"] = st_str[11:16]
+
+        if not config:
+            try:
+                fnames = json.loads(t.fnames_json) if getattr(t, "fnames_json", None) else ([t.fname] if t.fname else [])
+                account_ids = json.loads(t.accounts_json) if getattr(t, "accounts_json", None) else []
+            except Exception:
+                self._show_snackbar("任务配置解析失败，无法复制", "error")
+                return
+
+            # 兼容旧复合串格式 "strategy:pairing"
+            raw_strategy = t.strategy or "round_robin"
+            strategy = raw_strategy.split(":")[0] if ":" in raw_strategy else raw_strategy
+            pairing = getattr(t, "pairing_mode", None)
+            if not pairing and ":" in raw_strategy:
+                pairing = raw_strategy.split(":")[1]
+            pairing = pairing or "random"
+
+            schedule_type = getattr(t, "schedule_type", "once") or "once"
+            st = getattr(t, "schedule_time", None)
+            config = {
+                "account_ids": account_ids,
+                "local_fnames": [],
+                "global_fnames": [fn for fn in fnames if fn],
+                "strategy": strategy,
+                "pairing_mode": pairing,
+                "post_count": t.total,
+                "delay_min": t.delay_min,
+                "delay_max": t.delay_max,
+                "use_ai": bool(t.use_ai),
+                "ai_persona": t.ai_persona or "normal",
+                "use_schedule": schedule_type in ("daily", "weekly", "interval"),
+                "schedule_type": schedule_type,
+                "interval_hours": getattr(t, "interval_hours", 0) or 0,
+                "schedule_day_of_week": getattr(t, "schedule_day_of_week", None),
+                "reset_strategy": getattr(t, "reset_strategy", "new_only") or "new_only",
+            }
+            # 循环任务的执行时刻一并带走；once 不带，避免载入过去的时间点
+            st = getattr(t, "schedule_time", None)
+            if schedule_type in ("daily", "weekly") and isinstance(st, datetime):
+                config["schedule_time_hm"] = st.strftime("%H:%M")
+
         await self.db.set_setting("pending_task_copy", json.dumps(config, ensure_ascii=False))
         self._navigate("batch_post")
         self._show_snackbar(
-            f"已载入任务 #{t.id} 配置（账号 {len(account_ids)} · 贴吧 {len(config['global_fnames'])}）。"
+            f"已载入任务 #{t.id} 配置（账号 {len(config.get('account_ids') or [])} · 贴吧 {len(config.get('global_fnames') or [])}）。"
             "目标已归入全域组，启动前请通过预检摘要重新核对账号、贴吧与排期",
             "success")
+
+    async def _on_reactivate_task(self, task):
+        """失败/停止的任务重新激活：进度归零、复位为待执行并立即排队。"""
+        try:
+            now = datetime.now()
+            await self.db.update_batch_task(
+                task.id, status="pending", progress=0, schedule_time=now
+            )
+            # 注册精确触发器立即执行；失败时由 5 分钟轮询兜底
+            from ...core.daemon import daemon_instance
+            daemon_instance.schedule_batch_task(task.id, now)
+            self._show_snackbar(f"任务 #{task.id} 已重新激活并加入执行队列", "success")
+            await self.load_data()
+        except Exception as e:
+            self._show_snackbar(f"重新激活失败: {str(e)}", "error")
 
     async def _on_delete_task(self, task):
         task_id = task.id

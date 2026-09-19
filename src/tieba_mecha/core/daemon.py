@@ -95,42 +95,30 @@ async def do_auto_monitor_task():
             except Exception as e:
                 print(f"[DAEMON] 监控 {fname} 失败: {e}")
 
-async def _execute_once_task(task_id: str):
-    """
-    精确执行 once 类型批量发帖任务（由 APScheduler date 触发器调用）。
-    与 do_batch_post_tasks 中的轮询逻辑共享核心执行代码。
-    """
-    db = await get_db()
-    # 从数据库获取任务
+async def _load_batch_task(task_id: str):
+    """按 ID 从数据库加载批量任务行。"""
     from ..db.models import BatchPostTask as BatchPostTaskModel
     from sqlalchemy import select
+    db = await get_db()
     async with db.async_session() as session:
         result = await session.execute(
             select(BatchPostTaskModel).where(BatchPostTaskModel.id == task_id)
         )
-        task = result.scalar_one_or_none()
+        return result.scalar_one_or_none()
 
-    if not task:
-        print(f"[DAEMON] once 任务 {task_id} 不存在，跳过")
-        return
 
-    # 只执行 status=pending 的任务（防止重复触发）
-    if task.status != "pending":
-        print(f"[DAEMON] once 任务 {task_id} 状态为 {task.status}，跳过")
-        return
+def _build_core_task(task) -> CoreBatchPostTask:
+    """数据库任务行 → 引擎核心任务对象（精确触发与轮询派发共用）。
 
-    print(f"[{datetime.now()}] [DAEMON] once 精确触发: ID={task.id} 贴吧={task.fname}")
-
-    manager = BatchPostManager(db)
-
-    # 转换数据库模型为 Core 任务对象
+    优先使用独立 pairing_mode 字段，向后兼容旧复合字符串格式 "strategy:pairing"。
+    """
     task_pairing = getattr(task, 'pairing_mode', None)
     if not task_pairing and ":" in task.strategy:
         task_pairing = task.strategy.split(":")[1]
     else:
         task_pairing = task_pairing or "random"
 
-    core_task = CoreBatchPostTask(
+    return CoreBatchPostTask(
         id=str(task.id),
         fname=task.fname,
         fnames=json.loads(task.fnames_json),
@@ -145,118 +133,138 @@ async def _execute_once_task(task_id: str):
         total=task.total
     )
 
-    # 更新任务状态为 running
-    await db.update_batch_task(task.id, status="running")
+
+async def _reset_recurring_materials(db, task):
+    """循环轮次开始前的物料处理：reuse 模式重置物料（AI 开启时同时恢复原文）。"""
+    reset_strategy = getattr(task, 'reset_strategy', 'new_only') or 'new_only'
+    if reset_strategy != 'reuse':
+        return
+    use_ai = getattr(task, 'use_ai', False)
+    try:
+        reset_count = await db.reset_materials_for_task(
+            strategy="reuse",
+            restore_original=use_ai,
+            task_id=str(task.id),
+        )
+        ai_note = " (含原文恢复)" if use_ai else ""
+        print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 物料重置: 策略=reuse{ai_note}, 重置数={reset_count}")
+    except Exception as e:
+        print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 物料重置失败: {e}")
+
+
+async def _run_claimed_task(task_id: str):
+    """执行一个已被认领（status=running）的任务并处理完成后的调度。
+
+    once 任务执行完标记 completed；循环任务计算下次执行时间、归位 pending
+    并注册下一个精确触发器。精确触发与轮询派发两条路径共用本实现。
+    """
+    db = await get_db()
+    task = await _load_batch_task(task_id)
+    if not task:
+        print(f"[DAEMON] 任务 {task_id} 不存在，跳过执行")
+        return
+
+    schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
+    if schedule_type != 'once':
+        await _reset_recurring_materials(db, task)
+
+    print(f"[{datetime.now()}] [DAEMON] 开始执行任务: ID={task.id} 贴吧={task.fname} 类型={schedule_type}")
+    manager = BatchPostManager(db)
+    core_task = _build_core_task(task)
 
     try:
         async for update in manager.execute_task(core_task):
             update_status = update.get("status", "running")
+            # 记录错误/跳过信息到日志，但不中断任务流
             if update_status in ("error", "failed"):
-                print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 单条失败: {update.get('msg', update)}")
+                print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 单条失败: {update.get('msg', update)}")
             await db.update_batch_task(
                 task.id,
                 progress=update.get("progress", 0),
                 status="running"
             )
 
-        # once 类型执行完毕
-        await db.update_batch_task(task.id, status="completed")
-        print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 执行完成")
+        if schedule_type != 'once':
+            next_time = _calc_next_schedule_time(task)
+            new_cycle = (getattr(task, 'cycle_count', 0) or 0) + 1
+            await db.update_batch_task(
+                task.id,
+                status="pending",
+                schedule_time=next_time,
+                progress=0,
+                cycle_count=new_cycle,
+            )
+            daemon_instance.schedule_batch_task(task.id, next_time)
+            print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 第{new_cycle}轮完成，下次执行: {next_time}")
+        else:
+            await db.update_batch_task(task.id, status="completed")
+            print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 执行完成")
     except Exception as e:
-        print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 执行异常: {e}")
-        await db.update_batch_task(task.id, status="failed")
+        print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 执行异常: {e}")
+        # 循环任务异常归位 pending 并重注册触发器，下次继续；once 任务标记失败
+        if schedule_type != 'once':
+            next_time = _calc_next_schedule_time(task)
+            await db.update_batch_task(task.id, status="pending", schedule_time=next_time)
+            daemon_instance.schedule_batch_task(task.id, next_time)
+        else:
+            await db.update_batch_task(task.id, status="failed")
+
+
+# 派发式执行的协程强引用池：防止 asyncio.create_task 的任务被垃圾回收
+_SPAWNED_TASK_REFS: set = set()
+
+
+def _spawn_batch_task(coro) -> None:
+    t = asyncio.create_task(coro)
+    _SPAWNED_TASK_REFS.add(t)
+    t.add_done_callback(_SPAWNED_TASK_REFS.discard)
+
+
+async def wait_spawned_batch_tasks():
+    """等待所有已派发的批量任务协程结束（测试同步与优雅关闭用）。"""
+    if _SPAWNED_TASK_REFS:
+        await asyncio.gather(*list(_SPAWNED_TASK_REFS), return_exceptions=True)
+
+
+async def _execute_scheduled_task(task_id: str):
+    """精确触发入口（APScheduler date 触发器），once 与循环任务通用。"""
+    task = await _load_batch_task(task_id)
+    if not task:
+        print(f"[DAEMON] 定时任务 {task_id} 不存在，跳过触发")
+        return
+    if task.status != "pending":
+        print(f"[{datetime.now()}] [DAEMON] 定时任务 {task_id} 状态为 {task.status}，跳过触发")
+        return
+    # 陈旧触发器守卫：注册后任务的计划时间被编辑推迟，按新时间重注册
+    if task.schedule_time and task.schedule_time > datetime.now() + timedelta(seconds=5):
+        print(f"[{datetime.now()}] [DAEMON] 任务 {task_id} 计划时间已变更为 {task.schedule_time}，重注册触发器")
+        daemon_instance.schedule_batch_task(task.id, task.schedule_time)
+        return
+
+    db = await get_db()
+    if not await db.claim_batch_task(task.id):
+        print(f"[{datetime.now()}] [DAEMON] 任务 {task_id} 已被其他路径认领，跳过触发")
+        return
+
+    await _run_claimed_task(str(task.id))
 
 
 async def do_batch_post_tasks():
-    """执行到期的批量发帖任务（支持 daily/weekly/interval 循环调度）"""
+    """轮询兜底：捞起到期的批量任务并派发执行。
+
+    精确调度（date 触发器）是主路径，本轮询只兜底 daemon 宕机期间
+    错过触发的任务。认领后异步派发，长任务不再阻塞后续轮询班次。
+    """
     db = await get_db()
     pending_tasks = await db.get_pending_batch_tasks()
     if not pending_tasks:
         return
 
-    manager = BatchPostManager(db)
     for task in pending_tasks:
-        print(f"[{datetime.now()}] [DAEMON] 触发定时任务: ID={task.id} 贴吧={task.fname}")
-
-        # 循环任务：根据 reset_strategy 重置物料
-        schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
-        if schedule_type != 'once':
-            reset_strategy = getattr(task, 'reset_strategy', 'new_only') or 'new_only'
-            use_ai = getattr(task, 'use_ai', False)
-            if reset_strategy == 'reuse':
-                try:
-                    # reuse 模式：重置物料状态；若 AI 改写开启，同时恢复原文供下次改写
-                    reset_count = await db.reset_materials_for_task(
-                        strategy="reuse",
-                        restore_original=use_ai,
-                        task_id=str(task.id),
-                    )
-                    ai_note = " (含原文恢复)" if use_ai else ""
-                    print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 物料重置: 策略=reuse{ai_note}, 重置数={reset_count}")
-                except Exception as e:
-                    print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 物料重置失败: {e}")
-
-        # 转换数据库模型为 Core 任务对象
-        # 优先使用独立 pairing_mode 字段，向后兼容旧的复合字符串格式
-        task_pairing = getattr(task, 'pairing_mode', None)
-        if not task_pairing and ":" in task.strategy:
-            task_pairing = task.strategy.split(":")[1]
-        else:
-            task_pairing = task_pairing or "random"
-
-        core_task = CoreBatchPostTask(
-            id=str(task.id),
-            fname=task.fname,
-            fnames=json.loads(task.fnames_json),
-            accounts=json.loads(task.accounts_json),
-            strategy=task.strategy.split(":")[0] if ":" in task.strategy else task.strategy,
-            pairing_mode=task_pairing,
-            delay_min=task.delay_min,
-            delay_max=task.delay_max,
-            use_ai=task.use_ai,
-            ai_persona=getattr(task, 'ai_persona', 'normal') or 'normal',
-            forum_offset=getattr(task, 'cycle_count', 0) or 0,
-            total=task.total
-        )
-
-        # 更新任务状态为 running
-        await db.update_batch_task(task.id, status="running")
-        
-        try:
-            # 执行任务（内部会更新物料状态），同步进度到数据库
-            async for update in manager.execute_task(core_task):
-                update_status = update.get("status", "running")
-                # 记录错误/跳过信息到日志，但不中断任务流
-                if update_status in ("error", "failed"):
-                    print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 单条失败: {update.get('msg', update)}")
-                await db.update_batch_task(
-                    task.id,
-                    progress=update.get("progress", 0),
-                    status="running"
-                )
-            
-            # 执行完毕后处理：根据 schedule_type 决定下一步
-            if schedule_type != 'once':
-                next_time = _calc_next_schedule_time(task)
-                new_cycle = (getattr(task, 'cycle_count', 0) or 0) + 1
-                await db.update_batch_task(
-                    task.id,
-                    status="pending",
-                    schedule_time=next_time,
-                    progress=0,
-                    cycle_count=new_cycle,
-                )
-                print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 第{new_cycle}轮完成，下次执行: {next_time}")
-            else:
-                await db.update_batch_task(task.id, status="completed")
-        except Exception as e:
-            print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 执行异常: {e}")
-            # 循环任务异常也重置为 pending，下次继续
-            if schedule_type != 'once':
-                next_time = _calc_next_schedule_time(task)
-                await db.update_batch_task(task.id, status="pending", schedule_time=next_time)
-            else:
-                await db.update_batch_task(task.id, status="failed")
+        if not await db.claim_batch_task(task.id):
+            continue
+        print(f"[{datetime.now()}] [DAEMON] 轮询兜底派发任务: ID={task.id} 贴吧={task.fname}")
+        _spawn_batch_task(_run_claimed_task(str(task.id)))
 
 
 def _calc_next_schedule_time(task) -> datetime:
@@ -415,7 +423,9 @@ class TiebaMechaDaemon:
         try:
             # 始终加载监控任务和批量发帖轮询
             self.scheduler.add_job(do_auto_monitor_task, 'interval', minutes=10, id=self.monitor_job_id, replace_existing=True)
-            self.scheduler.add_job(do_batch_post_tasks, 'interval', minutes=30, id="batch_post_job")
+            # 轮询兜底：精确调度（date 触发器）是主路径，5 分钟轮询只捞 daemon
+            # 宕机期间错过的任务；认领后异步派发，长任务不阻塞后续班次
+            self.scheduler.add_job(do_batch_post_tasks, 'interval', minutes=5, id="batch_post_job", replace_existing=True)
             
             # 6. 每 12 小时执行一次应用更新检查 (已在 updater 实现逻辑，此处挂载)
             from .updater import get_update_manager
@@ -445,7 +455,25 @@ class TiebaMechaDaemon:
             self.scheduler.add_job(do_maintenance_task, 'interval', hours=maint_hours, id="biowarming_job", replace_existing=True)
 
             await self.reload(db)
-            
+
+            # 批量任务精确调度同步：先做崩溃恢复（遗留 running 复位），再为所有
+            # 未到期的 pending 任务注册 date 触发器；已到期的交给轮询兜底立即捞走
+            try:
+                recovered = await db.reset_running_batch_tasks()
+                if recovered:
+                    print(f"[DAEMON] 崩溃恢复: {recovered} 个遗留 running 任务已复位为 pending")
+                scheduled = await db.get_scheduled_batch_tasks()
+                now = datetime.now()
+                reg_count = 0
+                for t in scheduled:
+                    st = getattr(t, 'schedule_time', None)
+                    if st and st > now:
+                        self.schedule_batch_task(t.id, st)
+                        reg_count += 1
+                print(f"[DAEMON] 批量任务精确调度: {reg_count} 个未来任务已注册触发器")
+            except Exception as sync_err:
+                print(f"[DAEMON] 批量任务调度同步失败（轮询兜底仍有效）: {sync_err}")
+
             self.scheduler.start()
         except asyncio.CancelledError:
             print("[DAEMON] 启动过程被取消")
@@ -497,35 +525,42 @@ class TiebaMechaDaemon:
             # 解析失败时不动现有任务，避免定时签到静默失效
             print(f"[DAEMON] 解析配置签到时间出错: {e} (已保留原有任务配置)")
 
-    def schedule_once_task(self, task_id: str, schedule_time: datetime):
+    def schedule_batch_task(self, task_id, run_date: datetime):
         """
-        为 once 类型任务注册精确调度（使用 APScheduler date 触发器）。
-        任务会在 schedule_time 精确触发，不再依赖 30 分钟轮询。
+        为批量任务注册精确调度（APScheduler date 触发器，once 与循环任务通用）。
+        任务会在 run_date 精确触发，不再依赖轮询相位。
 
         Args:
             task_id: 任务 ID（数据库主键）
-            schedule_time: 计划执行时间
+            run_date: 计划执行时间
         """
-        job_id = f"once_batch_{task_id}"
-        # 注：下方 add_job 已带 replace_existing=True，会自动覆盖同 id 旧任务；
-        # 此处不要再手动 remove_job（传入 Job 对象会抛 JobLookupError）
+        if self.scheduler is None:
+            print(f"[DAEMON] 调度器未初始化，任务 {task_id} 将由轮询兜底")
+            return
+        job_id = f"batch_task_{task_id}"
         self.scheduler.add_job(
-            _execute_once_task,
+            _execute_scheduled_task,
             'date',
-            run_date=schedule_time,
-            args=[task_id],
+            run_date=run_date,
+            args=[str(task_id)],
             id=job_id,
             replace_existing=True,
             misfire_grace_time=300,  # 5分钟容错窗口
         )
-        print(f"[DAEMON] 已注册 once 精确调度: 任务 {task_id} 将在 {schedule_time} 执行")
+        print(f"[DAEMON] 已注册精确调度: 任务 {task_id} 将在 {run_date} 执行")
+
+    def schedule_once_task(self, task_id: str, schedule_time: datetime):
+        """
+        为 once 类型任务注册精确调度（保留旧接口，内部委托 schedule_batch_task）。
+        """
+        self.schedule_batch_task(task_id, schedule_time)
 
     def cancel_once_task(self, task_id: str):
-        """取消已注册的 once 精确调度任务"""
-        job_id = f"once_batch_{task_id}"
-        if self.scheduler.get_job(job_id):
-            self.scheduler.remove_job(job_id)
-            print(f"[DAEMON] 已取消 once 调度: 任务 {task_id}")
+        """取消已注册的任务精确调度（兼容新旧两种 job id）"""
+        for job_id in (f"once_batch_{task_id}", f"batch_task_{task_id}"):
+            if self.scheduler.get_job(job_id):
+                self.scheduler.remove_job(job_id)
+                print(f"[DAEMON] 已取消任务调度: {job_id}")
 
     def stop(self):
         if self._started:

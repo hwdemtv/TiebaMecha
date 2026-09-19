@@ -686,6 +686,39 @@ class TestTaskCopyHandoff:
         assert cfg["use_schedule"] is False
 
     @pytest.mark.asyncio
+    async def test_center_copy_prefers_config_snapshot(self):
+        """任务带 config_json 快照时应优先使用，并从中提取 daily 的 HH:MM。"""
+        import json as _json
+        mock_db = MagicMock()
+        mock_db.set_setting = AsyncMock()
+        from tieba_mecha.web.pages.batch_post_center import BatchPostCenterPage
+        center = BatchPostCenterPage(page=_FakePage(), db=mock_db, on_navigate=lambda name: None)
+        task = self._make_task()
+        task.config_json = _json.dumps({
+            "account_ids": [9],
+            "local_fnames": ["本地吧"],
+            "global_fnames": ["全域吧"],
+            "strategy": "strict_round_robin",
+            "pairing_mode": "random",
+            "post_count": 3,
+            "delay_min": 60.0, "delay_max": 120.0,
+            "use_ai": False, "ai_persona": "normal",
+            "use_schedule": True, "schedule_type": "daily",
+            "interval_hours": 0, "schedule_day_of_week": None,
+            "reset_strategy": "reuse",
+            "schedule_time": "2026-09-19 16:50",
+        }, ensure_ascii=False)
+
+        await center._on_copy_task(task)
+
+        cfg = _json.loads(mock_db.set_setting.await_args.args[1])
+        # 快照的 local/global 分组被完整保留（旧反推路径会全部归入全域组）
+        assert cfg["local_fnames"] == ["本地吧"]
+        assert cfg["global_fnames"] == ["全域吧"]
+        assert cfg["schedule_time_hm"] == "16:50"
+        assert cfg["strategy"] == "strict_round_robin"
+
+    @pytest.mark.asyncio
     async def test_config_page_applies_copied_config(self):
         bp = _make_page()
         config = {

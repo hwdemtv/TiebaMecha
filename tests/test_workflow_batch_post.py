@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
 
 from tieba_mecha.core.batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
-from tieba_mecha.core.daemon import do_batch_post_tasks
+from tieba_mecha.core.daemon import do_batch_post_tasks, wait_spawned_batch_tasks
 from tieba_mecha.core.account import add_account
 
 @pytest.mark.asyncio
@@ -81,8 +81,9 @@ class TestBatchPostWorkflow:
             mock_client_ctx.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
             mock_httpx.return_value = mock_client_ctx
 
-            # 6. Trigger daemon task
+            # 6. Trigger daemon task（派发后等待后台协程结束再断言）
             await do_batch_post_tasks()
+            await wait_spawned_batch_tasks()
 
         # 7. Verification: Check task status in DB
         updated_task = await db.get_all_batch_tasks()
@@ -141,8 +142,9 @@ class TestBatchPostWorkflow:
             # unless we change it back to "pending" or the daemon handles it.
             # do_batch_post_tasks picks up "pending" tasks.
             await db.update_batch_task(task.id, status="pending")
-            
+
             await do_batch_post_tasks()
+            await wait_spawned_batch_tasks()
 
         # Check if material was reset (status becomes success again after execution, 
         # but was it reused?)

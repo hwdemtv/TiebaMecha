@@ -88,11 +88,13 @@ class TestDaemonAiPersonaPassthrough:
         assert "ai_persona" in sig.parameters
 
     def test_daemon_source_includes_ai_persona(self):
-        """daemon.py do_batch_post_tasks should reference ai_persona."""
+        """daemon.py 应在构建核心任务时传递 ai_persona（重构后位于 _build_core_task）。"""
         import inspect
         from tieba_mecha.core import daemon
-        source = inspect.getsource(daemon.do_batch_post_tasks)
-        assert "ai_persona" in source
+        # 轮询派发链: do_batch_post_tasks → _run_claimed_task → _build_core_task
+        assert "_run_claimed_task" in inspect.getsource(daemon.do_batch_post_tasks)
+        core_builder_source = inspect.getsource(daemon._build_core_task)
+        assert "ai_persona" in core_builder_source
 
 
 # ========================================================================
@@ -152,13 +154,14 @@ class TestExecuteTaskMaterialWarning:
 
 
 class TestDaemonLogsErrors:
-    """daemon.py do_batch_post_tasks should log error/failed updates."""
+    """daemon.py 执行链应记录 error/failed 更新（重构后位于 _run_claimed_task）。"""
 
     def test_daemon_source_logs_error_updates(self):
-        """Source should print error messages from execute_task updates."""
+        """执行链源码应输出 execute_task 更新中的错误消息。"""
         import inspect
         from tieba_mecha.core import daemon
-        source = inspect.getsource(daemon.do_batch_post_tasks)
+        # 轮询派发与精确触发共用 _run_claimed_task 执行
+        source = inspect.getsource(daemon._run_claimed_task)
         assert 'update.get("status"' in source or "update_status" in source
 
 
@@ -525,3 +528,112 @@ class TestPerAccountRateLimiterNoCascade:
         # (The fix ensures the timestamp isn't appended after waiting)
         status_before = limiter.get_status(1)
         assert status_before["can_post"] is False
+
+
+# ========================================================================
+# 权限不足标记闭环（进程级黑名单 + 空降回落跳过）
+# ========================================================================
+
+
+class TestPermissionDeniedRegistry:
+    """权限不足组合的进程级记录与查询。"""
+
+    def setup_method(self):
+        from tieba_mecha.core.batch_post import _PERMISSION_DENIED
+        _PERMISSION_DENIED.clear()
+
+    def test_record_and_query(self):
+        from tieba_mecha.core.batch_post import (
+            _PERMISSION_DENIED,
+            is_permission_denied,
+            record_permission_denied,
+        )
+
+        assert not is_permission_denied(5, "绅士的品格")
+        # 首次记录返回 True，重复记录返回 False
+        assert record_permission_denied(5, "绅士的品格", "用户没有权限") is True
+        assert record_permission_denied(5, "绅士的品格", "用户没有权限") is False
+        assert is_permission_denied(5, "绅士的品格")
+        assert not is_permission_denied(3, "绅士的品格")
+        assert _PERMISSION_DENIED[(5, "绅士的品格")] == "用户没有权限"
+
+    @pytest.mark.asyncio
+    async def test_strict_fallback_skips_denied_pair(self):
+        """strict_round_robin 空降回落应跳过权限不足的 (账号, 贴吧) 组合。"""
+        from unittest.mock import MagicMock
+
+        from tieba_mecha.core.batch_post import (
+            BatchPostManager,
+            record_permission_denied,
+        )
+
+        record_permission_denied(1, "绅士的品格", "用户没有权限")
+        mgr = BatchPostManager(db=None)
+        task = MagicMock()
+        task.strategy = "strict_round_robin"
+        task.accounts = [1, 2, 3]
+
+        picked = await mgr._pick_optimal_account_for_target(
+            task, "绅士的品格", step=0, weights=[], native_map={}, followed_map={},
+        )
+        # 轮转起点是账号 1（无权限），应顺移到 2 而不是撞墙
+        assert picked == 2
+
+    @pytest.mark.asyncio
+    async def test_all_denied_falls_back_to_rotation(self):
+        """所有候选都权限不足时仍按轮转返回，避免死循环。"""
+        from unittest.mock import MagicMock
+
+        from tieba_mecha.core.batch_post import (
+            BatchPostManager,
+            record_permission_denied,
+        )
+
+        for aid in (1, 2, 3):
+            record_permission_denied(aid, "吧A", "x")
+        mgr = BatchPostManager(db=None)
+        task = MagicMock()
+        task.strategy = "strict_round_robin"
+        task.accounts = [1, 2, 3]
+
+        picked = await mgr._pick_optimal_account_for_target(
+            task, "吧A", step=0, weights=[], native_map={}, followed_map={},
+        )
+        assert picked == 1
+
+
+# ========================================================================
+# 任务原子认领（精确触发与轮询兜底防双跑）
+# ========================================================================
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_task_is_atomic(db):
+    """claim 仅在 pending 时成功一次，二次认领必须失败。"""
+    task = await db.add_batch_task(
+        fname="f", titles_json="[]", contents_json="[]",
+        accounts_json="[]", total=1,
+    )
+    assert task.status == "pending"
+
+    assert await db.claim_batch_task(task.id) is True
+    assert await db.claim_batch_task(task.id) is False
+
+    loaded = await db.get_batch_task(task.id)
+    assert loaded.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_reset_running_batch_tasks_recovers_stuck(db):
+    """崩溃恢复：启动时遗留的 running 任务应复位为 pending。"""
+    task = await db.add_batch_task(
+        fname="f", titles_json="[]", contents_json="[]",
+        accounts_json="[]", total=1,
+    )
+    await db.update_batch_task(task.id, status="running")
+
+    recovered = await db.reset_running_batch_tasks()
+
+    assert recovered >= 1
+    loaded = await db.get_batch_task(task.id)
+    assert loaded.status == "pending"

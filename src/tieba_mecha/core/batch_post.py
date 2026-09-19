@@ -22,6 +22,38 @@ from .obfuscator import Obfuscator
 from .logger import log_info, log_warn, log_error
 from .auth import get_auth_manager, AuthStatus
 
+# 进程级“账号×贴吧”发帖权限黑名单：(account_id, fname) -> 原因。
+# mark_forum_banned 只在 forums 表已有该行时落库，账号未在应用内关注过该吧时
+# 标记会落空，导致同一组合每轮重复撞墙（实测：同一账号同一吧连续两轮报权限不足）。
+# 此表作为兜底，进程存活期内持续有效，选号空降回落时据此跳过。
+_PERMISSION_DENIED: dict[tuple[int, str], str] = {}
+# 同一组合的顺延次数：首次与每第 5 次记 WARN，其余降级 INFO，避免刷屏
+_PERMISSION_SKIP_COUNT: dict[tuple[int, str], int] = {}
+
+
+def record_permission_denied(account_id: int, fname: str, reason: str) -> bool:
+    """记录权限不足组合，返回是否为该组合首次出现。"""
+    key = (account_id, fname)
+    first = key not in _PERMISSION_DENIED
+    _PERMISSION_DENIED[key] = reason
+    return first
+
+
+def is_permission_denied(account_id: int, fname: str) -> bool:
+    return (account_id, fname) in _PERMISSION_DENIED
+
+
+async def log_permission_denied(account_id: int, acc_display: str, fname: str, reason: str):
+    """权限不足日志去噪：同一组合首次与每第 5 次记 WARN，其余降级 INFO。"""
+    key = (account_id, fname)
+    _PERMISSION_SKIP_COUNT[key] = _PERMISSION_SKIP_COUNT.get(key, 0) + 1
+    count = _PERMISSION_SKIP_COUNT[key]
+    msg = f"账号 [{acc_display}] 在贴吧 [{fname}] 权限不足（{reason}），已标记靶场并顺延该物料 (第{count}次)"
+    if count == 1 or count % 5 == 0:
+        await log_warn(msg)
+    else:
+        await log_info(msg)
+
 
 class PerAccountRateLimiter:
     """
@@ -195,6 +227,34 @@ class CaptchaCircuitBreaker:
         elapsed: float = time.time() - self._captcha_triggers[account_id]
         remaining: float = self.cooldown_minutes * 60 - elapsed
         return max(0, remaining)
+
+    async def load(self) -> None:
+        """从 CaptchaEvent 表回种冷却中的账号，使验证码熔断跨任务/跨调用生效。
+
+        与 FailureCircuitBreaker.load 对齐：触发时已通过 save_captcha_event 落库，
+        这里只负责按冷却窗口读回最近事件；未配置 db 或查询失败时退化为纯内存模式。
+        """
+        if not self._db:
+            return
+        try:
+            from datetime import datetime, timedelta
+            from sqlalchemy import func, select
+            from ..db.models import CaptchaEvent
+            cutoff = datetime.now() - timedelta(minutes=self.cooldown_minutes)
+            async with self._db.async_session() as session:
+                rows = (await session.execute(
+                    select(CaptchaEvent.account_id, func.max(CaptchaEvent.created_at))
+                    .where(
+                        CaptchaEvent.event_type == "captcha",
+                        CaptchaEvent.account_id.isnot(None),
+                        CaptchaEvent.created_at >= cutoff,
+                    )
+                    .group_by(CaptchaEvent.account_id)
+                )).all()
+            for account_id, latest in rows:
+                self._captcha_triggers[int(account_id)] = latest.timestamp()
+        except Exception as e:
+            await log_warn(f"验证码熔断状态回种失败（退化为内存模式）: {e}")
 
 
 class ContentSimilarityDetector:
@@ -835,6 +895,32 @@ FOLLOW_ACTION_DELAY = (15.0, 40.0)  # 同账号相邻操作的基准拟人间隔
 FOLLOW_ACCOUNT_GAP = (90.0, 180.0)  # 账号间切换冷却（秒）
 
 
+class _FollowFlowGate:
+    """关注/取关域级并发闸门（fail-fast，拒绝叠加执行）。
+
+    不用 asyncio.Lock：模块级 Lock 会绑定首个使用它的事件循环，在多事件循环
+    场景（单测、多运行时）下会抛 RuntimeError；单事件循环内 check-and-set
+    之间无 await 点，布尔位天然原子。
+    """
+
+    __slots__ = ("_locked",)
+
+    def __init__(self):
+        self._locked = False
+
+    def try_lock(self) -> bool:
+        if self._locked:
+            return False
+        self._locked = True
+        return True
+
+    def unlock(self) -> None:
+        self._locked = False
+
+
+_follow_flow_gate = _FollowFlowGate()
+
+
 def bool_resp_err(resp: Any) -> str:
     """提取 aiotieba BoolResponse 的错误信息，返回空串表示成功。
 
@@ -1033,6 +1119,11 @@ class BatchPostManager:
                 candidate = task.accounts[(step + offset) % n]
                 if candidate in available_accounts:
                     return candidate
+            # 空降回落：跳过已知权限不足的 (账号, 贴吧) 组合，轮转起点不变
+            for offset in range(n):
+                candidate = task.accounts[(step + offset) % n]
+                if not is_permission_denied(candidate, target_fname):
+                    return candidate
             return task.accounts[step % len(task.accounts)]
 
         # 1. 优先尝试：安全原生号 (关注了该吧且设为发布目标)
@@ -1046,7 +1137,9 @@ class BatchPostManager:
                     if candidate in native_accounts:
                         return candidate
                 # 轮询模式下，如果找不到匹配的原生账号，继续轮询而非随机选择
-                return task.accounts[step % len(task.accounts)]
+                candidate = task.accounts[step % len(task.accounts)]
+                if not is_permission_denied(candidate, target_fname):
+                    return candidate
             elif task.strategy == "weighted":
                 filtered = [(a, w) for a, w in weights if a in native_accounts]
                 if filtered:
@@ -1063,15 +1156,25 @@ class BatchPostManager:
                     if candidate in available_accounts:
                         return candidate
                 # 轮询模式下，如果找不到匹配的关注账号，继续轮询而非随机选择
-                return task.accounts[step % len(task.accounts)]
+                candidate = task.accounts[step % len(task.accounts)]
+                if not is_permission_denied(candidate, target_fname):
+                    return candidate
             elif task.strategy == "weighted":
                 filtered = [(a, w) for a, w in weights if a in available_accounts]
                 if filtered:
                     return self._weighted_choice(filtered)
             return random.choice(available_accounts)
 
-        # 3. 最终回退：大盘调度策略 (空降兵打法)
-        return await self._pick_account(task, step, weights)
+        # 3. 最终回退：大盘调度策略 (空降兵打法)，同样避开已知权限不足的组合
+        candidate = await self._pick_account(task, step, weights)
+        if not is_permission_denied(candidate, target_fname):
+            return candidate
+        n = len(task.accounts)
+        for offset in range(n):
+            alt = task.accounts[(step + offset) % n]
+            if not is_permission_denied(alt, target_fname):
+                return alt
+        return candidate
 
     async def execute_task(self, task: BatchPostTask, material_ids: list[int] | None = None) -> AsyncGenerator[dict[str, Any], None]:
         """
@@ -1399,8 +1502,8 @@ class BatchPostManager:
                                 await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
                                 # 记录靶场击穿
                                 await self.db.update_target_pool_status(current_target_fname, is_success=True)
-                                if task.progress < actual_total:
-                                    await BionicDelay.sleep(delay_min, delay_max)
+                                # yield 必须先于仿生休眠：休眠动辄数分钟，若放在 sleep 后
+                                # 守护进程的进度落库会滞后整整一个发帖间隔
                                 yield {
                                     "status": "success", "tid": tid, "fname": current_target_fname,
                                     "account_id": account_id,
@@ -1409,9 +1512,12 @@ class BatchPostManager:
                                     "material_id": current_material.id,
                                     "progress": task.progress, "total": task.total,
                                 }
+                                if task.progress < actual_total:
+                                    await BionicDelay.sleep(delay_min, delay_max)
                                 break # 退出账号重试循环
                             else:
                                 err_msg = str(res_json.get('error') or res_json)
+                                acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
                                 # 验证码与熔断逻辑集成
                                 await captcha_breaker.check_and_trigger(account_id, err_msg, err_code)
                                 await failure_breaker.record_failure(account_id)
@@ -1425,21 +1531,22 @@ class BatchPostManager:
                                     else:
                                         await self.db.update_account_status(account_id, "banned")
                                 
-                                # 权限不足识别：贴吧级限制 → 换贴吧而非换号
+                                # 权限不足识别：贴吧级限制 → 物料顺延（下轮轮转自然换吧）
                                 elif "没有权限" in err_msg or "权限不足" in err_msg or "无权" in err_msg:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason="用户没有权限")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="用户没有权限")
-                                    await log_warn(f"贴吧 [{current_target_fname}] 权限不足，标记靶场并换贴吧继续...")
+                                    record_permission_denied(account_id, current_target_fname, "用户没有权限")
+                                    await log_permission_denied(account_id, acc_display, current_target_fname, "用户没有权限")
                                     forum_permission_denied = True
-                                    break  # 退出账号重试循环，让外层换贴吧/物料
+                                    break  # 退出账号重试循环，让外层顺延物料
                                 elif "等级" in err_msg or "级别" in err_msg:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason=f"等级限制: {err_msg}")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason=f"等级限制: {err_msg}")
-                                    await log_warn(f"贴吧 [{current_target_fname}] 存在等级限制，标记靶场并换贴吧继续...")
+                                    record_permission_denied(account_id, current_target_fname, err_msg)
+                                    await log_permission_denied(account_id, acc_display, current_target_fname, err_msg)
                                     forum_permission_denied = True
-                                    break  # 退出账号重试循环，让外层换贴吧/物料
+                                    break  # 退出账号重试循环，让外层顺延物料
                                 else:
-                                    acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
                                     await log_warn(f"账号 {acc_display} 发射遭拦截: {err_msg}，准备换号重试...")
                 except Exception as ex:
                     acc_info = account_map.get(account_id)
@@ -1449,16 +1556,16 @@ class BatchPostManager:
             
             if not success_for_this_material:
                 if forum_permission_denied:
-                    # 贴吧权限不足：不标记物料失败，尝试下一个贴吧/物料
+                    # 贴吧权限不足：不标记物料失败，物料顺延由下轮轮转自然换吧
                     await self.db.add_batch_post_log(
                         task_id=str(task.id),
                         fname=current_target_fname,
                         status="skip",
-                        message=f"贴吧权限不足，跳过: {current_target_fname}",
+                        message=f"贴吧权限不足，物料顺延: {current_target_fname}",
                         title=current_material.title,
                         data={"progress": task.progress, "total": task.total}
                     )
-                    yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] 权限不足，跳过换吧", "progress": task.progress, "total": task.total}
+                    yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] 权限不足，该物料已顺延至下轮", "progress": task.progress, "total": task.total}
                 else:
                     # --- 集成：失败流水持久化 ---
                     await self.db.add_batch_post_log(
@@ -1539,6 +1646,23 @@ class BatchPostManager:
         progress_callback=None,
         account_ids: list[int] | None = None,
     ):
+        """批量取消关注入口：域级并发闸门 fail-fast，实际逻辑见 _unfollow_forums_bulk_impl。"""
+        if not _follow_flow_gate.try_lock():
+            result: dict[str, list[dict[str, Any]]] = {"success": [], "failed": [], "skipped": []}
+            result["failed"].append({"account_id": None, "fname": None, "reason": "已有批量关注/取关任务在执行"})
+            await log_warn("批量取关并发防护触发：已有关注/取关任务在执行，本次调用被拒绝")
+            return result
+        try:
+            return await self._unfollow_forums_bulk_impl(fnames, progress_callback, account_ids)
+        finally:
+            _follow_flow_gate.unlock()
+
+    async def _unfollow_forums_bulk_impl(
+        self,
+        fnames: list[str],
+        progress_callback=None,
+        account_ids: list[int] | None = None,
+    ):
         """
         批量取消关注并清理数据库记录。
         内置反风控防护：PerAccountRateLimiter / CaptchaCircuitBreaker /
@@ -1554,11 +1678,17 @@ class BatchPostManager:
 
         result: dict[str, list[dict[str, Any]]] = {"success": [], "failed": [], "skipped": []}
 
+        fnames = [f for f in dict.fromkeys(fnames) if f and str(f).strip()]
+        if not fnames:
+            await log_warn("批量取关：目标贴吧列表为空，跳过")
+            return result
+
         # ---- 反风控组件初始化 ----
         rate_limiter = PerAccountRateLimiter(rpm=FOLLOW_ACTION_RPM)
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
         failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60, db=self.db, scope="unfollow")
         await failure_breaker.load()
+        await captcha_breaker.load()
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
         # 1. 识别受影响的账号；账号详情页可限制为单个账号取关。
@@ -1684,10 +1814,12 @@ class BatchPostManager:
                             adj_min, adj_max = time_window.get_adjusted_delay(*FOLLOW_ACTION_DELAY)
                             await BionicDelay.sleep(adj_min, adj_max)
             except Exception as e:
-                failed_count += max(0, len(fnames) - (current_action - acc_start))
+                done_count = max(0, current_action - acc_start)
                 current_action = acc_start + len(fnames)
+                # 未尝试的 (账号, 吧) 对必须落账，保证结果统计与进度一致
+                for missed_fname in fnames[done_count:]:
+                    result["skipped"].append({"account_id": acc_id, "fname": missed_fname, "reason": "客户端异常中断"})
                 skipped_accounts.add(acc_id)
-                result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"创建客户端失败: {str(e)[:30]}"})
                 if progress_callback:
                     await progress_callback(current_action, total_actions)
                 await log_error(f"创建客户端执行取关任务失败(ID:{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}): {e}")
@@ -1741,6 +1873,23 @@ class BatchPostManager:
             await session.commit()
 
     async def follow_forums_bulk(self, fnames: list[str], account_ids: list[int] | None = None, progress_callback: Any = None) -> dict[str, Any]:
+        """批量关注入口：域级并发闸门 fail-fast，实际逻辑见 _follow_forums_bulk_impl。
+
+        Returns:
+            dict: {"success", "failed", "skipped"}；并发冲突时 failed 携带
+                  "已有批量关注/取关任务在执行"。
+        """
+        if not _follow_flow_gate.try_lock():
+            result: dict[str, list[dict[str, Any]]] = {"success": [], "failed": [], "skipped": []}
+            result["failed"].append({"account_id": None, "fname": None, "reason": "已有批量关注/取关任务在执行"})
+            await log_warn("批量关注并发防护触发：已有关注/取关任务在执行，本次调用被拒绝")
+            return result
+        try:
+            return await self._follow_forums_bulk_impl(fnames, account_ids, progress_callback)
+        finally:
+            _follow_flow_gate.unlock()
+
+    async def _follow_forums_bulk_impl(self, fnames: list[str], account_ids: list[int] | None = None, progress_callback: Any = None) -> dict[str, Any]:
         """
         批量关注贴吧并记录失败结果。
         内置6层反风控防护：PerAccountRateLimiter / CaptchaCircuitBreaker /
@@ -1763,11 +1912,17 @@ class BatchPostManager:
 
         result: dict[str, list[dict[str, Any]]] = {"success": [], "failed": [], "skipped": []}
 
+        fnames = [f for f in dict.fromkeys(fnames) if f and str(f).strip()]
+        if not fnames:
+            await log_warn("批量关注：目标贴吧列表为空，跳过")
+            return result
+
         # ---- 反风控组件初始化 ----
         rate_limiter = PerAccountRateLimiter(rpm=FOLLOW_ACTION_RPM)  # 单账号关注兜底限流
         captcha_breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=self.db)
         failure_breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=60, db=self.db, scope="follow")
         await failure_breaker.load()
+        await captcha_breaker.load()
         time_window = TimeWindowDispatcher(quiet_start=1, quiet_end=6)
 
         # 1. 确定要操作的账号
@@ -1784,18 +1939,24 @@ class BatchPostManager:
             result["failed"].append({"account_id": None, "fname": None, "reason": "无可用账号"})
             return result
 
-        # 2. 过滤掉已经关注且未封禁的吧（避免重复操作）
+        # 2. 预查本地关注状态：已关注的对直接跳过；已拉黑的对不重试（省配额且避免污染熔断计数）
         async with self.db.async_session() as session:
             from sqlalchemy import select
             from ..db.models import Forum
-            stmt = select(Forum.fname, Forum.account_id).where(
+            stmt = select(Forum.fname, Forum.account_id, Forum.is_banned, Forum.is_hidden).where(
                 Forum.fname.in_(fnames),
                 Forum.account_id.in_(account_ids),
-                Forum.is_banned == False,   # 已关注且未被封禁
-                Forum.is_hidden == False    # 排除服务端已取关的滞后记录（hidden 需重新走关注流程）
             )
             res = await session.execute(stmt)
-            already_following = {(row.account_id, row.fname) for row in res}
+            already_following: set[tuple[int, str]] = set()
+            banned_pairs: set[tuple[int, str]] = set()
+            for row in res:
+                if row.is_hidden:
+                    continue  # 服务端已取关的滞后记录（hidden），需重新走关注流程
+                if row.is_banned:
+                    banned_pairs.add((row.account_id, row.fname))
+                else:
+                    already_following.add((row.account_id, row.fname))
 
         total_actions = len(account_ids) * len(fnames)
         current_action = 0
@@ -1851,6 +2012,14 @@ class BatchPostManager:
                                 await progress_callback(current_action, total_actions)
                             continue
 
+                        # 已拉黑的对不重试：重试只会再次失败，浪费配额并给熔断器计入噪声
+                        if (acc_id, fname) in banned_pairs:
+                            result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "该吧已拉黑，跳过重试"})
+                            current_action += 1
+                            if progress_callback:
+                                await progress_callback(current_action, total_actions)
+                            continue
+
                         # ---- RPM 限流 ----
                         await rate_limiter.wait_if_needed(acc_id)
 
@@ -1863,9 +2032,19 @@ class BatchPostManager:
                                 await progress_callback(current_action, total_actions)
                             continue
 
+                        # 单次预取贴吧信息：follow_forum 传 int fid 可跳过其内部的 fid 解析查询，
+                        # 落库与拉黑标记复用同一结果，避免一次动作两次查询
+                        try:
+                            forum_info = await client.get_forum(fname)
+                        except Exception:
+                            forum_info = None
+                        fid = 0
+                        if forum_info is not None and not getattr(forum_info, 'err', None):
+                            fid = getattr(forum_info, 'fid', 0) or 0
+
                         # aiotieba 的 BoolResponse 语义：API 失败不抛异常，错误挂在 .err 上
                         try:
-                            resp = await client.follow_forum(fname)
+                            resp = await client.follow_forum(fid if fid else fname)
                             err_msg = bool_resp_err(resp)
                         except Exception as e:  # 仅兜住本地/网络层未预期异常
                             err_msg = str(e)
@@ -1877,16 +2056,8 @@ class BatchPostManager:
                             # 成功 → 重置失败计数
                             await failure_breaker.record_success(acc_id)
 
-                            # 获取真实贴吧 fid（而非随机生成）
-                            real_fid = 0
-                            try:
-                                forum_info = await client.get_forum(fname)
-                                real_fid = getattr(forum_info, 'fid', 0) or 0
-                            except Exception:
-                                pass
-
                             # 同步数据库记录（含复位滞后的隐藏/封禁标记）
-                            await self._record_follow_success(acc_id, fname, real_fid)
+                            await self._record_follow_success(acc_id, fname, fid)
                         else:
                             # ---- 错误分类：先幂等/业务性结果（不计熔断），再熔断计数，最后兜底 ----
                             from .risk import extract_err_code, is_forum_ban_error, is_already_followed_error, is_blacklisted_error
@@ -1895,13 +2066,7 @@ class BatchPostManager:
                             if is_already_followed_error(err_msg):
                                 # 幂等达成：服务端已关注 → 对齐本地记录（补记录/复位滞后标记），不计熔断
                                 result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "已关注"})
-                                al_fid = 0
-                                try:
-                                    al_forum_info = await client.get_forum(fname)
-                                    al_fid = getattr(al_forum_info, 'fid', 0) or 0
-                                except Exception:
-                                    pass
-                                await self._record_follow_success(acc_id, fname, al_fid)
+                                await self._record_follow_success(acc_id, fname, fid)
                                 await log_info(f"账号 {_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')} 已关注 [{fname}]（幂等跳过）")
                             elif is_forum_ban_error(err_msg):
                                 result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "该吧拒绝关注（封禁/权限）"})
@@ -1911,14 +2076,8 @@ class BatchPostManager:
                                 await log_error(f"账号 {_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')} 关注 [{fname}] 失败: {err_msg}")
                             elif is_blacklisted_error(err_msg):
                                 result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "账号被该吧拉黑"})
-                                await failure_breaker.record_failure(acc_id)
-                                # 标记为封禁，尝试获取真实 fid
-                                ban_fid = 0
-                                try:
-                                    ban_forum_info = await client.get_forum(fname)
-                                    ban_fid = getattr(ban_forum_info, 'fid', 0) or 0
-                                except Exception:
-                                    pass
+                                # 拉黑是吧级处置而非账号风控信号，不计入连续失败熔断（避免误伤正常关注）
+                                # 标记为封禁并关闭发帖许可
                                 async with self.db.async_session() as session:
                                     from sqlalchemy import select
                                     from ..db.models import Forum
@@ -1930,11 +2089,11 @@ class BatchPostManager:
                                         forum.is_banned = True
                                         forum.ban_reason = "批量关注时检测到拉黑"
                                         forum.is_post_target = False
-                                        if ban_fid and forum.fid != ban_fid:
-                                            forum.fid = ban_fid
+                                        if fid and forum.fid != fid:
+                                            forum.fid = fid
                                     else:
                                         session.add(Forum(
-                                            fid=ban_fid, fname=fname, account_id=acc_id,
+                                            fid=fid, fname=fname, account_id=acc_id,
                                             is_banned=True, ban_reason="批量关注时检测到拉黑"
                                         ))
                                     await session.commit()
@@ -1956,8 +2115,11 @@ class BatchPostManager:
                             adj_min, adj_max = time_window.get_adjusted_delay(*FOLLOW_ACTION_DELAY)
                             await BionicDelay.sleep(adj_min, adj_max)
             except Exception as e:
-                result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"创建客户端失败: {str(e)[:30]}"})
+                done_count = max(0, current_action - acc_start)
                 current_action = acc_start + len(fnames)
+                # 未尝试的 (账号, 吧) 对必须落账，保证结果统计与进度一致
+                for missed_fname in fnames[done_count:]:
+                    result["skipped"].append({"account_id": acc_id, "fname": missed_fname, "reason": "客户端异常中断"})
                 if progress_callback:
                     await progress_callback(current_action, total_actions)
                 await log_error(f"创建客户端执行关注任务失败(ID:{_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')}): {e}")

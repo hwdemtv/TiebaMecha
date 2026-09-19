@@ -193,9 +193,9 @@ def test_account_card_proxy_fallback_shows_disabled():
     items = page._build_account_items()
     card_texts = [t.value for t in find_texts(items[1])]
     assert any("代理#7 (已停用)" in str(v) for v in card_texts if v)
-    # 未绑定代理的账号仍显示“直连”
+    # 未绑定代理的账号显示裸连风险提示（不再是无风险的“直连”）
     card1_texts = [t.value for t in find_texts(items[0])]
-    assert any(str(v).startswith("代理: 直连") for v in card1_texts if v)
+    assert any(str(v).startswith("代理: 裸连") for v in card1_texts if v)
 
 
 def test_account_card_weight_dots():

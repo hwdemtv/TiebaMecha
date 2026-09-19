@@ -66,7 +66,7 @@ class Forum(Base):
     history_failed: Mapped[int] = mapped_column(Integer, default=0, comment="历史签到失败次数")
     account_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="关联账号ID")
     is_post_target: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否允许作为发贴目标")
-    is_hidden: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否在 UI 中隐藏且跳过签到")
+    is_hidden: Mapped[bool] = mapped_column(Boolean, default=False, comment="服务端已取关的滞后标记（签到同步时置位；UI 中随之隐藏并跳过签到）")
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否被该吧吧务封禁")
     ban_reason: Mapped[str | None] = mapped_column(String(200), nullable=True, comment="封禁原因")
 
@@ -189,6 +189,9 @@ class BatchPostTask(Base):
     # reset_strategy: 循环轮次开始前物料处理策略
     # new_only=只发新物料(默认), reuse=重置复用
     reset_strategy: Mapped[str] = mapped_column(String(20), default="new_only", comment="物料重置策略: new_only/reuse")
+    # 配置快照：LaunchConfig.to_dict() 的 JSON，复制/二次编辑时完整还原
+    # local/global 贴吧分组、排期时刻等展示字段里没有的信息
+    config_json: Mapped[str] = mapped_column(Text, default="{}", comment="LaunchConfig 配置快照 JSON")
     # 循环轮次计数
     cycle_count: Mapped[int] = mapped_column(Integer, default=0, comment="已执行循环轮次数")
     # 循环轮询起点偏移量（下次发帖从 fnames[offset % len(fnames)] 开始）

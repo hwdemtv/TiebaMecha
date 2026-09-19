@@ -47,9 +47,21 @@ class AsyncQueueHandler(logging.Handler):
 import os
 from logging.handlers import RotatingFileHandler
 
+class _FletNoiseFilter(logging.Filter):
+    """吞掉 Flet 页面断开后的残留报错（run_task 协程随连接断开抛出，无实害）。"""
+
+    _NOISE_PATTERNS = ("Page has been disconnected", "Receive loop error")
+
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(pattern in msg for pattern in self._NOISE_PATTERNS)
+
+
 # 初始化 root logger 拦截 (UI 队列流)
 _handler = AsyncQueueHandler()
 _handler.setFormatter(logging.Formatter('%(message)s'))
+_noise_filter = _FletNoiseFilter()
+_handler.addFilter(_noise_filter)
 logging.getLogger().addHandler(_handler)
 
 # 初始化物理日志持久化 (覆盖 root logger)
@@ -71,6 +83,7 @@ _file_handler = RotatingFileHandler(
 )
 _file_formatter = logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 _file_handler.setFormatter(_file_formatter)
+_file_handler.addFilter(_noise_filter)
 logging.getLogger().addHandler(_file_handler)
 
 async def log_info(msg: str):

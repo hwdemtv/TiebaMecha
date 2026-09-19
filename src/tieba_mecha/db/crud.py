@@ -165,6 +165,7 @@ class Database(
                 ("reset_strategy", "VARCHAR(20) DEFAULT 'new_only'"),
                 ("cycle_count", "INTEGER DEFAULT 0"),
                 ("forum_offset", "INTEGER DEFAULT 0"),
+                ("config_json", "TEXT DEFAULT '{}'"),
             ]
             for col_name, col_type in batch_migrations:
                 await self._safe_add_column(conn, "batch_post_tasks", col_name, col_type, batch_cols)

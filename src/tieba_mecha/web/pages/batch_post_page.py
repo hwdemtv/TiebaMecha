@@ -284,6 +284,13 @@ class BatchPostPage:
         self.use_ai_switch.value = bool(data.get("use_ai"))
         if data.get("ai_persona"):
             self.ai_persona_dropdown.value = data["ai_persona"]
+        # 回填调度策略与文案模式（此前缺失，复制出的任务会静默回落到页面当前值）
+        strategy_val = data.get("strategy")
+        if strategy_val and any(getattr(o, "key", None) == strategy_val for o in self.strategy_dropdown.options):
+            self.strategy_dropdown.value = strategy_val
+        pairing_val = data.get("pairing_mode")
+        if pairing_val and any(getattr(o, "key", None) == pairing_val for o in self.pairing_mode_dropdown.options):
+            self.pairing_mode_dropdown.value = pairing_val
 
         schedule_type = data.get("schedule_type") or "once"
         if data.get("use_schedule") and schedule_type in ("daily", "weekly", "interval"):
@@ -293,6 +300,10 @@ class BatchPostPage:
                 self.interval_hours.value = str(data["interval_hours"])
             if schedule_type == "weekly" and data.get("schedule_day_of_week") is not None:
                 self.schedule_day_of_week.value = str(data["schedule_day_of_week"])
+            # 恢复循环任务的执行时刻 HH:MM
+            hm = data.get("schedule_time_hm")
+            if hm and hasattr(self, "schedule_time_hm"):
+                self.schedule_time_hm.value = hm
         else:
             # once 任务复制为立即执行，避免载入过去的时间点
             self.use_schedule.value = False
@@ -2911,16 +2922,17 @@ class BatchPostPage:
                     schedule_day_of_week=config.schedule_day_of_week if schedule_type == "weekly" else None,
                     reset_strategy=config.reset_strategy if schedule_type != "once" else "new_only",
                     schedule_time=st,
+                    config_json=json.dumps(config.to_dict(), ensure_ascii=False),
                     status="pending"
                 )
-                # [精确调度] once 类型任务注册 APScheduler date 触发器，精确到分钟执行
-                if schedule_type == "once":
-                    try:
-                        from ...core.daemon import daemon_instance
-                        daemon_instance.schedule_once_task(str(new_task.id), st)
-                    except Exception as _sched_err:
-                        from ...core.logger import log_warn
-                        await log_warn(f"once 精度调度注册失败（将由 30min 轮询兜底）: {_sched_err}")
+                # [精确调度] 注册 APScheduler date 触发器，精确到分钟执行；
+                # 循环任务首轮同样精确触发，后续轮次由执行链自动续注册
+                try:
+                    from ...core.daemon import daemon_instance
+                    daemon_instance.schedule_batch_task(new_task.id, st)
+                except Exception as _sched_err:
+                    from ...core.logger import log_warn
+                    await log_warn(f"精确调度注册失败（将由 5min 轮询兜底）: {_sched_err}")
                 # 生成提示
                 type_labels = {"once": "单次", "daily": "每天", "weekly": "每周", "interval": f"每{config.interval_hours}小时"}
                 self._show_snackbar(f"{type_labels.get(schedule_type, '')}矩阵任务已加入全域队列", "success")
