@@ -2334,109 +2334,180 @@ class BatchPostPage:
             ], spacing=0),
         ])
 
+        # --- 四步向导布局：选择账号与目标 → 准备物料 → 策略与排期 → 确认发射 ---
+        # 步骤 1：账号池 + 目标贴吧选择
+        step_accounts = ft.Column([
+            ft.Row([
+                self.account_pool_title,
+                ft.IconButton(icons.REFRESH_ROUNDED, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新账号状态"),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([self.account_search_field, self.account_all_toggle], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, spacing=10),
+                    ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
+                    ft.Container(content=self.account_pool_column, expand=True),
+                ], spacing=10),
+                expand=True,
+                padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
+            ),
+        ], expand=1, spacing=12)
+        step_forums = ft.Column([
+            ft.Text("目标贴吧 / TARGET FORUMS (必填)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.BOLD),
+            self.forum_select_btn,
+            ft.Row([self.local_status_btn, self.global_status_btn], spacing=8, wrap=True),
+        ], expand=1, spacing=12)
+        self._wizard_step_views = [
+            ft.Row([step_accounts, step_forums], expand=True,
+                   vertical_alignment=ft.CrossAxisAlignment.START, spacing=15),
+            ft.Column([
+                ft.Row([
+                    ft.Text("全域指令集", size=14, weight=ft.FontWeight.W_500),
+                    ft.Row([
+                        ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
+                        ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
+                        ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
+                        ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
+                        ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
+                    ], spacing=0),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                self._build_material_view(),
+            ], expand=True, spacing=12),
+            ft.Column([
+                ft.Container(
+                    content=ft.Column([
+                        self._strategy_row,
+                        ft.Divider(height=5, color="transparent"),
+                        ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
+                        ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
+                        ft.Row([self.bump_matrix_switch, self.bump_ai_content_switch], spacing=5),
+                        ft.Divider(height=5, color="transparent"),
+                        ft.Text("自顶模式选择", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
+                        self.bump_mode_group,
+                        self.bump_loop_container,  # 矩阵轮换配置区
+                        self.bump_config_save_btn,
+                    ], spacing=10),
+                    padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        self.post_count,
+                        ft.Row([self.use_ai_switch, self.ai_persona_dropdown], spacing=10),
+                        ft.Row([self.use_schedule], spacing=10),
+                        ft.Row([self.schedule_type_dropdown, self.reset_strategy_dropdown], spacing=10),
+                        self.schedule_time,
+                        ft.Row([self.schedule_time_hm, self.schedule_day_of_week], spacing=10),
+                        self.interval_hours,
+                        ft.Row([self.min_delay, self.max_delay], spacing=10),
+                        # 时段风险提示卡片
+                        ft.Container(
+                            content=ft.Row([
+                                ft.Icon(name=icons.WARNING_AMBER_ROUNDED, color="orange", size=16),
+                                ft.Text("风控提示: 凌晨1-6点为高风险时段，建议延迟设置≥180秒",
+                                       size=10, color="onSurfaceVariant"),
+                            ], spacing=5),
+                            padding=8,
+                            bgcolor=with_opacity(0.08, "orange"),
+                            border_radius=8,
+                        ),
+                    ], spacing=10),
+                    padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
+                ),
+            ], expand=True, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),
+            ft.Column([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(icons.CHECK_CIRCLE_ROUNDED, color="green", size=16),
+                            ft.Text("启动前将自动执行干跑预检，并弹出任务摘要供确认（账号/贴吧/物料/预计发布/耗时/风险评分）",
+                                    size=12, color="onSurfaceVariant", expand=True),
+                        ], spacing=6),
+                        ft.Row([self.start_btn, self.dry_run_btn], spacing=10),
+                    ], spacing=10),
+                    padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
+                ),
+            ], expand=True, spacing=12),
+        ]
+
+        # 自绘步骤条（规避 ft.Stepper 测试桩兼容问题）
+        self._current_wizard_step = 1
+        self._wizard_step_labels = ["选择账号与目标", "准备物料", "策略与排期", "确认发射"]
+        self._wizard_step_chips = []
+        for idx, label in enumerate(self._wizard_step_labels, start=1):
+            badge = ft.Container(
+                content=ft.Text(str(idx), size=11, weight=ft.FontWeight.BOLD, color="white"),
+                width=22, height=22, border_radius=11,
+                alignment=ft.alignment.center, bgcolor="primary",
+            )
+            chip = ft.Container(
+                content=ft.Row([badge, ft.Text(label, size=12)], spacing=6, tight=True),
+                padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                border_radius=10,
+                on_click=lambda e, n=idx: self._switch_wizard_step(n),
+            )
+            self._wizard_step_chips.append(chip)
+        self._wizard_stepper = ft.Row(
+            self._wizard_step_chips, spacing=8, wrap=True,
+            alignment=ft.MainAxisAlignment.START,
+        )
+
+        self._wizard_prev_btn = ft.OutlinedButton("上一步", icon=icons.ARROW_BACK_IOS_NEW, on_click=lambda e: self._switch_wizard_step(self._current_wizard_step - 1))
+        self._wizard_next_btn = ft.ElevatedButton("下一步", icon=icons.ARROW_FORWARD, on_click=lambda e: self._switch_wizard_step(self._current_wizard_step + 1), style=ft.ButtonStyle(color="white", bgcolor="primary"))
+        self._wizard_content = ft.Container(content=self._wizard_step_views[0], expand=True)
+        self._apply_wizard_step_styles()
+
         # --- 封装最终布局界面并预存 ---
         self.main_layout = ft.Container(
             content=ft.Column([
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
-                    # 第一栏：矩阵策略中心 + 控制参数 (Left, expand=2)
-                    ft.Column([
-                        ft.Text("矩阵策略中心", size=14, weight=ft.FontWeight.W_500),
-                        ft.Container(
-                            content=                        ft.Column([
-                            self._strategy_row,
-                            ft.Divider(height=5, color="transparent"),
-                            ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
-                                ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
-                                ft.Row([self.bump_matrix_switch, self.bump_ai_content_switch], spacing=5),
-                                ft.Divider(height=5, color="transparent"),
-                                ft.Text("自顶模式选择", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
-                                self.bump_mode_group,
-                                self.bump_loop_container,  # 矩阵轮换配置区
-                                self.bump_config_save_btn,
-                            ], spacing=10),
-                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
-                        ),
-                        ft.Text("定时与控制", size=14, weight=ft.FontWeight.W_500),
-                        ft.Container(
-                            content=ft.Column([
-                                self.post_count,
-                                ft.Row([self.use_ai_switch, self.ai_persona_dropdown], spacing=10),
-                                ft.Row([self.use_schedule], spacing=10),
-                                ft.Row([self.schedule_type_dropdown, self.reset_strategy_dropdown], spacing=10),
-                                self.schedule_time,
-                                ft.Row([self.schedule_time_hm, self.schedule_day_of_week], spacing=10),
-                                self.interval_hours,
-                                ft.Row([self.min_delay, self.max_delay], spacing=10),
-                                # 时段风险提示卡片
-                                ft.Container(
-                                    content=ft.Row([
-                                        ft.Icon(name=icons.WARNING_AMBER_ROUNDED, color="orange", size=16),
-                                        ft.Text("风控提示: 凌晨1-6点为高风险时段，建议延迟设置≥180秒", 
-                                               size=10, color="onSurfaceVariant"),
-                                    ], spacing=5),
-                                    padding=8,
-                                    bgcolor=with_opacity(0.08, "orange"),
-                                    border_radius=8,
-                                ),
-                                ft.Divider(height=5, color="transparent"),
-                                ft.Row([self.start_btn, self.dry_run_btn], spacing=10),
-                            ], spacing=10),
-                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
-                        ),
-                    ], expand=3, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),
-
-                    # 第二栏：核心操作区 (Center, expand=5，最宽)
-                    ft.Column([
-                        ft.Row([
-                            ft.Text("全局指令集", size=14, weight=ft.FontWeight.W_500),
-                            ft.Row([
-                                ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
-                                ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
-                                ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
-                                ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
-                                ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
-                            ], spacing=0),
-                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        
-                        # 目标贴吧选择区
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text("目标贴吧 / TARGET FORUMS (必填)", size=12, color="onSurfaceVariant", weight=ft.FontWeight.BOLD),
-                                self.forum_select_btn,
-                                ft.Row([
-                                    self.local_status_btn,
-                                    self.global_status_btn,
-                                ], spacing=8, wrap=True),
-                            ], spacing=8),
-                            padding=10, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
-                        ),
-                        # 物料排期池 + 即时执行监视（运行区三视图已迁往发帖运行中心页）
-                        self._build_material_view(),
-                        self.live_monitor,
-                    ], expand=5, spacing=15),
-
-                    # 第三栏：账号池管理 (Right, expand=3)
-                    ft.Column([
-                        ft.Row([
-                            self.account_pool_title,
-                            ft.IconButton(icons.REFRESH_ROUNDED, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新账号状态"),
-                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Row([self.account_search_field, self.account_all_toggle], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, spacing=10),
-                                ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
-                                ft.Container(content=self.account_pool_column, expand=True),
-                            ], spacing=10),
-                            expand=True,
-                            padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
-                        ),
-                    ], expand=2, spacing=12),
-                ], expand=True, vertical_alignment=ft.CrossAxisAlignment.START),
-            ], expand=True, spacing=20),
+                    self._wizard_stepper,
+                    ft.Container(expand=True),
+                    self._wizard_prev_btn,
+                    self._wizard_next_btn,
+                ], spacing=10),
+                self._wizard_content,
+                self.live_monitor,
+            ], expand=True, spacing=12),
             padding=ft.padding.only(left=20, right=20, top=10, bottom=20), expand=True,
         )
+
+    def _apply_wizard_step_styles(self):
+        """根据当前步骤刷新步骤条与导航按钮状态"""
+        current = self._current_wizard_step
+        for idx, chip in enumerate(self._wizard_step_chips, start=1):
+            try:
+                is_done = idx < current
+                is_active = idx == current
+                chip.bgcolor = with_opacity(0.12, "primary") if is_active else (with_opacity(0.06, "green") if is_done else with_opacity(0.05, "onSurface"))
+                badge = chip.content.controls[0]
+                badge.bgcolor = "primary" if is_active else ("green" if is_done else with_opacity(0.3, "onSurface"))
+                label = chip.content.controls[1]
+                label.weight = ft.FontWeight.BOLD if is_active else ft.FontWeight.W_500
+                label.color = "primary" if is_active else "onSurfaceVariant"
+            except (AttributeError, IndexError, TypeError):
+                continue  # 测试桩环境下控件树不完整，跳过样式细节
+        self._wizard_prev_btn.visible = current > 1
+        self._wizard_next_btn.visible = current < len(self._wizard_step_views)
+
+    def _switch_wizard_step(self, step: int):
+        """切换向导步骤；向前越过步骤 1 时校验账号与目标贴吧已就绪"""
+        if step == self._current_wizard_step:
+            return
+        step = max(1, min(len(self._wizard_step_views), step))
+        if step > 1 and not (self._temp_local_fnames or self._temp_global_fnames):
+            self._show_snackbar("请先锁定目标贴吧（本地自留区或全域轰炸组至少一组）", "warning")
+            return
+        if step > 1 and not self._selected_account_ids:
+            self._show_snackbar("请先勾选至少一个执行账号", "warning")
+            return
+        self._current_wizard_step = step
+        self._wizard_content.content = self._wizard_step_views[step - 1]
+        self._apply_wizard_step_styles()
+        try:
+            self.page.update()
+        except Exception:
+            pass
 
     def build(self) -> ft.Control:
         if self._file_picker not in self.page.overlay:

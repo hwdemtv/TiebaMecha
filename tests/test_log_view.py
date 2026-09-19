@@ -132,6 +132,7 @@ def _install_stubs():
     flet.border = _Border
     flet.border_radius = _BorderRadius
     flet.padding = _Padding
+    flet.alignment = types.SimpleNamespace(center="center")
     flet.ButtonStyle = lambda **kw: kw
     flet.TextStyle = lambda **kw: kw
     flet.FontWeight = types.SimpleNamespace(BOLD="bold", W_300="w300", W_500="w500")
@@ -724,3 +725,49 @@ class TestTaskCopyHandoff:
             "schedule_type": "once",
         })
         assert bp.use_schedule.value is False
+
+
+# ===========================================================================
+# Test: 四步向导步进与门禁
+# ===========================================================================
+
+class TestWizardSteps:
+    """向导切换：无账号/无目标时禁止前跳"""
+
+    def test_initial_state_is_step_one(self):
+        bp = _make_page()
+        assert bp._current_wizard_step == 1
+        assert bp._wizard_prev_btn.visible is False
+        assert bp._wizard_next_btn.visible is True
+
+    def test_forward_blocked_without_targets(self):
+        bp = _make_page()
+        bp._selected_account_ids = {1}
+        bp._temp_local_fnames = []
+        bp._temp_global_fnames = []
+        bp._switch_wizard_step(2)
+        assert bp._current_wizard_step == 1
+
+    def test_forward_blocked_without_accounts(self):
+        bp = _make_page()
+        bp._selected_account_ids = set()
+        bp._temp_global_fnames = ["吧A"]
+        bp._switch_wizard_step(2)
+        assert bp._current_wizard_step == 1
+
+    def test_forward_with_accounts_and_targets(self):
+        bp = _make_page()
+        bp._selected_account_ids = {1}
+        bp._temp_global_fnames = ["吧A"]
+        bp._switch_wizard_step(2)
+        assert bp._current_wizard_step == 2
+        assert bp._wizard_content.content is bp._wizard_step_views[1]
+
+    def test_step_bounds(self):
+        bp = _make_page()
+        bp._selected_account_ids = {1}
+        bp._temp_global_fnames = ["吧A"]
+        bp._switch_wizard_step(99)
+        assert bp._current_wizard_step == len(bp._wizard_step_views)
+        bp._switch_wizard_step(0)
+        assert bp._current_wizard_step == 1
