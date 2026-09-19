@@ -24,6 +24,13 @@ def _make_mock_client():
     return mock_client
 
 
+def _err_resp(msg: str):
+    """模拟 aiotieba BoolResponse：API 失败不抛异常，错误挂在 .err 属性上"""
+    resp = MagicMock()
+    resp.err = RuntimeError(msg)
+    return resp
+
+
 @pytest.mark.asyncio
 class TestFollowForumsBulk:
     """Tests for the bulk follow functionality."""
@@ -38,7 +45,9 @@ class TestFollowForumsBulk:
 
         mock_client = _make_mock_client()
 
-        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
+        # 多贴吧场景下相邻操作间会真实拟人休眠，测试中打补丁跳过
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client), \
+             patch("tieba_mecha.core.batch_post.BionicDelay.sleep", new_callable=AsyncMock):
             pm = BatchPostManager(db)
 
             # 执行批量关注
@@ -132,6 +141,112 @@ class TestFollowForumsBulk:
             banned_forums = [f for f in forums if f.is_banned]
             assert len(banned_forums) == 1
             assert banned_forums[0].fname == "banned_forum"
+
+
+@pytest.mark.asyncio
+class TestFollowErrSemantics:
+    """P0/P1 回归：aiotieba API 失败不抛异常（错误挂 .err），必须据此判定成败与分类"""
+
+    async def _make_account(self, db, name: str):
+        from tieba_mecha.core.account import encrypt_value
+        return await db.add_account(name=name, bduss=encrypt_value("a" * 192))
+
+    async def test_follow_err_response_is_failure(self, db):
+        """关注 API 失败（.err 挂错而非抛异常）不得计为成功，也不得写库"""
+        acc1 = await self._make_account(db, "err_fol_acc")
+        mock_client = _make_mock_client()
+        mock_client.follow_forum = AsyncMock(return_value=_err_resp("9999: 服务器开小差了"))
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client), \
+             patch("tieba_mecha.core.batch_post.BionicDelay.sleep", new_callable=AsyncMock):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["flaky_bar"], account_ids=[acc1.id])
+
+        assert len(result["failed"]) == 1
+        assert result["success"] == []
+        assert all(f.fname != "flaky_bar" for f in await db.get_forums())
+
+    async def test_unfollow_err_response_keeps_record(self, db):
+        """取关 API 失败时：计为失败，本地关注记录与靶场均保留"""
+        acc1 = await self._make_account(db, "err_unf_acc")
+        await db.add_forum(fid=1, fname="sticky_bar", account_id=acc1.id)
+        await db.upsert_target_pools(["sticky_bar"], "test")
+
+        mock_client = _make_mock_client()
+        mock_client.unfollow_forum = AsyncMock(return_value=_err_resp("9999: 服务器开小差了"))
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
+            pm = BatchPostManager(db)
+            res = await pm.unfollow_forums_bulk(["sticky_bar"])
+
+        assert len(res["failed"]) == 1
+        assert res["success"] == []
+        assert len(await db.get_forums()) == 1
+        assert len(await db.get_all_target_pools_raw()) == 1
+
+    async def test_unfollow_not_followed_is_idempotent(self, db):
+        """取关遇“尚未关注”类错误：按幂等成功处理并清理本地记录与靶场"""
+        acc1 = await self._make_account(db, "ghost_acc")
+        await db.add_forum(fid=2, fname="ghost_bar", account_id=acc1.id)
+        await db.upsert_target_pools(["ghost_bar"], "test")
+
+        mock_client = _make_mock_client()
+        mock_client.unfollow_forum = AsyncMock(return_value=_err_resp("340008: 您尚未关注该吧"))
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
+            pm = BatchPostManager(db)
+            res = await pm.unfollow_forums_bulk(["ghost_bar"])
+
+        assert len(res["success"]) == 1
+        assert res["failed"] == []
+        assert len(await db.get_forums()) == 0
+        assert len(await db.get_all_target_pools_raw()) == 0
+
+    async def test_follow_already_followed_err_classifies_as_skip(self, db):
+        """API 返回“已关注”：归入 skipped 而非 failed，且补齐本地记录（不计熔断）"""
+        acc1 = await self._make_account(db, "dup_srv_acc")
+        mock_client = _make_mock_client()
+        mock_client.follow_forum = AsyncMock(return_value=_err_resp("330005: 你已关注该吧"))
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["dup_server_bar"], account_ids=[acc1.id])
+
+        assert result["failed"] == []
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["reason"] == "已关注"
+        fnames = [f.fname for f in await db.get_forums(acc1.id, include_hidden=True)]
+        assert "dup_server_bar" in fnames
+
+    async def test_follow_success_resets_stale_flags(self, db):
+        """重新关注成功后，滞后的 is_hidden/is_banned 标记必须复位"""
+        acc1 = await self._make_account(db, "revive_acc")
+        await db.add_forum(fid=1, fname="revive_bar", account_id=acc1.id)
+
+        # 模拟 sync 标记过的滞后状态：服务端曾取关（hidden）+ 曾被拉黑（banned）
+        from sqlalchemy import select
+        from tieba_mecha.db.models import Forum
+        async with db.async_session() as session:
+            forum = (await session.execute(
+                select(Forum).where(Forum.fname == "revive_bar", Forum.account_id == acc1.id)
+            )).scalar_one()
+            forum.is_hidden = True
+            forum.is_banned = True
+            forum.ban_reason = "旧封禁"
+            await session.commit()
+
+        mock_client = _make_mock_client()
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client), \
+             patch("tieba_mecha.core.batch_post.BionicDelay.sleep", new_callable=AsyncMock):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["revive_bar"], account_ids=[acc1.id])
+
+        assert len(result["success"]) == 1
+        forums = {f.fname: f for f in await db.get_forums(acc1.id, include_hidden=True)}
+        revived = forums["revive_bar"]
+        assert revived.is_hidden is False
+        assert revived.is_banned is False
+        assert revived.ban_reason == ""
 
 
 @pytest.mark.asyncio

@@ -1612,13 +1612,17 @@ class BatchPostPage:
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
                 self._show_snackbar(f"开始对 {len(selected_to_purge)} 个吧执行全局清理，请稍后...", "info")
-                await pm.unfollow_forums_bulk(selected_to_purge)
+                res = await pm.unfollow_forums_bulk(selected_to_purge)
+                ok, bad = len(res["success"]), len(res["failed"])
                 local_selected.clear()
                 nonlocal local_forums
                 local_forums = await self.db.get_all_unique_forums()
                 render_local_list()
                 update_local_count()
-                self._show_snackbar("✅ 阵地清理完成，已从数据库抹除并尝试让所有账号取关", "success")
+                if bad:
+                    self._show_snackbar(f"⚠️ 阵地清理完成：取关 {ok} 项成功，{bad} 项失败（失败记录已保留）", "warning")
+                else:
+                    self._show_snackbar(f"✅ 阵地清理完成，已从数据库抹除并取关 {ok} 项", "success")
             confirm_dialog = ft.AlertDialog(
                 title=ft.Row([ft.Icon(icons.WARNING, color="orange"), ft.Text("确认全局清理并取关")]),
                 content=ft.Text(f"将对已选的 {len(selected_to_purge)} 个贴吧执行【全局取关】并彻底删除本地记录。\n此操作不可逆，且会触发矩阵网络请求。是否继续？"),

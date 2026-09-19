@@ -759,8 +759,14 @@ class SignPage:
                 self.page.close(dialog)
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
-                await pm.unfollow_forums_bulk([fname])
-                self._show_snackbar(f"✅ 已取消关注 '{fname}'", "success")
+                res = await pm.unfollow_forums_bulk([fname])
+                ok, bad = len(res["success"]), len(res["failed"])
+                if ok:
+                    self._show_snackbar(f"✅ 已取消关注 '{fname}'（{ok} 个账号）", "success")
+                if bad:
+                    self._show_snackbar(f"⚠️ {bad} 个账号取关失败，记录已保留", "warning")
+                if ok + bad == 0:
+                    self._show_snackbar(f"ℹ️ 没有账号关注 '{fname}'，本地记录已清理", "info")
                 await self.load_data()
             except Exception as ex:
                 self._show_snackbar(f"❌ 取消关注失败: {str(ex)}", "error")

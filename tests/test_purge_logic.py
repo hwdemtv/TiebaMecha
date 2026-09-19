@@ -67,11 +67,11 @@ class TestPurgeLogic:
         mock_create_client.return_value = mock_client
         
         pm = BatchPostManager(db)
-        
+
         # 执行取关
-        success = await pm.unfollow_forums_bulk(["target_bar"])
-        
-        assert success is True
+        res = await pm.unfollow_forums_bulk(["target_bar"])
+
+        assert len(res["success"]) == 1
         # 验证是否调用了取关 API
         mock_client.unfollow_forum.assert_called_with("target_bar")
         
@@ -86,11 +86,13 @@ class TestPurgeLogic:
         await db.upsert_target_pools(["lonely_bar"], "test")
         
         pm = BatchPostManager(db)
-        
+
         # 执行取关
-        success = await pm.unfollow_forums_bulk(["lonely_bar"])
-        
-        assert success is True
+        res = await pm.unfollow_forums_bulk(["lonely_bar"])
+
+        # 无账号关注 → 直接清理，结果三项全空
+        assert res["success"] == []
+        assert res["failed"] == []
         # 验证由于没账号关注，所以不会创建客户端
         mock_create_client.assert_not_called()
         
@@ -117,9 +119,9 @@ class TestPurgeLogic:
         mock_create_client.return_value = mock_client
 
         pm = BatchPostManager(db)
-        success = await pm.unfollow_forums_bulk(["dup_bar"], account_ids=[acc1.id])
+        res = await pm.unfollow_forums_bulk(["dup_bar"], account_ids=[acc1.id])
 
-        assert success is True
+        assert len(res["success"]) == 1
         # 只对 acc1 调用了一次取关 API
         assert mock_client.unfollow_forum.call_count == 1
         mock_client.unfollow_forum.assert_called_with("dup_bar")

@@ -26,6 +26,7 @@ ACCOUNT_BAN_KEYWORDS = ("封禁", "屏蔽")
 
 # ── 关注/取关场景 ──
 ALREADY_FOLLOWED_KEYWORDS = ("已关注",)
+NOT_FOLLOWED_KEYWORDS = ("未关注", "没有关注", "尚未关注", "未收藏", "没有收藏", "尚未收藏")
 BLACKLIST_KEYWORDS = ("被拉黑",)
 
 _CODE_RE = re.compile(r"(\d{4,})")
@@ -70,3 +71,8 @@ def is_blacklisted_error(err_msg="") -> bool:
 def is_already_followed_error(err_msg="") -> bool:
     """是否为“已关注”类幂等错误（可安全跳过）。"""
     return any(kw in str(err_msg or "") for kw in ALREADY_FOLLOWED_KEYWORDS)
+
+
+def is_not_followed_error(err_msg="") -> bool:
+    """是否为“未关注”类幂等错误（取关场景可安全视为已达成并清理记录）。"""
+    return any(kw in str(err_msg or "") for kw in NOT_FOLLOWED_KEYWORDS)

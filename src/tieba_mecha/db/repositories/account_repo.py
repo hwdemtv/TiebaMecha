@@ -359,10 +359,11 @@ class AccountRepository:
         """
         async with self.async_session() as session:
             from sqlalchemy import select, not_
-            # 获取已关注的账号ID
+            # 获取已关注的账号ID（hidden 为服务端已取关的滞后记录，不算已关注）
             followed_stmt = select(Forum.account_id).where(
                 Forum.fname == fname,
-                Forum.is_banned == False
+                Forum.is_banned == False,
+                Forum.is_hidden == False
             )
             followed_result = await session.execute(followed_stmt)
             followed_ids = {row[0] for row in followed_result}
@@ -386,10 +387,11 @@ class AccountRepository:
             return []
 
         async with self.async_session() as session:
-            # 获取关注了任一指定贴吧的账号 ID（用于排除）
+            # 获取关注了任一指定贴吧的账号 ID（用于排除；hidden 滞后记录不算已关注）
             followed_stmt = select(Forum.account_id).where(
                 Forum.fname.in_(fnames),
-                Forum.is_banned == False
+                Forum.is_banned == False,
+                Forum.is_hidden == False
             ).distinct()
             followed_result = await session.execute(followed_stmt)
             followed_ids = {row[0] for row in followed_result}

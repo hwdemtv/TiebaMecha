@@ -173,7 +173,22 @@ class MaintManager:
                             await log_info(f"[BioWarming] {account_name} 【破冰】尝试关注探索吧: {target_forum_name}")
                             try:
                                 await self._human_sleep(3, 10)
-                                await client.follow_forum(target_forum_name)
+                                # aiotieba 语义：API 失败不抛异常，错误挂在 .err 上
+                                resp = await client.follow_forum(target_forum_name)
+                                err = getattr(resp, "err", None)
+                                if err:
+                                    await log_warn(f"[BioWarming] 破冰关注失败: {err}")
+                                else:
+                                    # 破冰成功即时落库，无需等待下次全量同步
+                                    fid = 0
+                                    try:
+                                        f_info = await client.get_forum(target_forum_name)
+                                        fid = getattr(f_info, 'fid', 0) or 0
+                                    except Exception:
+                                        pass
+                                    if fid:
+                                        await self.db.add_forum(fid=fid, fname=target_forum_name, account_id=acc_id)
+                                    await log_info(f"[BioWarming] {account_name} 破冰关注成功: {target_forum_name}")
                             except Exception as e:
                                 await log_warn(f"[BioWarming] 破冰关注异常: {str(e)}")
                             await self._human_sleep(3, 8)

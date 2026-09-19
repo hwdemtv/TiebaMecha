@@ -842,8 +842,17 @@ class AccountsPage:
                 self.page.close(dialog)
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
-                await pm.unfollow_forums_bulk([fname])
-                self._show_snackbar(f"✅ 已取消关注 '{fname}'", "success")
+                res = await pm.unfollow_forums_bulk([fname])
+                ok, bad = len(res["success"]), len(res["failed"])
+                skipped = len(res.get("skipped", []))
+                if ok:
+                    self._show_snackbar(f"✅ 已取消关注 '{fname}'（{ok} 个账号）", "success")
+                if bad:
+                    self._show_snackbar(f"⚠️ {bad} 个账号取关失败，记录已保留", "warning")
+                if skipped:
+                    self._show_snackbar(f"ℹ️ {skipped} 个账号被跳过（熔断/无凭证）", "info")
+                if ok + bad + skipped == 0:
+                    self._show_snackbar(f"ℹ️ 没有账号关注 '{fname}'，本地记录已清理", "info")
                 await self._refresh_matrix_stats()
                 self.refresh_ui()
             except Exception as ex:
@@ -1023,8 +1032,12 @@ class AccountsPage:
                 self.page.close(dialog)
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
-                await pm.unfollow_forums_bulk(fnames)
-                self._show_snackbar(f"✅ 已批量取消关注 {len(fnames)} 个贴吧", "success")
+                res = await pm.unfollow_forums_bulk(fnames)
+                ok, bad = len(res["success"]), len(res["failed"])
+                if bad:
+                    self._show_snackbar(f"⚠️ 批量取关完成：成功 {ok} 项，失败 {bad} 项（失败记录已保留）", "warning")
+                else:
+                    self._show_snackbar(f"✅ 已批量取消关注 {len(fnames)} 个贴吧（{ok} 项）", "success")
             except Exception as ex:
                 self._show_snackbar(f"❌ 批量取关失败: {str(ex)}", "error")
             self._matrix_selected_fnames.clear()
@@ -1736,8 +1749,15 @@ class AccountsPage:
                 self.page.close(confirm_dialog)
                 self.page.close(detail_dialog)
                 from ...core.batch_post import BatchPostManager
-                await BatchPostManager(self.db).unfollow_forums_bulk([fname], account_ids=[account_id])
-                self._show_snackbar(f"已让当前账号取消关注 '{fname}'", "success")
+                res = await BatchPostManager(self.db).unfollow_forums_bulk([fname], account_ids=[account_id])
+                if res["success"]:
+                    self._show_snackbar(f"已让当前账号取消关注 '{fname}'", "success")
+                elif res["skipped"]:
+                    self._show_snackbar(f"当前账号被跳过：{res['skipped'][0].get('reason', '未知原因')}", "warning")
+                elif res["failed"]:
+                    self._show_snackbar(f"取关失败，记录已保留：{res['failed'][0].get('reason', '')}", "error")
+                else:
+                    self._show_snackbar(f"当前账号未关注 '{fname}'，无需取关", "info")
                 await self.load_data()
             except Exception as ex:
                 self._show_snackbar(f"取消关注失败: {ex}", "error")
