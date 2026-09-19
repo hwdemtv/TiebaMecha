@@ -318,10 +318,10 @@ class AccountsPage:
             self.account_stats_info
         ], spacing=10, visible=True)
 
-        # 账号列表容器
-        self.account_list = ft.Column(
+        # 账号列表容器：动态填充必须用 ListView——Tabs 内对 scrollable Column
+        # 动态添加的子控件不会被渲染（Flet web 缺陷，见 docs/flet_web_layout_pitfalls.md 规则4）
+        self.account_list = ft.ListView(
             spacing=10,
-            scroll=ft.ScrollMode.AUTO,
             expand=True,
         )
 
