@@ -29,6 +29,7 @@ PAGE_MODULES = {
     "proxy": ("proxy", "ProxyPage"),
     "rules": ("rules", "RulesPage"),
     "batch_post": ("batch_post_page", "BatchPostPage"),
+    "batch_post_center": ("batch_post_center", "BatchPostCenterPage"),
     "settings": ("settings", "SettingsPage"),
     "survival": ("survival", "SurvivalPage"),
 }
@@ -66,7 +67,7 @@ class TiebaMechaApp:
         self._nav_groups = [
             (None, ["dashboard"]),
             ("资源管理", ["accounts", "proxy"]),
-            ("执行中心", ["sign", "batch_post", "posts"]),
+            ("执行中心", ["sign", "batch_post", "batch_post_center", "posts"]),
             ("分析与风控", ["survival", "rules"]),
             ("系统", ["settings"]),
         ]
@@ -77,6 +78,7 @@ class TiebaMechaApp:
             "proxy": (icons.VPN_LOCK_OUTLINED, icons.VPN_LOCK, "代理池"),
             "sign": (icons.BOLT_OUTLINED, icons.BOLT, "全域签到"),
             "batch_post": (icons.SEND_ROUNDED, icons.SEND_ROUNDED, "批量发帖"),
+            "batch_post_center": (icons.MONITOR_HEART_ROUNDED, icons.MONITOR_HEART_ROUNDED, "发帖运行中心"),
             "posts": (icons.FORUM_OUTLINED, icons.FORUM, "帖子管理"),
             "survival": (icons.ANALYTICS_OUTLINED, icons.ANALYTICS, "存活分析"),
             "rules": (icons.SHIELD_OUTLINED, icons.SHIELD, "自动化规则"),

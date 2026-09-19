@@ -617,3 +617,110 @@ class TestAddLogWithFilter:
         bp._add_log({"status": "error", "fname": "b", "msg": "err"})
         bp._add_log({"status": "skipped", "fname": "c", "msg": "skip"})
         assert len(bp.log_list.controls) == 3
+
+
+# ===========================================================================
+# Test: 运行中心复制任务 → 配置页应用 的跨页交接
+# ===========================================================================
+
+class TestTaskCopyHandoff:
+    """BatchPostCenterPage 复制任务配置 → pending_task_copy → 配置页应用"""
+
+    def _make_task(self):
+        t = MagicMock()
+        t.id = 42
+        t.fname = "吧X"
+        t.fnames_json = '["吧X", "吧Y"]'
+        t.accounts_json = "[1, 2]"
+        t.strategy = "weighted"
+        t.pairing_mode = "strict"
+        t.total = 8
+        t.delay_min = 90.0
+        t.delay_max = 240.0
+        t.use_ai = True
+        t.ai_persona = "casual"
+        t.schedule_type = "daily"
+        t.interval_hours = 0
+        t.schedule_day_of_week = None
+        t.reset_strategy = "new_only"
+        return t
+
+    @pytest.mark.asyncio
+    async def test_center_copy_writes_setting_and_navigates(self):
+        import json as _json
+        mock_db = MagicMock()
+        mock_db.set_setting = AsyncMock()
+        navigated = []
+        from tieba_mecha.web.pages.batch_post_center import BatchPostCenterPage
+        center = BatchPostCenterPage(
+            page=_FakePage(), db=mock_db,
+            on_navigate=lambda name: navigated.append(name))
+
+        await center._on_copy_task(self._make_task())
+
+        mock_db.set_setting.assert_awaited_once()
+        call_args = mock_db.set_setting.await_args
+        assert call_args.args[0] == "pending_task_copy"
+        cfg = _json.loads(call_args.args[1])
+        assert cfg["global_fnames"] == ["吧X", "吧Y"]
+        assert cfg["local_fnames"] == []
+        assert cfg["account_ids"] == [1, 2]
+        assert cfg["use_schedule"] is True
+        assert cfg["schedule_type"] == "daily"
+        assert navigated == ["batch_post"]
+
+    @pytest.mark.asyncio
+    async def test_center_copy_once_task_becomes_immediate(self):
+        import json as _json
+        mock_db = MagicMock()
+        mock_db.set_setting = AsyncMock()
+        from tieba_mecha.web.pages.batch_post_center import BatchPostCenterPage
+        center = BatchPostCenterPage(page=_FakePage(), db=mock_db, on_navigate=lambda name: None)
+        task = self._make_task()
+        task.schedule_type = "once"
+
+        await center._on_copy_task(task)
+
+        cfg = _json.loads(mock_db.set_setting.await_args.args[1])
+        assert cfg["use_schedule"] is False
+
+    @pytest.mark.asyncio
+    async def test_config_page_applies_copied_config(self):
+        bp = _make_page()
+        config = {
+            "account_ids": [1, 2],
+            "local_fnames": [],
+            "global_fnames": ["吧A", "吧B"],
+            "post_count": 8,
+            "delay_min": 90.0,
+            "delay_max": 240.0,
+            "use_ai": True,
+            "ai_persona": "casual",
+            "use_schedule": True,
+            "schedule_type": "daily",
+            "interval_hours": 0,
+            "schedule_day_of_week": None,
+        }
+
+        await bp._apply_task_config_values(config)
+
+        assert bp._selected_account_ids == {1, 2}
+        assert bp._temp_local_fnames == []
+        assert bp._temp_global_fnames == ["吧A", "吧B"]
+        assert bp.post_count.value == "8"
+        assert bp.min_delay.value == "90.0"
+        assert bp.max_delay.value == "240.0"
+        assert bp.use_ai_switch.value is True
+        assert bp.use_schedule.value is True
+        assert bp.schedule_type_dropdown.value == "daily"
+
+    @pytest.mark.asyncio
+    async def test_config_page_once_config_unschedules(self):
+        bp = _make_page()
+        await bp._apply_task_config_values({
+            "account_ids": [3],
+            "global_fnames": ["吧C"],
+            "use_schedule": True,
+            "schedule_type": "once",
+        })
+        assert bp.use_schedule.value is False
