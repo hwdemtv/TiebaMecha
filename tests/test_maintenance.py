@@ -1,9 +1,29 @@
 """Tests for Maintenance (BioWarming) functionality."""
 
+import json
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from tieba_mecha.core.maintenance import MaintManager, do_warming
+
+
+def _make_db(settings: dict | None = None):
+    """构造带内存配置存储的 mock Database，返回 (db, store, saved)。"""
+    db = MagicMock()
+    store = dict(settings or {})
+    saved = {}
+
+    async def get_setting(key, default=""):
+        return store.get(key, default)
+
+    async def set_setting(key, value):
+        saved[key] = value
+
+    db.get_setting = AsyncMock(side_effect=get_setting)
+    db.set_setting = AsyncMock(side_effect=set_setting)
+    db.upsert_target_pools = AsyncMock(return_value=1)
+    return db, store, saved
 
 
 class TestMaintManager:
@@ -136,3 +156,125 @@ class TestDoWarming:
 
         assert result is True
         mock_run.assert_called_once_with(1)
+
+
+class TestAutofollowNoBawu:
+    """无吧主吧机会性关注 (_try_autofollow_no_bawu)。"""
+
+    @pytest.mark.asyncio
+    async def test_disabled_is_noop(self):
+        """开关关闭时不应发起任何发现/关注请求。"""
+        db, _, _ = _make_db({"maint_autofollow_enabled": "false"})
+        manager = MaintManager(db)
+        client = MagicMock()
+        client.get_square_forums = AsyncMock()
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        client.get_square_forums.assert_not_called()
+        client.get_square_forums.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_follows_no_bawu_forum_and_records(self):
+        """开关开启+概率命中时：关注无吧主吧、写记账、入靶场池无吧主分组。"""
+        db, _, saved = _make_db({
+            "maint_autofollow_enabled": "true",
+            "maint_autofollow_prob": "1.0",
+        })
+        manager = MaintManager(db)
+        cand = MagicMock(fname="无主吧", is_followed=False, member_num=2000)
+        client = MagicMock()
+        client.get_square_forums = AsyncMock(return_value=MagicMock(err=None, objs=[cand]))
+        client.get_forum = AsyncMock(return_value=MagicMock(err=None, has_bawu=False, member_num=2000))
+        client.follow_forum = AsyncMock(return_value=MagicMock(err=None))
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        client.follow_forum.assert_awaited_once_with("无主吧")
+        db.upsert_target_pools.assert_awaited_once_with(["无主吧"], group="无吧主")
+        assert json.loads(saved["maint_autofollow_state"]) == {"1": ["无主吧"]}
+
+    @pytest.mark.asyncio
+    async def test_skips_forum_with_bawu(self):
+        """候选吧都有吧务时不应关注任何吧。"""
+        db, _, saved = _make_db({"maint_autofollow_enabled": "true", "maint_autofollow_prob": "1.0"})
+        manager = MaintManager(db)
+        cands = [MagicMock(fname=f"有主吧{i}", is_followed=False, member_num=2000) for i in range(3)]
+        client = MagicMock()
+        client.get_square_forums = AsyncMock(return_value=MagicMock(err=None, objs=cands))
+        client.get_forum = AsyncMock(return_value=MagicMock(err=None, has_bawu=True, member_num=2000))
+        client.follow_forum = AsyncMock()
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        client.follow_forum.assert_not_called()
+        client.get_forum.assert_awaited()  # 3 个候选都被复检过
+        assert saved == {}
+        db.upsert_target_pools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_member_num_filter(self):
+        """吧人数低于下限的候选应在发现阶段被过滤，不发起复检请求。"""
+        db, _, _ = _make_db({"maint_autofollow_enabled": "true", "maint_autofollow_prob": "1.0"})
+        manager = MaintManager(db)
+        cand = MagicMock(fname="迷你吧", is_followed=False, member_num=100)
+        client = MagicMock()
+        client.get_square_forums = AsyncMock(return_value=MagicMock(err=None, objs=[cand]))
+        client.get_forum = AsyncMock()
+        client.follow_forum = AsyncMock()
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        client.get_forum.assert_not_called()
+        client.follow_forum.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_respects_per_account_cap(self):
+        """记账达到单账号上限后不再发现/关注。"""
+        db, store, _ = _make_db({"maint_autofollow_enabled": "true", "maint_autofollow_prob": "1.0"})
+        store["maint_autofollow_state"] = json.dumps({"1": [f"吧{i}" for i in range(10)]})
+        manager = MaintManager(db)
+        client = MagicMock()
+        client.get_square_forums = AsyncMock()
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        client.get_square_forums.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_follow_error_aborts_without_ledger(self):
+        """关注接口报错（上限/违规吧）时终止本轮，不写记账不入池。"""
+        db, _, saved = _make_db({"maint_autofollow_enabled": "true", "maint_autofollow_prob": "1.0"})
+        manager = MaintManager(db)
+        cand = MagicMock(fname="无主吧", is_followed=False, member_num=2000)
+        client = MagicMock()
+        client.get_square_forums = AsyncMock(return_value=MagicMock(err=None, objs=[cand]))
+        client.get_forum = AsyncMock(return_value=MagicMock(err=None, has_bawu=False, member_num=2000))
+        client.follow_forum = AsyncMock(return_value=MagicMock(err=Exception("follow limit")))
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        assert saved == {}
+        db.upsert_target_pools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_config_is_noop(self):
+        """配置数值非法时应静默跳过，不抛异常。"""
+        db, _, _ = _make_db({
+            "maint_autofollow_enabled": "true",
+            "maint_autofollow_prob": "abc",
+        })
+        manager = MaintManager(db)
+        client = MagicMock()
+        client.get_square_forums = AsyncMock()
+
+        with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
+            await manager._try_autofollow_no_bawu(client, 1, "acc", set())
+
+        client.get_square_forums.assert_not_called()

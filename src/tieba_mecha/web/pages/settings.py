@@ -33,6 +33,12 @@ class SettingsPage:
             "maint_acc_delay_min": "300",
             "maint_acc_delay_max": "900",
             "maint_interval_hours": "4",
+            # 无吧主吧机会性关注（与 core/maintenance.py 的 AUTOFOLLOW_DEFAULTS 保持一致）
+            "maint_autofollow_enabled": "false",
+            "maint_autofollow_prob": "0.2",
+            "maint_autofollow_member_min": "500",
+            "maint_autofollow_max_per_acc": "10",
+            "maint_autofollow_square_cats": "游戏|娱乐|兴趣|动漫",
         }
         
         # 守护任务状态
@@ -204,6 +210,8 @@ class SettingsPage:
         # 养号页签
         for key, field in self.maint_fields.items():
             field.value = self._maint_config.get(key, "")
+        # Switch 的 value 是 bool，不进 maint_fields 字符串循环
+        self.maint_autofollow_switch.value = self._maint_config.get("maint_autofollow_enabled") == "true"
 
         # 守护任务页签
         self.daemon_container.controls = self._build_daemon_cards()
@@ -294,10 +302,23 @@ class SettingsPage:
             ft.Divider(height=10, color="transparent"),
             self._create_section_title("养号行为引擎 / BIOWARMING", ft.icons.SHIELD_MOON_OUTLINED),
             ft.Row([
-                self.maint_fields["maint_interval_hours"], 
-                self.maint_fields["maint_acc_delay_min"], 
+                self.maint_fields["maint_interval_hours"],
+                self.maint_fields["maint_acc_delay_min"],
                 self.maint_fields["maint_acc_delay_max"]
             ], spacing=10),
+            self._create_section_title("无吧主吧自动关注 / AUTO FOLLOW", ft.icons.GROUP_ADD_ROUNDED),
+            ft.Text(
+                "开启后，养号周期内以设定概率从吧广场发现无吧主贴吧并自动关注（每轮最多 1 个），"
+                "关注的贴吧自动进入靶场池【无吧主】分组，供后续发帖选用。",
+                size=11, color="onSurfaceVariant",
+            ),
+            self.maint_autofollow_switch,
+            ft.Row([
+                self.maint_fields["maint_autofollow_prob"],
+                self.maint_fields["maint_autofollow_member_min"],
+                self.maint_fields["maint_autofollow_max_per_acc"],
+            ], spacing=10),
+            self.maint_fields["maint_autofollow_square_cats"],
             ft.Row([
                 ft.Text("执行日志:", size=14, weight=ft.FontWeight.W_500),
                 ft.Container(expand=True),
@@ -407,7 +428,12 @@ class SettingsPage:
             "maint_interval_hours": ft.TextField(label="养号间隔(h)", expand=True),
             "maint_acc_delay_min": ft.TextField(label="账号延迟Min(s)", expand=True),
             "maint_acc_delay_max": ft.TextField(label="账号延迟Max(s)", expand=True),
+            "maint_autofollow_prob": ft.TextField(label="触发概率(0~1)", expand=True),
+            "maint_autofollow_member_min": ft.TextField(label="吧人数下限", expand=True),
+            "maint_autofollow_max_per_acc": ft.TextField(label="单账号关注上限", expand=True),
+            "maint_autofollow_square_cats": ft.TextField(label="吧广场分类(|分隔)", expand=True),
         }
+        self.maint_autofollow_switch = ft.Switch(label="自动关注无吧主吧", value=False)
         from ..components.log_stream import LogStreamView
         self.log_stream = LogStreamView(
             filter_fn=lambda e: "[BioWarming]" in e.get("message", ""),
@@ -482,6 +508,11 @@ class SettingsPage:
                 "maint_interval_hours": self.maint_fields["maint_interval_hours"].value,
                 "maint_acc_delay_min": self.maint_fields["maint_acc_delay_min"].value,
                 "maint_acc_delay_max": self.maint_fields["maint_acc_delay_max"].value,
+                "maint_autofollow_enabled": "true" if self.maint_autofollow_switch.value else "false",
+                "maint_autofollow_prob": self.maint_fields["maint_autofollow_prob"].value,
+                "maint_autofollow_member_min": self.maint_fields["maint_autofollow_member_min"].value,
+                "maint_autofollow_max_per_acc": self.maint_fields["maint_autofollow_max_per_acc"].value,
+                "maint_autofollow_square_cats": self.maint_fields["maint_autofollow_square_cats"].value,
             }
             await self.db.set_settings_bulk(config)
             await daemon_instance.reload(self.db) # 强制刷新调度器

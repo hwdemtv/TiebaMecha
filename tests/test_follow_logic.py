@@ -13,12 +13,13 @@ def _make_mock_client():
     mock_client.__aexit__.return_value = None
     mock_client.follow_forum = AsyncMock(return_value=None)
 
-    # get_forum 根据贴吧名返回不同 fid
+    # get_forum 根据贴吧名返回不同 fid（err=None 表示接口成功）
     _fid_counter = [10000]
     async def _mock_get_forum(fname):
         info = MagicMock()
         _fid_counter[0] += 1
         info.fid = _fid_counter[0]
+        info.err = None
         return info
     mock_client.get_forum = _mock_get_forum
     return mock_client
@@ -247,6 +248,152 @@ class TestFollowErrSemantics:
         assert revived.is_hidden is False
         assert revived.is_banned is False
         assert revived.ban_reason == ""
+
+
+class TestFollowRobustness:
+    """检查报告修复回归：并发闸门 / 输入防护 / 拉黑重试 / 熔断口径 / 异常落账 / 补齐口径"""
+
+    async def _make_account(self, db, name: str):
+        from tieba_mecha.core.account import encrypt_value
+        return await db.add_account(name=name, bduss=encrypt_value("a" * 192))
+
+    async def test_concurrent_gate_rejects_second_run(self, db):
+        """闸门被占用时第二次调用应 fail-fast 拒绝，且不发出任何关注请求"""
+        from tieba_mecha.core import batch_post as bp
+
+        acc1 = await self._make_account(db, "gate_acc")
+        mock_client = _make_mock_client()
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
+            pm = BatchPostManager(db)
+            assert bp._follow_flow_gate.try_lock() is True
+            try:
+                result = await pm.follow_forums_bulk(["gate_bar"], account_ids=[acc1.id])
+                assert len(result["failed"]) == 1
+                assert result["failed"][0]["reason"] == "已有批量关注/取关任务在执行"
+                assert mock_client.follow_forum.await_count == 0
+            finally:
+                bp._follow_flow_gate.unlock()
+
+            # 闸门释放后恢复正常执行
+            result2 = await pm.follow_forums_bulk(["gate_bar"], account_ids=[acc1.id])
+            assert len(result2["success"]) == 1
+
+    async def test_unfollow_gate_shared_with_follow(self, db):
+        """关注与取关共用同一把闸门：取关执行中发起关注应被拒绝"""
+        from tieba_mecha.core import batch_post as bp
+
+        pm = BatchPostManager(db)
+        assert bp._follow_flow_gate.try_lock() is True
+        try:
+            result = await pm.unfollow_forums_bulk(["some_bar"])
+            assert result["failed"][0]["reason"] == "已有批量关注/取关任务在执行"
+        finally:
+            bp._follow_flow_gate.unlock()
+
+    async def test_empty_fnames_is_noop(self, db):
+        """空贴吧列表应直接返回且不创建客户端"""
+        acc1 = await self._make_account(db, "empty_acc")
+        mock_client = _make_mock_client()
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client) as mc:
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk([], account_ids=[acc1.id])
+
+        assert result == {"success": [], "failed": [], "skipped": []}
+        mc.assert_not_called()
+
+    async def test_duplicate_fnames_dedup(self, db):
+        """重复的贴吧名应去重，只关注一次"""
+        acc1 = await self._make_account(db, "dup_input_acc")
+        mock_client = _make_mock_client()
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client), \
+             patch("tieba_mecha.core.batch_post.BionicDelay.sleep", new_callable=AsyncMock):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["dup_in_bar", "dup_in_bar"], account_ids=[acc1.id])
+
+        assert mock_client.follow_forum.await_count == 1
+        assert len(result["success"]) == 1
+
+    async def test_banned_pair_skipped_without_retry(self, db):
+        """已标记拉黑的 (账号, 吧) 对不应重试关注，直接跳过"""
+        acc1 = await self._make_account(db, "banned_acc")
+        await db.add_forum(fid=9, fname="bl_retry_bar", account_id=acc1.id)
+        await db.mark_forum_banned(acc1.id, "bl_retry_bar", reason="历史拉黑")
+
+        mock_client = _make_mock_client()
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client), \
+             patch("tieba_mecha.core.batch_post.BionicDelay.sleep", new_callable=AsyncMock):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["bl_retry_bar"], account_ids=[acc1.id])
+
+        mock_client.follow_forum.assert_not_called()
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["reason"] == "该吧已拉黑，跳过重试"
+
+    async def test_blacklist_does_not_trip_failure_breaker(self, db):
+        """拉黑（吧级处置）不计入连续失败熔断：breaker_state 不产生 follow 记录"""
+        from sqlalchemy import select
+
+        from tieba_mecha.db.models import BreakerState
+
+        acc1 = await self._make_account(db, "bl_breaker_acc")
+        mock_client = _make_mock_client()
+        mock_client.follow_forum = AsyncMock(side_effect=Exception("400013: 被拉黑"))
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["bl_breaker_bar"], account_ids=[acc1.id])
+
+        assert len(result["failed"]) == 1
+        async with db.async_session() as session:
+            rows = (await session.execute(
+                select(BreakerState).where(BreakerState.scope == "follow")
+            )).scalars().all()
+        assert rows == [], "拉黑失败不应写入熔断状态"
+
+    async def test_client_exception_records_remaining_fnames(self, db):
+        """客户端创建失败时，该账号未尝试的 (账号, 吧) 对必须落入 skipped"""
+        acc1 = await self._make_account(db, "boom_acc")
+
+        with patch("tieba_mecha.core.batch_post.create_client", side_effect=Exception("boom")):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(["boom_a", "boom_b"], account_ids=[acc1.id])
+
+        skipped_names = {s["fname"] for s in result["skipped"]}
+        assert skipped_names == {"boom_a", "boom_b"}
+        assert all(s["reason"] == "客户端异常中断" for s in result["skipped"])
+
+    async def test_complement_follow_pair_semantics(self, db):
+        """批量补齐口径：只关注了部分选中贴吧的账号必须返回参与补齐，全关注的排除"""
+        acc1 = await self._make_account(db, "part_acc")   # 只关注 A
+        acc2 = await self._make_account(db, "part_acc2")  # 只关注 B
+        acc3 = await self._make_account(db, "full_acc")   # A、B 全关注
+        await db.add_forum(fid=1, fname="补A", account_id=acc1.id)
+        await db.add_forum(fid=2, fname="补B", account_id=acc2.id)
+        await db.add_forum(fid=3, fname="补A", account_id=acc3.id)
+        await db.add_forum(fid=4, fname="补B", account_id=acc3.id)
+
+        missing = await db.get_accounts_not_following_any_forums(["补A", "补B"])
+        missing_ids = {a.id for a in missing}
+
+        assert acc1.id in missing_ids, "只关注 A 的账号缺失 B，应参与补齐"
+        assert acc2.id in missing_ids, "只关注 B 的账号缺失 A，应参与补齐"
+        assert acc3.id not in missing_ids, "全关注的账号不应参与补齐"
+
+    async def test_captcha_breaker_load_seeds_cooldown(self, db):
+        """验证码熔断跨运行生效：历史 captcha 事件应在新实例 load 后进入冷却"""
+        from tieba_mecha.core.batch_post import CaptchaCircuitBreaker
+
+        acc1 = await self._make_account(db, "cap_load_acc")
+        await db.save_captcha_event(account_id=acc1.id, event_type="captcha", reason="测试触发")
+
+        breaker = CaptchaCircuitBreaker(cooldown_minutes=30, db=db)
+        await breaker.load()
+
+        assert breaker.is_in_cooldown(acc1.id) is True
+        assert breaker.is_in_cooldown((acc1.id or 0) + 9999) is False
 
 
 @pytest.mark.asyncio

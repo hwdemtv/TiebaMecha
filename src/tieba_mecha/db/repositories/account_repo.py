@@ -380,31 +380,36 @@ class AccountRepository:
             return missing_accounts
     async def get_accounts_not_following_any_forums(self, fnames: list[str]) -> list[Account]:
         """
-        获取未关注指定贴吧列表中任意一个的活跃账号（批量版，N+1 优化）。
-        用于批量补齐关注：一次查询替代逐吧调用 get_accounts_not_following_forum。
+        获取对指定贴吧列表存在关注缺失的活跃账号（批量版补齐关注用）。
+
+        口径与 follow_forums_bulk 的 already_following 过滤一致：
+        "已关注某吧" = 存在 is_banned=False 且 is_hidden=False 的记录。
+        账号只要缺失列表中任意一个吧就返回（哪怕已关注其中部分），
+        已关注的 (账号, 吧) 对由引擎内部按对跳过。
+        （历史 bug：曾把"关注了任意一个"的账号整体排除，导致多吧补齐漏补。）
         """
         if not fnames:
             return []
 
         async with self.async_session() as session:
-            # 获取关注了任一指定贴吧的账号 ID（用于排除；hidden 滞后记录不算已关注）
-            followed_stmt = select(Forum.account_id).where(
+            # 关注了任一指定贴吧的 (账号, 吧) 对（hidden 滞后记录不算已关注）
+            followed_stmt = select(Forum.account_id, Forum.fname).where(
                 Forum.fname.in_(fnames),
                 Forum.is_banned == False,
                 Forum.is_hidden == False
-            ).distinct()
-            followed_result = await session.execute(followed_stmt)
-            followed_ids = {row[0] for row in followed_result}
+            )
+            followed_pairs = {
+                (row[0], row[1]) for row in (await session.execute(followed_stmt)).all()
+            }
 
             # 获取所有活跃账号
             all_accounts_stmt = select(Account).where(
                 Account.status.notin_(["suspended", "suspended_proxy", "banned", "expired"])
             )
-            all_result = await session.execute(all_accounts_stmt)
-            all_accounts = list(all_result.scalars().all())
+            all_accounts = list((await session.execute(all_accounts_stmt)).scalars().all())
 
-            # 返回未关注至少一个指定贴吧的账号
-            return [acc for acc in all_accounts if acc.id not in followed_ids]
+            # 存在关注缺失（未关注至少一个指定贴吧）的账号
+            return [acc for acc in all_accounts if any((acc.id, f) not in followed_pairs for f in fnames)]
     async def get_account_ids_following_forums(self, fnames: list[str]) -> list[int]:
         """获取关注了指定贴吧列表的所有账号 ID"""
         async with self.async_session() as session:
