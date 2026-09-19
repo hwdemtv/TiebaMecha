@@ -136,6 +136,7 @@ async def delete_thread(
     db: Database,
     fname: str,
     tid: int,
+    account_id: int | None = None,
 ) -> tuple[bool, str]:
     """
     删除帖子
@@ -144,11 +145,13 @@ async def delete_thread(
         db: 数据库实例
         fname: 贴吧名称
         tid: 主题帖ID
+        account_id: 执行删除的账号ID（贴吧仅允许作者删帖，应传帖子作者；
+            None 则回退当前活跃账号）
 
     Returns:
         (是否成功, 消息)
     """
-    creds = await get_account_credentials(db)
+    creds = await get_account_credentials(db, account_id)
     if not creds:
         return False, "未找到账号凭证"
 
@@ -304,6 +307,7 @@ async def add_thread(
     fname: str,
     title: str,
     content: str,
+    account_id: int | None = None,
 ) -> tuple[bool, str, int]:
     """
     发帖
@@ -313,6 +317,7 @@ async def add_thread(
         fname: 贴吧名称
         title: 帖子标题
         content: 帖子内容
+        account_id: 发帖账号ID（None 则使用当前活跃账号）
 
     Returns:
         (是否成功, 消息, tid)
@@ -320,7 +325,7 @@ async def add_thread(
     from .obfuscator import Obfuscator
     from .web_poster import build_web_headers, normalize_web_content, build_thread_payload, prewarm_and_commit_thread
     import httpx
-    creds = await get_account_credentials(db)
+    creds = await get_account_credentials(db, account_id)
     if not creds:
         return False, "未找到账号凭证", 0
 

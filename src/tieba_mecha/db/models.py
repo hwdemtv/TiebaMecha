@@ -330,6 +330,29 @@ class ThreadRecord(Base):
     )
 
 
+class BumpLog(Base):
+    """自动回帖(自顶)事件流水——逐次记录每次自顶尝试，支撑详情页历史与风控复盘"""
+
+    __tablename__ = "bump_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    material_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="关联物料ID")
+    tid: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="被自顶的帖子TID")
+    fname: Mapped[str] = mapped_column(String(100), default="", comment="贴吧名称快照")
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="执行自顶的账号ID")
+    account_name: Mapped[str] = mapped_column(String(100), default="", comment="账号名称快照")
+    content: Mapped[str] = mapped_column(Text, default="", comment="回帖内容")
+    success: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否成功")
+    message: Mapped[str] = mapped_column(String(500), default="", comment="失败原因/备注")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="执行时间")
+
+    __table_args__ = (
+        Index("ix_bump_logs_material_id", "material_id"),
+        Index("ix_bump_logs_tid", "tid"),
+        Index("ix_bump_logs_created_at", "created_at"),
+    )
+
+
 class CaptchaEvent(Base):
     """验证码事件记录"""
 

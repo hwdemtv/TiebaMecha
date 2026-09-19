@@ -30,6 +30,10 @@ _STATUS_LABELS = {
     "unknown": "未验证",
 }
 _QUIET_START, _QUIET_END = 1, 6  # 凌晨 1-6 点高风险时段（与 TimeWindowDispatcher 一致）
+# 链接风险判定（与 web/pages/posts/helpers._LINK_RE 语义不同且**有意为之**：
+# 此处是"含链接风险"的宽松判定（含 t.cn 短链与常见裸域名，命中即计数警告），
+# helpers.extract_links 是"精确提取 http(s) 链接"（供展示/逐条列出）。
+# 两者请勿互相替换。
 _URL_RE = re.compile(r"https?://|t\.cn/|[-A-Za-z0-9.]{4,}\.(?:com|cn|net|top|xyz|me|cc)\b")
 
 

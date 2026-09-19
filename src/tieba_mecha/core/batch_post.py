@@ -1460,33 +1460,33 @@ class BatchPostManager:
         task.status = "completed"
         await log_info(f"批量发帖任务完成: {fnames} | 成功: {task.progress}/{task.total}")
 
-    async def reply_to_thread(self, account_id: int, fname: str, tid: int, content: str) -> bool:
-        """基础回帖/自顶实现"""
+    async def reply_to_thread(self, account_id: int, fname: str, tid: int, content: str) -> tuple[bool, str]:
+        """基础回帖/自顶实现。返回 (是否成功, 失败原因)，供自顶流水记录。"""
         from .account import get_account_credentials
         from .client_factory import create_client
         from .obfuscator import Obfuscator
-        
+
         # 预构建账号名映射
         _all_accs = await self.db.get_accounts()
         _reply_acc_name = next((a.user_name or a.name or f"账号(ID:{a.id})" for a in _all_accs if a.id == account_id), f"账号(ID:{account_id})")
-        
+
         creds = await get_account_credentials(self.db, account_id)
-        if not creds: return False
+        if not creds: return False, "未找到账号凭证"
 
         _, bduss, stoken, proxy_id, cuid, ua = creds
         async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
             await client.get_self_info()
-            if not getattr(client.account, 'tbs', None): return False
-            
+            if not getattr(client.account, 'tbs', None): return False, "获取凭证(TBS)失败"
+
             obf = await Obfuscator.from_db(self.db)
             safe_content = obf.obfuscate_all(content)
             try:
                 await client.add_post(fname, tid, safe_content)
-                return True
+                return True, ""
             except Exception as e:
                 err_str = str(e)
                 await log_error(f"自顶回帖失败 [TID:{tid}]: {err_str}")
-                
+
                 # 识别吧务封禁（统一风控分类器）
                 from .risk import is_forum_ban_error
                 if is_forum_ban_error(err_str):
@@ -1497,7 +1497,7 @@ class BatchPostManager:
                         await client.unfollow_forum(fname)
                     except Exception as ue:
                         await log_warn(f"回帖熔断取消关注失败: {ue}")
-                        
+
                     # 寻找关联物料并关闭自动回帖，防止持续背刺
                     async with self.db.async_session() as session:
                         from ..db.models import MaterialPool
@@ -1507,8 +1507,9 @@ class BatchPostManager:
                         )
                         await session.commit()
                     await log_warn(f"账号 {_reply_acc_name} 在 {fname} 遭遇封禁，已转入标记熔断并紧急关闭 TID:{tid} 的自动回帖。")
-                
-                return False
+                    return False, f"吧务封禁: {err_str}"
+
+                return False, err_str
 
     async def unfollow_forums_bulk(
         self,
@@ -2110,14 +2111,29 @@ class AutoBumpManager:
                         # 固定模板模式
                         bump_content = make_templated_bump_content(material.title or "")
 
-                    success = await self.post_manager.reply_to_thread(
-                        target_account_id, 
-                        material.posted_fname, 
-                        material.posted_tid, 
+                    success, reply_msg = await self.post_manager.reply_to_thread(
+                        target_account_id,
+                        material.posted_fname,
+                        material.posted_tid,
                         bump_content
                     )
-                
+
                     today = date.today()
+                    # 自顶流水：逐次记录（成功/失败都记），供详情页历史与风控复盘
+                    try:
+                        await self.db.add_bump_log(
+                            material_id=material.id,
+                            tid=material.posted_tid,
+                            fname=material.posted_fname or "",
+                            account_id=target_account_id,
+                            account_name=bump_acc_name_map.get(target_account_id, f"账号-{target_account_id}"),
+                            content=bump_content,
+                            success=success,
+                            message="" if success else (reply_msg or "自顶请求失败"),
+                        )
+                    except Exception as log_ex:
+                        await log_warn(f"物料 [{material.id}] 写入自顶流水异常: {log_ex}")
+
                     if success:
                         # 更新 bump_count 和轮换信息
                         async with self.db.async_session() as upd_session:
@@ -2144,5 +2160,5 @@ class AutoBumpManager:
                         await asyncio.sleep(random.uniform(15, 45))
                     else:
                         banned_pairs.add((target_account_id, material.posted_fname))
-                        await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')})")
+                        await log_warn(f"物料 [{material.id}] 自顶失败 (账号:{bump_acc_name_map.get(target_account_id, f'账号-{target_account_id}')}): {reply_msg}")
 

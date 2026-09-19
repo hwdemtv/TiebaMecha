@@ -69,6 +69,7 @@ from .repositories import (
     NotificationRepository,
     ThreadRepository,
     BatchLogRepository,
+    BumpLogRepository,
 )
 
 
@@ -85,6 +86,7 @@ class Database(
     NotificationRepository,
     ThreadRepository,
     BatchLogRepository,
+    BumpLogRepository,
 ):
     """异步数据库管理器（领域方法由 repositories/ 下的 mixin 组合提供）。"""
 

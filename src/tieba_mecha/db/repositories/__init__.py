@@ -12,5 +12,6 @@ from .captcha_repo import CaptchaRepository
 from .notification_repo import NotificationRepository
 from .thread_repo import ThreadRepository
 from .batch_log_repo import BatchLogRepository
+from .bump_log_repo import BumpLogRepository
 
-__all__ = ["AccountRepository", "ForumRepository", "SettingRepository", "ProxyRepository", "RuleRepository", "BatchTaskRepository", "MaterialRepository", "TargetPoolRepository", "CaptchaRepository", "NotificationRepository", "ThreadRepository", "BatchLogRepository"]
+__all__ = ["AccountRepository", "ForumRepository", "SettingRepository", "ProxyRepository", "RuleRepository", "BatchTaskRepository", "MaterialRepository", "TargetPoolRepository", "CaptchaRepository", "NotificationRepository", "ThreadRepository", "BatchLogRepository", "BumpLogRepository"]

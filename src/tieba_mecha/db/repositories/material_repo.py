@@ -78,6 +78,44 @@ class MaterialRepository:
                         m.content = m.original_content
             await session.commit()
             return result.rowcount
+    async def register_posted_material(
+        self,
+        title: str,
+        content: str,
+        posted_fname: str,
+        posted_tid: int,
+        posted_account_id: int | None = None,
+        posted_time: datetime | None = None,
+        task_id: str | None = None,
+    ) -> int:
+        """登记一条"已发布"物料（手动发帖的追踪记录）。
+
+        与 add_materials_bulk 的去重语义不同：本方法**始终插入新行**并直接带
+        status=success 与全部 posted_* 字段——发布登记需要一条与本次发帖一一
+        对应的追踪记录，不能复用池中同文案的旧 pending 行（会错标/漏发）。
+
+        Returns:
+            新物料 ID；写入异常返回 0。
+        """
+        try:
+            async with self.async_session() as session:
+                m = MaterialPool(
+                    title=title,
+                    content=content,
+                    status="success",
+                    posted_fname=posted_fname,
+                    posted_tid=posted_tid,
+                    posted_account_id=posted_account_id,
+                    posted_time=posted_time or datetime.now(),
+                    task_id=task_id,
+                )
+                session.add(m)
+                await session.commit()
+                await session.refresh(m)
+                return m.id
+        except Exception:
+            return 0
+
     async def add_materials_bulk(self, pairs: list[tuple[str, str]]) -> int:
         """批量添加物料，返回添加成功的条数，执行基于内容的去重逻辑"""
         if not pairs:
@@ -608,6 +646,22 @@ class MaterialRepository:
                 m.bump_count += 1
                 m.last_bumped_at = datetime.now()
                 await session.commit()
+    async def set_material_auto_bump(self, material_id: int, enabled: bool) -> bool:
+        """开启/关闭物料的自动回帖(自顶)开关（详情抽屉停止按钮使用）"""
+        async with self.async_session() as session:
+            m = await session.get(MaterialPool, material_id)
+            if not m:
+                return False
+            m.is_auto_bump = enabled
+            await session.commit()
+            return True
+    async def count_duplicate_titles(self, title: str) -> int:
+        """统计物料池中与给定标题完全相同的记录数（发帖前重复内容校验）"""
+        from sqlalchemy import select as sa_select
+        async with self.async_session() as session:
+            from sqlalchemy import func
+            stmt = sa_select(func.count(MaterialPool.id)).where(MaterialPool.title == title)
+            return (await session.execute(stmt)).scalar() or 0
     async def update_material_ai(self, material_id: int, new_title: str, new_content: str) -> None:
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
