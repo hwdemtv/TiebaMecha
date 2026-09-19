@@ -1,0 +1,8 @@
+# TiebaMecha 服务管理免密规则（部署到 /etc/sudoers.d/tieba-mecha-hw，440 root:root）
+# 仅放行本 unit 的 restart/start/stop，参数精确匹配，无通配符；
+# systemctl status 与 journalctl 查询本身不需要 root。
+#
+# 安装（需 root 一次）:
+#   sudo visudo -cf <本文件> && sudo install -m 440 -o root -g root <本文件> /etc/sudoers.d/tieba-mecha-hw
+
+hw ALL=(root) NOPASSWD: /usr/bin/systemctl restart tieba-mecha.service, /usr/bin/systemctl start tieba-mecha.service, /usr/bin/systemctl stop tieba-mecha.service
