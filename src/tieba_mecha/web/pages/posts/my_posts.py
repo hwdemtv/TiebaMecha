@@ -73,7 +73,7 @@ class MyPostsTabMixin:
             on_submit=self._on_filter_change, on_blur=self._on_filter_change,
         )
         self._filter_keyword = ft.TextField(
-            label="标题/正文关键字", expand=True, text_size=12,
+            label="标题/正文关键字", width=260, text_size=12,
             on_submit=self._on_filter_change,
         )
 
@@ -113,12 +113,17 @@ class MyPostsTabMixin:
         self._mine_prev_btn = mine_pagination.controls[0]
         self._mine_next_btn = mine_pagination.controls[2]
 
-        return ft.Column([
-            filter_bar,
-            ft.Row([self._stats_row, ft.Container(expand=True), self._check_info, self._check_progress, check_all_btn], spacing=10),
-            self._mine_list,
-            mine_pagination,
-        ], spacing=10, expand=True)
+        # 包 padding 容器：避免下拉框标签被 Tabs 边界裁切（与发布 Tab 一致）
+        return ft.Container(
+            content=ft.Column([
+                filter_bar,
+                ft.Row([self._stats_row, ft.Container(expand=True), self._check_info, self._check_progress, check_all_btn], spacing=10),
+                self._mine_list,
+                mine_pagination,
+            ], spacing=10, expand=True),
+            padding=ft.padding.only(top=6, left=4, right=4),
+            expand=True,
+        )
 
     def _fill_filter_dropdowns(self):
         account_options = [ft.dropdown.Option("all", "全部账号")]

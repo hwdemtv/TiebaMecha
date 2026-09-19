@@ -45,7 +45,9 @@ class BatchOpsTabMixin:
         # 列表与选择
         self._batch_list = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
         self._batch_page_info = ft.Text("", size=12, color="onSurfaceVariant")
-        self._batch_progress = ft.ProgressBar(visible=False, bar_height=2, color="primary", expand=True)
+        # 进度条置于 Row 内横向撑满（Column 内 expand 会变成纵向弹性）
+        self._batch_progress_bar = ft.ProgressBar(visible=False, bar_height=2, color="primary", expand=True)
+        self._batch_progress = ft.Row([self._batch_progress_bar])
         self._batch_progress_info = ft.Text("", size=11, color="onSurfaceVariant")
 
         # 风险分组操作栏（选中后出现）
@@ -97,14 +99,20 @@ class BatchOpsTabMixin:
 
         self._batch_selection_label = self.action_bar.controls[0].controls[0]
 
-        return ft.Column([
-            self._batch_hint,
-            self._analysis_area,
-            self.action_bar,
-            self._batch_progress,
-            self._batch_list,
-            pagination,
-        ], spacing=8, expand=True)
+        # 包 padding 容器：避免顶部控件被 Tabs 边界裁切（与发布/我的帖子 Tab 一致）
+        return ft.Container(
+            content=ft.Column([
+                self._batch_hint,
+                self._analysis_area,
+                self.action_bar,
+                self._batch_progress,
+                self._batch_progress_info,
+                self._batch_list,
+                pagination,
+            ], spacing=8, expand=True),
+            padding=ft.padding.only(top=6, left=4, right=4),
+            expand=True,
+        )
 
     def _update_batch_hint(self):
         n = len(self._rows)
@@ -371,15 +379,15 @@ class BatchOpsTabMixin:
 
         from ....core.ai_optimizer import AIOptimizer
 
-        self._batch_progress.visible = True
-        self._batch_progress.value = 0
+        self._batch_progress_bar.visible = True
+        self._batch_progress_bar.value = 0
         self.page.update()
 
         optimizer = AIOptimizer(self.db)
         results = []
         try:
             for i, r in enumerate(rows):
-                self._batch_progress.value = (i + 1) / len(rows)
+                self._batch_progress_bar.value = (i + 1) / len(rows)
                 self._batch_progress_info.value = f"AI 优化中 {i + 1}/{len(rows)}"
                 self.page.update()
                 try:
@@ -393,7 +401,7 @@ class BatchOpsTabMixin:
                     await asyncio.sleep(0.5)
         finally:
             await optimizer.close()
-            self._batch_progress.visible = False
+            self._batch_progress_bar.visible = False
             self._batch_progress_info.value = ""
 
         if not results:
@@ -439,8 +447,8 @@ class BatchOpsTabMixin:
             self._show_snackbar("选中项中没有可检测的帖子", "warning")
             return
 
-        self._batch_progress.visible = True
-        self._batch_progress.value = 0
+        self._batch_progress_bar.visible = True
+        self._batch_progress_bar.value = 0
         alive = dead = 0
         try:
             total = len(targets)
@@ -455,12 +463,12 @@ class BatchOpsTabMixin:
                     alive += 1
                 else:
                     dead += 1
-                self._batch_progress.value = i / total
+                self._batch_progress_bar.value = i / total
                 self._batch_progress_info.value = f"存活检测 {i}/{total}"
                 self.page.update()
                 await asyncio.sleep(0.3)
         finally:
-            self._batch_progress.visible = False
+            self._batch_progress_bar.visible = False
             self._batch_progress_info.value = ""
 
         msg = f"检测完成: 存活 {alive}, 阵亡 {dead}"
@@ -531,8 +539,8 @@ class BatchOpsTabMixin:
 
         from ....core.post import delete_thread
 
-        self._batch_progress.visible = True
-        self._batch_progress.value = 0
+        self._batch_progress_bar.visible = True
+        self._batch_progress_bar.value = 0
         success_tids: list[int] = []
         failed: list[str] = []
         try:
@@ -550,12 +558,12 @@ class BatchOpsTabMixin:
                     await self.db.delete_thread_record(r.tid)
                 else:
                     failed.append(f"{r.tid}({msg})")
-                self._batch_progress.value = i / total
+                self._batch_progress_bar.value = i / total
                 self._batch_progress_info.value = f"删除中 {i}/{total}"
                 self.page.update()
                 await asyncio.sleep(0.3)
         finally:
-            self._batch_progress.visible = False
+            self._batch_progress_bar.visible = False
             self._batch_progress_info.value = ""
 
         msg = f"删除完成：成功 {len(success_tids)}，失败 {len(failed)}"
