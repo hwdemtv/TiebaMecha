@@ -102,6 +102,10 @@ class DashboardPage:
         if hasattr(self, "log_stream"):
             await self.log_stream.start(self.page)
 
+        # 同步头部账号切换芯片
+        if hasattr(self, "account_chip"):
+            await self.account_chip.refresh()
+
         self.refresh_ui()
 
     def refresh_ui(self):
@@ -168,6 +172,12 @@ class DashboardPage:
         self.log_stream = LogStreamView(max_rows=30, history_count=50)
 
         # --- 标题区域 ---
+        from ..components.account_switcher import AccountSwitchChip
+        self.account_chip = AccountSwitchChip(
+            self.page, self.db,
+            on_switched=self.load_data,
+        )
+
         header = ft.Row(
             controls=[
                 ft.Container(
@@ -184,6 +194,8 @@ class DashboardPage:
                     spacing=0,
                 ),
                 ft.Container(expand=True),
+                self.account_chip,
+                ft.Container(width=12),
                 ft.Row([
                     ft.Icon(SIGNAL_CELLULAR_ALT, size=16, color="primary"),
                     ft.Text("ONLINE", size=11, weight=ft.FontWeight.BOLD, color="primary"),

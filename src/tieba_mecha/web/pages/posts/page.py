@@ -139,11 +139,24 @@ class PostsPage(
         self._refresh_publish_summary()
         self._run_validation()
 
+        # 同步头部账号切换芯片（发布校验按当前账号隔离）
+        if hasattr(self, "account_chip"):
+            await self.account_chip.refresh()
+
         await self._reload_rows(first_load=True)
         self.page.update()
 
     def on_data_loaded(self):
         self.page.update()
+
+    async def _reload_after_account_switch(self):
+        """芯片切换账号后：重置发布账号下拉为新活跃账号，再原位重载。
+
+        _fill_publish_dropdowns 会保留用户已选；这里主动清空值，
+        使回落逻辑选中切换后的活跃账号。
+        """
+        self.post_account.value = None
+        await self.load_data()
 
     async def _reload_rows(self, first_load: bool = False, reset_page: bool = False):
         """按当前筛选加载统一帖子行，并同步刷新"我的帖子/批量"两个 Tab。"""
@@ -173,6 +186,13 @@ class PostsPage(
     # ---------- 页面构建 ----------
 
     def build(self) -> ft.Control:
+        # 头部账号切换芯片（发布校验按当前账号隔离）
+        from ...components.account_switcher import AccountSwitchChip
+        self.account_chip = AccountSwitchChip(
+            self.page, self.db,
+            on_switched=self._reload_after_account_switch,
+        )
+
         header = ft.Row(
             controls=[
                 ft.Container(
@@ -194,6 +214,8 @@ class PostsPage(
                     ],
                     spacing=0,
                 ),
+                ft.Container(expand=True),
+                self.account_chip,
             ],
             alignment=ft.MainAxisAlignment.START,
         )

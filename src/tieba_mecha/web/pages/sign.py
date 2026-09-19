@@ -94,7 +94,11 @@ class SignPage:
                 self.acc_delay_max_input.value = await _get_fmt_val("sign_acc_delay_max", "120")
             except Exception:
                 pass
-            
+
+            # 同步头部账号切换芯片
+            if hasattr(self, "account_chip"):
+                await self.account_chip.refresh()
+
             self.refresh_ui()
             
             # --- 自动触发逻辑 (来自仪表盘快捷键) ---
@@ -183,7 +187,14 @@ class SignPage:
             [self.single_mode_btn, self.matrix_mode_btn],
             spacing=6,
         )
-        
+
+        # 头部账号切换芯片（单账号模式签的就是当前账号）
+        from ..components.account_switcher import AccountSwitchChip
+        self.account_chip = AccountSwitchChip(
+            self.page, self.db,
+            on_switched=self.load_data,
+        )
+
         # 主内
         header = ft.Row(
             controls=[
@@ -210,6 +221,8 @@ class SignPage:
                     spacing=5,
                 ),
                 ft.Container(expand=True),
+                self.account_chip,
+                ft.VerticalDivider(width=20, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
                     ft.Column([
                         ft.Text("总数", size=9, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),

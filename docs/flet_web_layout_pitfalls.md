@@ -39,6 +39,11 @@
 | 列表总高只有几像素、行整行消失 | 行内 `Text` 带 expand 且处于垂直 Column（滚动列表无界高度） | 移除该 Text 的 expand（同 05e1701） |
 | 下拉框/输入框标签上半截被裁 | Tab 内容顶到 Tabs 边界 | 内容包 padding 容器（c636123） |
 | 进度条显示时变成粗条 | ProgressBar 带 expand 且在 Column 里（纵向拉伸） | 移入 Row 横向撑满 |
+| 点击无反应，悬停提示以 `tooltip {message: ...}` 原文显示在页面上 | `ft.Tooltip` 对象赋给控件的 `tooltip` 属性，被当作子控件渲染成覆盖层（显示原文 + 拦截点击） | `tooltip` 一律赋纯字符串（见 五-1） |
+| AlertDialog 打开后只有一片空白，标题/内容/按钮全无；服务端无任何报错 | content 里 `scroll+tight Column` / `max_height` 约束在对话框无界高度下布局冲突，Flutter 整体渲染失败 | 固定 `height`（按行数自适应）+ scroll，去掉 tight 与 max_height（见 五-2） |
+| 切换/提交完成后整页变暗、所有点击失效，F5 才恢复 | 对话框 close 与页面重载（build+update）竞态，barrier 残留；自动化环境的事件重放会放大 | 处理器入口先同步 close；宿主页面改"原位 load_data 重载"，不做整页重建（见 五-3） |
+| 某页面一进就白屏，服务端 Traceback: `ModuleNotFoundError: ...web.web` | 相对导入多写一层：`pages/posts/x.py` 深一层包，`...web.components` 展开成 `tieba_mecha.web.web.components` | 按包层级数点数：`pages/x.py` 用 `..components`，`pages/posts/x.py` 用 `...components` |
+| 芯片/头部已显示切换成功，页面里"默认当前账号"的控件还停在旧账号 | 下拉填充是"保留用户已选"策略，切号后旧值仍是合法 id，回落逻辑不触发 | 切号回调里先把该控件 `value=None` 再 load_data，让回落逻辑选中新活跃账号（案例：帖子管理发布账号下拉） |
 
 ## 三、排查方法论（这次实测有效的流程）
 
@@ -82,3 +87,68 @@
   + **本地起服务浏览器实测目标页面**，两道都过才算修复。
 - 已知非问题（勿误修）：`detail.py`/`kv_row`/流水卡片里 Text 的 expand
   都在 Row 内（横向），是合法用法。
+
+## 五、对话框与交互层陷阱（账号切换芯片实战，2026-09-19）
+
+> 来源：全局账号切换芯片（`web/components/account_switcher.py`）接入
+> 指挥中心/全域签到/帖子管理三页的浏览器实测。本轮问题与布局无关，
+> 全部集中在 **tooltip、对话框生命周期、事件重放、相对导入** 四类。
+
+### 规则
+
+1. **`tooltip` 一律赋纯字符串，禁止赋 `ft.Tooltip` 对象**。
+   Flet 0.23 中 Container.tooltip 接收 Tooltip 对象时会把它当作
+   子控件渲染：页面上出现 `tooltip {message: ...}` 原文，且该覆盖层
+   会拦截 underneath 的 `on_click`（表现为"点击完全没反应"）。
+   字符串形式由框架包装成 Flutter Tooltip，无此问题。
+
+2. **AlertDialog 的 content 禁用 `scroll+tight Column` 与
+   `BoxConstraints(max_height)` 组合**。对话框给内容的是无界高度约束，
+   滚动 Column 在其中布局冲突 → **整个对话框（含标题、按钮、遮罩之外
+   的全部内容）渲染为空白**。服务端无任何异常，浏览器 console 也没有
+   可靠输出。修复模式：固定 `height`（按行数自适应、设上限）+ scroll，
+   不用 tight、不用 max_height。
+
+3. **"关闭对话框 + 重载页面"必须拆成两步且 close 永远同步先行**：
+   先 `page.close(d)`（同步、不经过任何 await），再执行业务与刷新；
+   宿主页面用 **原位重载**（回调 `await load_data()`，只刷新数据不重建
+   控件树），禁止用"重新导航触发整页 build"——close 的更新 diff 与
+   整页重建的 diff 竞态时，barrier 会以空壳形式残留挡住整页（F5 才能解）。
+   组件层另有两道兜底：`_close_dialog` 后强制把对话框从
+   `page._Page__offstage.controls` 摘除并 `page.update()`；
+   `_do_switch` 入口以 `self._dialog` 是否还在做防重入。
+   （实测"整页重建"路线下竞态仍偶发，根治靠"改用原位重载"。）
+
+4. **弹窗/写操作处理器必须防重入，且判重要用会话级状态**。
+   自动化或事件重放会让同一点击触发两次处理器；页面重载又会创建新
+   组件实例，实例级 `self._dialog is not None` 判重挡不住跨实例重复开面板。
+   项目模式：模块级 `_dialog_locks: dict[session_id, bool]` 按会话分桶，
+   open 前检查、open 后置位、close 时复位。
+
+5. **页面模块的相对导入按包层级数点数，改完先 `python -m py_compile`**。
+   `pages/x.py` 与 `pages/posts/x.py` 差一层：
+   - `pages/x.py` 引 components → `from ..components...`
+   - `pages/posts/x.py` 引 components → `from ...components...`
+   写错不会在导入时爆，而是在**页面 build() 时**爆 ModuleNotFoundError
+   （白屏 + 服务端 Traceback，特征：报错路径出现重复段如 `.web.web`）。
+
+### 排查手段（本轮实测有效）
+
+- **服务端打点是唯一可靠的观测**：Flet web 布局/渲染异常不会出现在
+  服务端日志；在事件处理器每个 return 分支前加
+  `print("[标记] ...", file=sys.stderr, flush=True)`，一次重启即可定位
+  卡在哪个分支。注意：后台起服务时不要把输出重定向到 /dev/null
+  （本轮因此多绕三轮）。
+- **点击是否触达的判定**：悬停后 tooltip 出现 = 事件到达控件；
+  页面跳转 = 处理器执行。两者都没有 → 点击丢失（自动化环境常见，
+  见下），不是处理器问题。
+- **自动化点击会丢失/重放**（仅自动化环境，真实鼠标无此问题）：
+  - 页面启动白屏窗口期（约 10–15s，主题未应用、字体未加载）内的
+    点击会被静默吞掉——每次操作前先截图确认页面处于预期状态；
+  - 同一点击可能派发两次事件——写操作处理器必须防重入；
+  - 规避手法：先 `move` 到目标坐标停顿再 `click`；失败就换坐标微调重试。
+- **验证切换是否真实生效直接查库**，不轻信 UI：
+  `sqlite3 data/tieba_mecha.db "SELECT id,name,is_active FROM accounts"`。
+- **每次改码必须重启 flet 服务**（无热重载），且浏览器会话失效需重新
+  走登录页（"暂不设置，直接进入"通道，不会在库里留密码）。
+- **调试结束记得删光打点**：残留的 ChipDebug 类 print 会污染下次排查。
