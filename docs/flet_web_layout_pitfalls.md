@@ -109,15 +109,14 @@
    可靠输出。修复模式：固定 `height`（按行数自适应、设上限）+ scroll，
    不用 tight、不用 max_height。
 
-3. **"关闭对话框 + 重载页面"必须拆成两步且 close 永远同步先行**：
-   先 `page.close(d)`（同步、不经过任何 await），再执行业务与刷新；
-   宿主页面用 **原位重载**（回调 `await load_data()`，只刷新数据不重建
-   控件树），禁止用"重新导航触发整页 build"——close 的更新 diff 与
-   整页重建的 diff 竞态时，barrier 会以空壳形式残留挡住整页（F5 才能解）。
-   组件层另有两道兜底：`_close_dialog` 后强制把对话框从
-   `page._Page__offstage.controls` 摘除并 `page.update()`；
-   `_do_switch` 入口以 `self._dialog` 是否还在做防重入。
-   （实测"整页重建"路线下竞态仍偶发，根治靠"改用原位重载"。）
+3. **切换/选择类面板禁止用 AlertDialog + page.open/close，改用 PopupMenuButton**。
+   Flet 0.23 web 上 AlertDialog 存在客户端状态不同步：即使同步
+   `page.close` 先行、随后才重载页面，barrier 仍可能以空壳形式残留
+   挡死整页（F5 才能解）——锁、offstage 摘除、延迟重载均无法根治
+   （真实浏览器复现，2026-09-19）。
+   **根治：改用 `ft.PopupMenuButton` 承载面板**（与 Dropdown 同一原生
+   渲染路径，框架自行开关，无遮罩无生命周期竞态）。AlertDialog 仅保留
+   给"打开→处理→关闭"不伴随页面刷新的纯表单场景（如账号页添加账号）。
 
 4. **弹窗/写操作处理器必须防重入，且判重要用会话级状态**。
    自动化或事件重放会让同一点击触发两次处理器；页面重载又会创建新
