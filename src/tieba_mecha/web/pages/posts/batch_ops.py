@@ -43,7 +43,9 @@ class BatchOpsTabMixin:
         self._analysis_area = ft.Column(spacing=8)
 
         # 列表与选择
-        self._batch_list = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
+        # 动态填充的列表必须用 ListView：Tabs 非选中期间对 scrollable Column
+        # 动态添加的子控件，切回选中后不会被渲染（Flet web diff 缺陷）
+        self._batch_list = ft.ListView(spacing=6, expand=True)
         self._batch_page_info = ft.Text("", size=12, color="onSurfaceVariant")
         # 进度条置于 Row 内横向撑满（Column 内 expand 会变成纵向弹性）
         self._batch_progress_bar = ft.ProgressBar(visible=False, bar_height=2, color="primary", expand=True)
@@ -217,11 +219,13 @@ class BatchOpsTabMixin:
         _, state_label, color = SURVIVAL_DISPLAY[state]
 
         # 中间内容区承担"点击选中"；详情按钮独立放置避免点击冒泡双重触发
+        # 注意：标题 Text 不可加 expand——它在垂直 Column 内，滚动列表提供
+        # 无界高度约束时纵向弹性会触发布局异常，整行塌缩为 0 高度
         content_area = ft.Container(
             content=ft.Column([
                 ft.Text(
                     r.title or "(无标题)",
-                    size=13, weight=ft.FontWeight.W_500, expand=True,
+                    size=13, weight=ft.FontWeight.W_500,
                     max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, selectable=True,
                 ),
                 ft.Row([

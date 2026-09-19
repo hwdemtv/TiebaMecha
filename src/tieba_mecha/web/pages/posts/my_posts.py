@@ -103,7 +103,7 @@ class MyPostsTabMixin:
         )
 
         # 列表与分页
-        self._mine_list = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True)
+        self._mine_list = ft.ListView(spacing=8, expand=True)  # 动态填充用 ListView（见 batch_ops 注释）
         self._mine_page_info = ft.Text("", size=12, color="onSurfaceVariant")
         mine_pagination = ft.Row([
             ft.IconButton("navigate_before", icon_size=16, on_click=self._on_mine_prev, disabled=True),
