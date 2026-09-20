@@ -214,6 +214,21 @@ async def _run_claimed_task(task_id: str):
 _SPAWNED_TASK_REFS: set = set()
 
 
+def calc_batch_task_resume_time(task) -> datetime:
+    """恢复暂停任务后的下次执行时间。
+
+    once 任务保留原计划时刻（已被暂停耗过的时刻则恢复后立即执行）；
+    循环任务按调度类型从当前时刻重算下一档（daily/weekly 取原时刻的
+    HH:MM，interval 从现在起算一个间隔），暂停期间不补跑错过的轮次。
+    """
+    schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
+    if schedule_type == 'once':
+        orig = task.schedule_time
+        now = datetime.now()
+        return orig if (orig and orig > now) else now
+    return _calc_next_schedule_time(task)
+
+
 def _spawn_batch_task(coro) -> None:
     t = asyncio.create_task(coro)
     _SPAWNED_TASK_REFS.add(t)

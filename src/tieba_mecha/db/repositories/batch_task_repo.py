@@ -90,6 +90,34 @@ class BatchTaskRepository:
             )
             await session.commit()
             return result.rowcount or 0
+    async def pause_batch_task(self, task_id: int) -> bool:
+        """暂停待执行任务：仅当仍处于 pending 时置为 paused。
+
+        条件更新与认领（claim_batch_task）同口径：任务刚好开始执行时
+        暂停会失败，避免把 running 覆盖成 paused 导致执行流状态错乱。
+        paused 任务被所有调度查询（pending 过滤）天然排除。
+        """
+        async with self.async_session() as session:
+            result = await session.execute(
+                update(BatchPostTask)
+                .where(BatchPostTask.id == task_id, BatchPostTask.status == "pending")
+                .values(status="paused")
+            )
+            await session.commit()
+            return (result.rowcount or 0) > 0
+    async def resume_batch_task(self, task_id: int) -> bool:
+        """恢复暂停任务：仅当仍处于 paused 时复位为 pending。
+
+        恢复后的 schedule_time 重算与触发器注册由调用方完成。
+        """
+        async with self.async_session() as session:
+            result = await session.execute(
+                update(BatchPostTask)
+                .where(BatchPostTask.id == task_id, BatchPostTask.status == "paused")
+                .values(status="pending")
+            )
+            await session.commit()
+            return (result.rowcount or 0) > 0
     async def update_batch_task(self, task_id: int, **kwargs) -> None:
         """更新任务状态及进度"""
         async with self.async_session() as session:

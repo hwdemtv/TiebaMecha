@@ -197,7 +197,7 @@ class BatchPostTask(Base):
     # 循环轮询起点偏移量（下次发帖从 fnames[offset % len(fnames)] 开始）
     forum_offset: Mapped[int] = mapped_column(Integer, default=0, comment="循环发帖轮询偏移量")
     # --- 通用字段 ---
-    status: Mapped[str] = mapped_column(String(20), default="pending", comment="pending/running/completed/failed")
+    status: Mapped[str] = mapped_column(String(20), default="pending", comment="pending/running/paused/completed/failed/stopped")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     total: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

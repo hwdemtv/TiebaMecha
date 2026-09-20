@@ -309,7 +309,8 @@ class BatchPostCenterPage:
 
     def _build_task_row(self, t, index):
         status_color = {"pending": "orange", "running": "primary", "completed": "green",
-                        "failed": "error", "stopped": "onSurfaceVariant"}.get(t.status, "onSurface")
+                        "failed": "error", "stopped": "onSurfaceVariant",
+                        "paused": "blue"}.get(t.status, "onSurface")
 
         # 优化贴吧列表显示
         try:
@@ -360,7 +361,7 @@ class BatchPostCenterPage:
             ft.DataCell(ft.Text(getattr(t, "strategy", "N/A"))),
             ft.DataCell(ft.Text(_format_schedule_display(t))),
             ft.DataCell(ft.Text({"pending": "待执行", "running": "运行中", "completed": "已完成",
-                                 "failed": "失败", "stopped": "已停止"}.get(t.status, t.status),
+                                 "failed": "失败", "stopped": "已停止", "paused": "已暂停"}.get(t.status, t.status),
                                 color=status_color, weight=ft.FontWeight.BOLD)),
             ft.DataCell(ft.Text(f"{t.progress}/{t.total}")),
             ft.DataCell(
@@ -382,6 +383,25 @@ class BatchPostCenterPage:
                             on_click=lambda _: self.page.run_task(self._on_reactivate_task, t)
                         )
                     ] if t.status in ("failed", "stopped") else []),
+                    # 待执行的定时任务可暂停：暂停期间不触发、不补跑
+                    *([
+                        ft.IconButton(
+                            icons.PAUSE_CIRCLE_OUTLINED,
+                            icon_color="blue",
+                            icon_size=18,
+                            tooltip="暂停：期间不再按计划执行，恢复后重算下一次时间",
+                            on_click=lambda _: self.page.run_task(self._on_pause_task, t)
+                        )
+                    ] if t.status == "pending" else []),
+                    *([
+                        ft.IconButton(
+                            icons.PLAY_CIRCLE_OUTLINED,
+                            icon_color="green",
+                            icon_size=18,
+                            tooltip="恢复运行：重新纳入调度并重算下一次执行时间",
+                            on_click=lambda _: self.page.run_task(self._on_resume_task, t)
+                        )
+                    ] if t.status == "paused" else []),
                     ft.IconButton(
                         icons.DELETE_OUTLINE,
                         icon_color="error",
@@ -474,6 +494,39 @@ class BatchPostCenterPage:
             await self.load_data()
         except Exception as e:
             self._show_snackbar(f"重新激活失败: {str(e)}", "error")
+
+    async def _on_pause_task(self, task):
+        """暂停待执行任务：置为 paused 并撤销精确触发器，恢复前不再触发。"""
+        try:
+            if not await self.db.pause_batch_task(task.id):
+                self._show_snackbar(f"任务 #{task.id} 已开始执行或状态已变化，暂停未生效", "warning")
+                await self.load_data()
+                return
+            # 撤销精确触发器；即使漏撤，触发入口也有 status!=pending 守卫
+            from ...core.daemon import daemon_instance
+            daemon_instance.cancel_once_task(task.id)
+            self._show_snackbar(f"任务 #{task.id} 已暂停，期间不再按计划执行", "success")
+            await self.load_data()
+        except Exception as e:
+            self._show_snackbar(f"暂停失败: {str(e)}", "error")
+
+    async def _on_resume_task(self, task):
+        """恢复暂停任务：复位 pending、重算下次时间并重新注册精确触发器。"""
+        try:
+            if not await self.db.resume_batch_task(task.id):
+                self._show_snackbar(f"任务 #{task.id} 状态已变化，恢复未生效", "warning")
+                await self.load_data()
+                return
+            from ...core.daemon import calc_batch_task_resume_time, daemon_instance
+            next_time = calc_batch_task_resume_time(task)
+            await self.db.update_batch_task(task.id, schedule_time=next_time)
+            daemon_instance.schedule_batch_task(task.id, next_time)
+            self._show_snackbar(
+                f"任务 #{task.id} 已恢复运行，下次执行: {next_time.strftime('%m-%d %H:%M')}",
+                "success")
+            await self.load_data()
+        except Exception as e:
+            self._show_snackbar(f"恢复失败: {str(e)}", "error")
 
     async def _on_delete_task(self, task):
         task_id = task.id
