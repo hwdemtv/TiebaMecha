@@ -823,22 +823,31 @@ class AccountsPage:
                 self._show_snackbar(f"✅ '{fname}' 已被所有账号关注，无需补齐", "success")
                 return
 
-            missing_names = [acc.name for acc in missing_accounts]
-            self._show_snackbar(f"🔄 正在让 {len(missing_accounts)} 个账号关注 '{fname}'...", "info")
+            missing_ids = [acc.id for acc in missing_accounts]
+            self._open_progress_dialog(f"补齐关注执行中：{len(missing_accounts)} 个账号 → '{fname}'", determinate=True)
+
+            async def report_progress(done, total):
+                self._update_progress(f"补齐关注进度 {done}/{total}", (done / total) if total else None)
 
             # 只让未关注的账号关注
-            missing_ids = [acc.id for acc in missing_accounts]
             from ...core.batch_post import BatchPostManager
             pm = BatchPostManager(self.db)
-            result = await pm.follow_forums_bulk([fname], account_ids=missing_ids)
+            result = await pm.follow_forums_bulk([fname], account_ids=missing_ids, progress_callback=report_progress)
+
+            if any(f.get("reason") == "已有批量关注/取关任务在执行" for f in result["failed"]):
+                self._show_snackbar("ℹ️ 已有批量关注/取关任务在执行，本次未执行", "info")
+                return
 
             success_count = len(result["success"])
             failed_count = len(result["failed"])
+            skipped_count = len(result.get("skipped", []))
 
             if success_count > 0:
                 self._show_snackbar(f"✅ {success_count}/{len(missing_accounts)} 个账号成功关注 '{fname}'", "success")
             if failed_count > 0:
                 self._show_snackbar(f"⚠️ {failed_count} 个账号关注失败", "warning")
+            if skipped_count > 0:
+                self._show_snackbar(f"ℹ️ {skipped_count} 个账号已跳过（熔断中或凭证异常）", "info")
 
             # 刷新列表
             await self._refresh_matrix_stats()
@@ -847,6 +856,7 @@ class AccountsPage:
         except Exception as e:
             self._show_snackbar(f"❌ 补齐失败: {str(e)}", "error")
         finally:
+            self._close_progress_dialog()
             self._end_op()
 
     async def _on_unfollow_forum(self, fname: str):
@@ -1016,29 +1026,42 @@ class AccountsPage:
         if not self._begin_op():
             return
         fnames = list(self._matrix_selected_fnames)
+        self._open_progress_dialog("正在统计缺失关注的账号...", determinate=True)
         try:
             # 单次查询获取所有缺失关注的账号（替代逐吧循环查询）
             missing_accounts = await self.db.get_accounts_not_following_any_forums(fnames)
             if not missing_accounts:
-                self._show_snackbar("✅ 所有账号已关注选中的贴吧", "info")
+                self._show_snackbar("✅ 所有账号已关注选中的贴吧，无需补齐", "info")
+                self._matrix_selected_fnames.clear()
             else:
                 missing_ids = [acc.id for acc in missing_accounts]
+                self._update_progress(
+                    f"补齐关注执行中：{len(missing_ids)} 个账号 × {len(fnames)} 个贴吧（防风控节奏，耗时较长）", 0)
+
+                async def report_progress(done, total):
+                    self._update_progress(f"补齐关注进度 {done}/{total}", (done / total) if total else None)
+
                 from ...core.batch_post import BatchPostManager
                 pm = BatchPostManager(self.db)
                 # 单次调用处理所有贴吧
-                result = await pm.follow_forums_bulk(fnames, account_ids=missing_ids)
-                total_success = len(result["success"])
-                total_failed = len(result["failed"])
-                total_skipped = len(result.get("skipped", []))
-                msg = f"✅ 补齐关注完成: 成功 {total_success}, 失败 {total_failed}"
-                if total_skipped > 0:
-                    msg += f", 跳过 {total_skipped}"
-                self._show_snackbar(msg, "success")
+                result = await pm.follow_forums_bulk(fnames, account_ids=missing_ids, progress_callback=report_progress)
+                if any(f.get("reason") == "已有批量关注/取关任务在执行" for f in result["failed"]):
+                    # 保留勾选，便于任务空闲后直接重试
+                    self._show_snackbar("ℹ️ 已有批量关注/取关任务在执行，本次未执行", "info")
+                else:
+                    total_success = len(result["success"])
+                    total_failed = len(result["failed"])
+                    total_skipped = len(result.get("skipped", []))
+                    msg = f"✅ 补齐关注完成: 成功 {total_success}, 失败 {total_failed}"
+                    if total_skipped > 0:
+                        msg += f", 跳过 {total_skipped}"
+                    self._show_snackbar(msg, "success")
+                    self._matrix_selected_fnames.clear()
         except Exception as e:
             self._show_snackbar(f"❌ 批量补齐失败: {str(e)}", "error")
         finally:
+            self._close_progress_dialog()
             self._end_op()
-        self._matrix_selected_fnames.clear()
         await self._refresh_matrix_stats()
         self._update_matrix_bulk_bar()
         self.refresh_ui()
