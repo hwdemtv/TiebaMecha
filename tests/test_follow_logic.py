@@ -1,5 +1,7 @@
 """Tests for forum follow and account selection logic."""
 
+import time
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from tieba_mecha.core.batch_post import BatchPostManager
@@ -395,6 +397,46 @@ class TestFollowRobustness:
         assert breaker.is_in_cooldown(acc1.id) is True
         assert breaker.is_in_cooldown((acc1.id or 0) + 9999) is False
 
+    async def test_failure_breaker_trips_interrupts_follow_loop(self, db):
+        """关注循环中连续失败熔断触发后立即中断该账号剩余目标，未尝试的落入 skipped
+
+        回归 2026-09-20 线上问题：hwdemtv187 被 1990029 风控后，熔断告警
+        刷屏但关注循环未中断，20~25s 后仍继续对下一个吧发起请求。
+        """
+        from sqlalchemy import select
+
+        from tieba_mecha.db.models import BreakerState
+
+        acc1 = await self._make_account(db, "breaker_trip_acc")
+        mock_client = _make_mock_client()
+        mock_client.follow_forum = AsyncMock(return_value=_err_resp("1990029: 操作频繁，请稍候再试"))
+
+        with patch("tieba_mecha.core.batch_post.create_client", return_value=mock_client), \
+             patch("tieba_mecha.core.batch_post.BionicDelay.sleep", new_callable=AsyncMock):
+            pm = BatchPostManager(db)
+            result = await pm.follow_forums_bulk(
+                ["风控吧A", "风控吧B", "风控吧C", "风控吧D"], account_ids=[acc1.id])
+
+        # 前 3 次真实尝试，第 3 次触发熔断后第 4 个吧不再发起请求
+        assert mock_client.follow_forum.await_count == 3, "熔断触发后不得继续对剩余吧发起关注"
+        failed_reasons = [f["reason"] for f in result["failed"]]
+        assert failed_reasons == [
+            "1990029: 操作频繁，请稍候再试",
+            "1990029: 操作频繁，请稍候再试",
+            "连续失败熔断",
+        ]
+        # 未尝试的目标落账为 skipped（fname=None 的中断汇总条目）
+        interrupt = [s for s in result["skipped"] if s["fname"] is None]
+        assert len(interrupt) == 1
+        assert interrupt[0]["reason"] == "连续失败熔断中断（剩余 1 个未尝试）"
+        # 熔断状态已持久化，下一个批量任务回种后应跳过该账号
+        async with db.async_session() as session:
+            rows = (await session.execute(
+                select(BreakerState).where(
+                    BreakerState.scope == "follow", BreakerState.account_id == acc1.id)
+            )).scalars().all()
+        assert len(rows) == 1 and rows[0].breaker_until is not None
+
 
 @pytest.mark.asyncio
 class TestPickOptimalAccount:
@@ -516,3 +558,66 @@ class TestPickOptimalAccount:
 
         # 应该使用轮询策略选择的账号
         assert selected == acc1.id
+
+
+# ========================================================================
+# 渐进式熔断续期语义（2026-09-20 修复：熔断期内仅续期，不升级渐进档位）
+# ========================================================================
+
+class TestFailureBreakerRenewal:
+    """同一段熔断期内再次失败只续期：不重复登记触发历史、不升级冷却档位；
+
+    到期后重新触发才算新的独立一次（按 24h 内触发次数正常升级）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_renewal_within_cooldown_keeps_level(self):
+        from tieba_mecha.core.batch_post import FailureCircuitBreaker
+
+        breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=30)
+        await breaker.load()
+
+        # 首次触发：登记一次历史，档位 1（base_cooldown × 1 = 30 分钟）
+        for _ in range(3):
+            triggered = await breaker.record_failure(1)
+        assert triggered is True
+        assert len(breaker._trigger_history[1]) == 1
+        assert breaker._breaker_duration[1] == 30
+
+        first_until = breaker._breaker_until[1]
+
+        # 熔断期内继续失败：仍返回触发，但历史不增、档位不升，仅顺延到期时间
+        for _ in range(2):
+            assert await breaker.record_failure(1) is True
+        assert len(breaker._trigger_history[1]) == 1, "续期不应重复登记触发历史"
+        assert breaker._breaker_duration[1] == 30, "续期不应升级冷却档位"
+        assert breaker._breaker_until[1] > first_until, "续期应顺延熔断到期时间"
+
+    @pytest.mark.asyncio
+    async def test_retrip_after_expiry_escalates(self):
+        from tieba_mecha.core.batch_post import FailureCircuitBreaker
+
+        breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=30)
+        await breaker.load()
+        for _ in range(3):
+            await breaker.record_failure(1)
+        assert breaker._breaker_duration[1] == 30
+
+        # 模拟熔断到期后仍持续失败：按新的一次触发登记并升级档位（第 2 次 → ×4）
+        breaker._breaker_until[1] = time.time() - 10
+        assert await breaker.record_failure(1) is True
+        assert len(breaker._trigger_history[1]) == 2, "到期后重新触发应登记为新的一次"
+        assert breaker._breaker_duration[1] == 120, "新触发期应升级到第 2 档（30 × 4）"
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_duration(self):
+        from tieba_mecha.core.batch_post import FailureCircuitBreaker
+
+        breaker = FailureCircuitBreaker(max_consecutive_failures=2, base_cooldown=30)
+        await breaker.load()
+        for _ in range(2):
+            await breaker.record_failure(7)
+        assert breaker._breaker_duration.get(7) == 30
+
+        await breaker.record_success(7)
+        assert breaker._breaker_duration.get(7) is None, "成功复位应清掉续期档位记录"

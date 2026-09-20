@@ -401,6 +401,7 @@ class FailureCircuitBreaker:
         self._failure_counts: dict[int, tuple[int, float]] = {}  # {account_id: (count, last_failure_time)}
         self._trigger_history: dict[int, list[float]] = {}  # {account_id: [trigger_timestamps]}
         self._breaker_until: dict[int, float] = {}  # {account_id: breaker_until_epoch}
+        self._breaker_duration: dict[int, int] = {}  # {account_id: 当前熔断期使用的冷却分钟数（续期沿用，不升级）}
         self._lock: asyncio.Lock = asyncio.Lock()
 
     # ---------- 持久化 ----------
@@ -496,19 +497,32 @@ class FailureCircuitBreaker:
             count, _ = self._failure_counts[account_id]
             triggered = False
             if count >= self.max_consecutive_failures:
-                cooldown = self._get_cooldown_minutes(account_id)
-                self._trigger_history.setdefault(account_id, []).append(now)
-                # 保留 24h 内的记录
-                self._trigger_history[account_id] = [
-                    t for t in self._trigger_history[account_id] if now - t < 86400
-                ]
+                # 同一段连续失败期内只登记一次触发历史：熔断期内再次失败仅续期，
+                # 不升级渐进等级，避免一次事故把 24h 触发次数打满、冷却永远钉在最高档
+                until = self._breaker_until.get(account_id)
+                already_in_cooldown = until is not None and now < until
+                if not already_in_cooldown:
+                    cooldown = self._get_cooldown_minutes(account_id)
+                    self._trigger_history.setdefault(account_id, []).append(now)
+                    # 保留 24h 内的记录
+                    self._trigger_history[account_id] = [
+                        t for t in self._trigger_history[account_id] if now - t < 86400
+                    ]
+                    self._breaker_duration[account_id] = cooldown
+                    await log_error(
+                        f"🚨 渐进式熔断：账号 [{account_id}] 连续失败 {count} 次，"
+                        f"暂停 {cooldown} 分钟（24h 内第 {len(self._trigger_history[account_id])} 次触发）。"
+                        f"请检查账号状态或网络。"
+                    )
+                else:
+                    # 续期沿用本段熔断期开始时的冷却时长，不重复登记触发历史
+                    cooldown = self._breaker_duration.get(account_id) or self._get_cooldown_minutes(account_id)
+                    await log_error(
+                        f"🚨 渐进式熔断：账号 [{account_id}] 熔断期内仍连续失败（累计 {count} 次），"
+                        f"冷却续期 {cooldown} 分钟。"
+                    )
                 self._breaker_until[account_id] = now + cooldown * 60
                 triggered = True
-                await log_error(
-                    f"🚨 渐进式熔断：账号 [{account_id}] 连续失败 {count} 次，"
-                    f"暂停 {cooldown} 分钟（24h 内第 {len(self._trigger_history[account_id])} 次触发）。"
-                    f"请检查账号状态或网络。"
-                )
             await self._persist(account_id)
             return triggered
 
@@ -517,6 +531,7 @@ class FailureCircuitBreaker:
         async with self._lock:
             self._failure_counts.pop(account_id, None)
             self._breaker_until.pop(account_id, None)
+            self._breaker_duration.pop(account_id, None)
             await self._persist(account_id)
 
     def is_in_cooldown(self, account_id: int) -> bool:
@@ -527,6 +542,7 @@ class FailureCircuitBreaker:
         if time.time() >= until:
             # 熔断到期，清理内存标记（下次写透由 record_* 触发）
             self._breaker_until.pop(account_id, None)
+            self._breaker_duration.pop(account_id, None)
             self._failure_counts.pop(account_id, None)
             return False
         return True
@@ -1754,6 +1770,7 @@ class BatchPostManager:
 
             _, bduss, stoken, proxy_id, cuid, ua = creds
             acc_start = current_action
+            breaker_tripped = False  # 本账号内连续失败熔断触发标记（触发即中断剩余目标）
             try:
                 async with await create_client(
                     self.db,
@@ -1771,6 +1788,13 @@ class BatchPostManager:
                         if captcha_breaker.is_in_cooldown(acc_id):
                             await log_warn(f"账号 [{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}] 验证码熔断，跳过 [{fname}]")
                             result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "验证码熔断"})
+                            current_action += 1
+                            if progress_callback:
+                                await progress_callback(current_action, total_actions)
+                            continue
+                        if failure_breaker.is_in_cooldown(acc_id):
+                            await log_warn(f"账号 [{_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')}] 连续失败熔断中，跳过 [{fname}]")
+                            result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "连续失败熔断中"})
                             current_action += 1
                             if progress_callback:
                                 await progress_callback(current_action, total_actions)
@@ -1801,18 +1825,31 @@ class BatchPostManager:
                             from .risk import extract_err_code
                             err_code = extract_err_code(err_msg)
                             is_captcha = await captcha_breaker.check_and_trigger(acc_id, err_msg, err_code)
-                            if not is_captcha:
-                                await failure_breaker.record_failure(acc_id)
+                            if not is_captcha and await failure_breaker.record_failure(acc_id):
+                                breaker_tripped = True
                             await log_error(f"账号 {_unf_acc_name_map.get(acc_id, f'账号-{acc_id}')} 取消关注 [{fname}] 失败: {err_msg}")
 
                         current_action += 1
                         if progress_callback:
                             await progress_callback(current_action, total_actions)
 
+                        # 熔断刚触发：立即终止该账号剩余目标，避免风控期继续打请求
+                        if breaker_tripped:
+                            break
+
                         # ---- 拟人化延迟 + 时段倍率（账号内末次操作后由账号间冷却/任务收尾接管）----
                         if f_idx < len(fnames) - 1:
                             adj_min, adj_max = time_window.get_adjusted_delay(*FOLLOW_ACTION_DELAY)
                             await BionicDelay.sleep(adj_min, adj_max)
+
+                    # 熔断中断落账：未尝试目标计入 skipped，保证进度与结果统计一致
+                    if breaker_tripped:
+                        remaining = len(fnames) - (current_action - acc_start)
+                        if remaining > 0:
+                            result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"连续失败熔断中断（剩余 {remaining} 个未尝试）"})
+                        current_action = acc_start + len(fnames)
+                        if progress_callback:
+                            await progress_callback(current_action, total_actions)
             except Exception as e:
                 done_count = max(0, current_action - acc_start)
                 current_action = acc_start + len(fnames)
@@ -1994,6 +2031,7 @@ class BatchPostManager:
 
             _, bduss, stoken, proxy_id, cuid, ua = creds
             acc_start = current_action
+            breaker_tripped = False  # 本账号内连续失败熔断触发标记（触发即中断剩余目标）
             try:
                 async with await create_client(
                     self.db,
@@ -2027,6 +2065,12 @@ class BatchPostManager:
                         if captcha_breaker.is_in_cooldown(acc_id):
                             remaining = captcha_breaker.get_remaining_cooldown(acc_id)
                             result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": f"验证码熔断（剩余 {remaining:.0f}s）"})
+                            current_action += 1
+                            if progress_callback:
+                                await progress_callback(current_action, total_actions)
+                            continue
+                        if failure_breaker.is_in_cooldown(acc_id):
+                            result["skipped"].append({"account_id": acc_id, "fname": fname, "reason": "连续失败熔断中"})
                             current_action += 1
                             if progress_callback:
                                 await progress_callback(current_action, total_actions)
@@ -2102,6 +2146,7 @@ class BatchPostManager:
                                 # ---- 连续失败熔断 ----
                                 if await failure_breaker.record_failure(acc_id):
                                     result["failed"].append({"account_id": acc_id, "fname": fname, "reason": "连续失败熔断"})
+                                    breaker_tripped = True
                                 else:
                                     result["failed"].append({"account_id": acc_id, "fname": fname, "reason": err_msg[:50]})
                                 await log_error(f"账号 {_fol_acc_name_map.get(acc_id, f'账号-{acc_id}')} 关注 [{fname}] 失败: {err_msg}")
@@ -2110,10 +2155,23 @@ class BatchPostManager:
                         if progress_callback:
                             await progress_callback(current_action, total_actions)
 
+                        # 熔断刚触发：立即终止该账号剩余目标，避免风控期继续打请求
+                        if breaker_tripped:
+                            break
+
                         # ---- 拟人化延迟 + 时段倍率（账号内末次操作后由账号间冷却/任务收尾接管）----
                         if f_idx < len(fnames) - 1:
                             adj_min, adj_max = time_window.get_adjusted_delay(*FOLLOW_ACTION_DELAY)
                             await BionicDelay.sleep(adj_min, adj_max)
+
+                    # 熔断中断落账：未尝试目标计入 skipped，保证进度与结果统计一致
+                    if breaker_tripped:
+                        remaining = len(fnames) - (current_action - acc_start)
+                        if remaining > 0:
+                            result["skipped"].append({"account_id": acc_id, "fname": None, "reason": f"连续失败熔断中断（剩余 {remaining} 个未尝试）"})
+                        current_action = acc_start + len(fnames)
+                        if progress_callback:
+                            await progress_callback(current_action, total_actions)
             except Exception as e:
                 done_count = max(0, current_action - acc_start)
                 current_action = acc_start + len(fnames)
