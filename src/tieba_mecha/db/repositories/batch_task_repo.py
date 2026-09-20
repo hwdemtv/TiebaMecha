@@ -76,6 +76,13 @@ class BatchTaskRepository:
             )
             await session.commit()
             return (result.rowcount or 0) > 0
+    async def get_running_batch_tasks(self) -> list[BatchPostTask]:
+        """获取所有执行中的批量任务（派发前同计划互斥检查用）"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(BatchPostTask).where(BatchPostTask.status == "running")
+            )
+            return list(result.scalars().all())
     async def reset_running_batch_tasks(self) -> int:
         """把遗留的 running 任务复位为 pending（进程启动时的崩溃恢复）。
 

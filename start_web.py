@@ -27,6 +27,7 @@ if not _flet_key:
     print("[WARN] 未设置 TIEBA_MECHA_SECRET_KEY，已生成随机密钥（重启后失效，建议配置 .env）")
 os.environ["FLET_SECRET_KEY"] = _flet_key
 
+import uvicorn
 import uvicorn.config as _uvc
 _orig_configure_logging = _uvc.Config.configure_logging
 def _patched_configure_logging(self):
@@ -157,23 +158,48 @@ def run_app(port: int = 9006):
     os.environ["FLET_SECRET_KEY"] = secret_key
     os.environ["FLET_UPLOAD_DIR"] = upload_dir
 
-    # 构建应用参数
-    app_kwargs = {
-        "port": port,
-        "view": ft.AppView.WEB_BROWSER,
-        "upload_dir": upload_dir,
-    }
+    # 以 ASGI 模式取回 FastAPI 实例并自管 uvicorn 生命周期。
+    # 应用 startup 阶段（先于任何浏览器会话）即拉起进程级自动化：
+    # 此前 daemon 依赖首个 Web 会话登录后才启动——服务重启后若无人打开
+    # 页面，所有定时任务静默停摆（2026-09-21 空窗 17h 事故根因）。
+    asgi_app = ft.app(
+        target=main,
+        export_asgi_app=True,
+        port=port,
+        view=ft.AppView.WEB_BROWSER,
+        upload_dir=upload_dir,
+    )
 
-    if hasattr(ft, 'run'):
+    async def _start_automation_on_boot():
+        from tieba_mecha.web.runtime import AutomationManager
         try:
-            # 新版本: ft.run() 第一个参数是 target (位置参数)
-            ft.run(main, **app_kwargs)
-        except TypeError:
-            # 旧版本: 所有参数都必须是关键字参数
-            ft.run(target=main, **app_kwargs)
-    else:
-        # 更旧版本: 使用 ft.app()
-        ft.app(target=main, **app_kwargs)
+            db = await get_db()
+            await AutomationManager.ensure_started(db)
+            print("[BOOT] 进程级自动化已随服务启动（daemon + 后台循环）")
+        except Exception as e:
+            # 启动失败不阻塞 Web 服务；首个会话登录时 ensure_started 幂等重试
+            print(f"[WARN] 进程级自动化随服务启动失败: {e}")
+
+    # flet 的 FastAPI 子类传入自定义 lifespan，Starlette 在自定义 lifespan 下
+    # 忽略 on_startup 事件列表——必须包装 lifespan_context 追加启动钩子
+    import contextlib as _contextlib
+    _orig_lifespan = asgi_app.router.lifespan_context
+
+    @_contextlib.asynccontextmanager
+    async def _chained_lifespan(app):
+        async with _orig_lifespan(app):
+            await _start_automation_on_boot()
+            yield
+
+    asgi_app.router.lifespan_context = _chained_lifespan
+
+    # Windows 开发环境保留自动打开浏览器的旧行为；服务器由 systemd 托管无需
+    if sys.platform == "win32":
+        import threading as _threading
+        import webbrowser as _webbrowser
+        _threading.Timer(1.5, lambda: _webbrowser.open(f"http://127.0.0.1:{port}")).start()
+
+    uvicorn.run(asgi_app, host="0.0.0.0", port=port, log_level="warning")
 
 
 if __name__ == "__main__":

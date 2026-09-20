@@ -241,6 +241,34 @@ async def wait_spawned_batch_tasks():
         await asyncio.gather(*list(_SPAWNED_TASK_REFS), return_exceptions=True)
 
 
+def _plan_signature(accounts_json: str, fnames_json: str):
+    """发帖计划签名：账号池 + 目标池的集合。
+
+    同一计划的多个时段副本（如 daily 任务的四个分身）签名相同；
+    JSON 解析失败时退化为原文比对。"""
+    try:
+        return (
+            frozenset(json.loads(accounts_json or "[]")),
+            frozenset(json.loads(fnames_json or "[]")),
+        )
+    except (ValueError, TypeError):
+        return (accounts_json or "", fnames_json or "")
+
+
+def _find_running_same_plan(running_tasks, task):
+    """在运行中任务里找与 task 属同一发帖计划的任务，无则返回 None。
+
+    用于派发前互斥：同计划的多个时段副本并发执行会导致同账号同吧
+    短窗内重复发帖（2026-09-21 事故根因之一）。"""
+    task_sig = _plan_signature(task.accounts_json, task.fnames_json)
+    for running in running_tasks:
+        if running.id == task.id:
+            continue
+        if _plan_signature(running.accounts_json, running.fnames_json) == task_sig:
+            return running
+    return None
+
+
 async def _execute_scheduled_task(task_id: str):
     """精确触发入口（APScheduler date 触发器），once 与循环任务通用。"""
     task = await _load_batch_task(task_id)
@@ -257,6 +285,11 @@ async def _execute_scheduled_task(task_id: str):
         return
 
     db = await get_db()
+    # 同计划互斥：已有同配置任务在跑时让位，任务保持 pending 交由轮询兜底接管
+    blocked_by = _find_running_same_plan(await db.get_running_batch_tasks(), task)
+    if blocked_by is not None:
+        print(f"[{datetime.now()}] [DAEMON] 任务 {task_id} 与运行中任务 ID={blocked_by.id} 属同一发帖计划，本次触发让位")
+        return
     if not await db.claim_batch_task(task.id):
         print(f"[{datetime.now()}] [DAEMON] 任务 {task_id} 已被其他路径认领，跳过触发")
         return
@@ -268,18 +301,27 @@ async def do_batch_post_tasks():
     """轮询兜底：捞起到期的批量任务并派发执行。
 
     精确调度（date 触发器）是主路径，本轮询只兜底 daemon 宕机期间
-    错过触发的任务。认领后异步派发，长任务不再阻塞后续轮询班次。
+    错过触发的任务。每个班次最多派发 1 个任务：daemon 停摆后的积压
+    任务按轮询间隔错峰串行执行，配合同计划互斥避免同配置任务并发
+    （2026-09-21 事故：3 个积压副本同时派发，同账号同吧 1 秒双帖）。
     """
     db = await get_db()
     pending_tasks = await db.get_pending_batch_tasks()
     if not pending_tasks:
         return
 
+    running_tasks = await db.get_running_batch_tasks()
+    pending_tasks.sort(key=lambda t: (t.schedule_time or datetime.max, t.id))
     for task in pending_tasks:
+        blocked_by = _find_running_same_plan(running_tasks, task)
+        if blocked_by is not None:
+            print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 与运行中任务 ID={blocked_by.id} 属同一发帖计划，本轮询跳过")
+            continue
         if not await db.claim_batch_task(task.id):
             continue
         print(f"[{datetime.now()}] [DAEMON] 轮询兜底派发任务: ID={task.id} 贴吧={task.fname}")
         _spawn_batch_task(_run_claimed_task(str(task.id)))
+        return  # 单班次只派发一个，其余任务等下一班次错峰执行
 
 
 def _calc_next_schedule_time(task) -> datetime:
