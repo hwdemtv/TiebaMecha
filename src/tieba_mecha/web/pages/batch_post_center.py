@@ -14,6 +14,7 @@ import flet as ft
 from ..flet_compat import COLORS
 from ..utils import with_opacity
 from ..components import icons
+from ...core.ai_optimizer import AIOptimizer
 from .batch_post.log_stream import LogStream, format_log_timestamp
 
 
@@ -367,6 +368,13 @@ class BatchPostCenterPage:
             ft.DataCell(
                 ft.Row([
                     ft.IconButton(
+                        icons.EDIT_NOTE_ROUNDED,
+                        icon_color="primary",
+                        icon_size=18,
+                        tooltip="查看详情 / 修改（待执行、已暂停任务可编辑计划时间、账号池与参数）",
+                        on_click=lambda _: self.page.run_task(self._open_task_detail_dialog, t)
+                    ),
+                    ft.IconButton(
                         icons.COPY_ALL,
                         icon_color="primary",
                         icon_size=18,
@@ -494,6 +502,199 @@ class BatchPostCenterPage:
             await self.load_data()
         except Exception as e:
             self._show_snackbar(f"重新激活失败: {str(e)}", "error")
+
+    async def _open_task_detail_dialog(self, task):
+        """任务详情/编辑对话框：只读信息 + 高频修改项（改期/换号/参数）。
+
+        仅 pending/paused 任务可编辑；running 显示只读（执行中改配置会造成
+        执行流与展示不一致），completed/failed/stopped 无编辑意义（重激活/复制已有通道）。
+        """
+        editable = task.status in ("pending", "paused")
+        schedule_type = getattr(task, "schedule_type", "once") or "once"
+        st = getattr(task, "schedule_time", None)
+
+        # --- 只读信息 ---
+        def _info(label, value):
+            return ft.Row([
+                ft.Text(label, size=12, color="onSurfaceVariant", width=90),
+                ft.Text(value, size=12, selectable=True, expand=True),
+            ], spacing=8)
+
+        try:
+            fnames = json.loads(task.fnames_json) if getattr(task, "fnames_json", None) else []
+        except Exception:
+            fnames = []
+        info_rows = [
+            _info("任务ID", f"#{task.id}"),
+            _info("状态", {"pending": "待执行", "running": "运行中", "completed": "已完成",
+                          "failed": "失败", "stopped": "已停止", "paused": "已暂停"}.get(task.status, task.status)),
+            _info("进度", f"{task.progress}/{task.total}"),
+            _info("排期类型", {"once": "单次", "daily": "每天", "weekly": "每周",
+                             "interval": f"每 {getattr(task, 'interval_hours', 0) or 0} 小时"}.get(schedule_type, schedule_type)),
+            _info("目标贴吧", "、".join([f for f in fnames if f]) or (task.fname or "未指定")),
+            _info("创建时间", task.created_at.strftime("%Y-%m-%d %H:%M") if getattr(task, "created_at", None) else "-"),
+            _info("完成时间", task.completed_at.strftime("%Y-%m-%d %H:%M") if getattr(task, "completed_at", None) else "-"),
+        ]
+
+        # --- 可编辑控件 ---
+        fields = {}
+        if editable:
+            if schedule_type == "once":
+                fields["schedule"] = ft.TextField(
+                    label="计划时间（YYYY-MM-DD HH:MM）",
+                    value=st.strftime("%Y-%m-%d %H:%M") if st else "",
+                    width=260)
+            elif schedule_type in ("daily", "weekly"):
+                fields["schedule"] = ft.TextField(
+                    label="执行时刻（HH:MM）",
+                    value=st.strftime("%H:%M") if st else "",
+                    width=160)
+                if schedule_type == "weekly":
+                    day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                    fields["weekday"] = ft.Dropdown(
+                        label="星期",
+                        value=str(getattr(task, "schedule_day_of_week", 0) or 0),
+                        width=120,
+                        options=[ft.dropdown.Option(str(i), n) for i, n in enumerate(day_names)])
+
+            try:
+                current_acc_ids = set(json.loads(task.accounts_json)) if task.accounts_json else set()
+            except Exception:
+                current_acc_ids = set()
+            status_label = {"banned": "（已封禁）", "suspended": "（停用）",
+                            "expired": "（过期）", "suspended_proxy": "（代理隔离）"}
+            fields["accounts"] = ft.Column([
+                ft.Row([
+                    ft.Checkbox(
+                        label=(self._account_name_map.get(a.id, f"#{a.id}")
+                               + status_label.get(a.status, "")),
+                        value=(a.id in current_acc_ids),
+                        data=a.id,
+                        disabled=a.status in ("banned", "suspended", "expired", "suspended_proxy"),
+                    ) for a in self._accounts
+                ], wrap=True, spacing=12, run_spacing=8),
+            ], height=90, scroll=ft.ScrollMode.AUTO)
+
+            fields["total"] = ft.TextField(label="发帖数量", value=str(task.total), width=110,
+                                           keyboard_type=ft.KeyboardType.NUMBER)
+            fields["delay_min"] = ft.TextField(label="间隔Min(秒)", value=str(task.delay_min), width=110,
+                                               keyboard_type=ft.KeyboardType.NUMBER)
+            fields["delay_max"] = ft.TextField(label="间隔Max(秒)", value=str(task.delay_max), width=110,
+                                               keyboard_type=ft.KeyboardType.NUMBER)
+            fields["use_ai"] = ft.Switch(label="AI 改写正文", value=bool(task.use_ai))
+            fields["persona"] = ft.Dropdown(
+                label="AI 人格", value=task.ai_persona or "normal", width=180,
+                options=[ft.dropdown.Option(k, v.get("name", k)) for k, v in AIOptimizer.PERSONA_PROMPTS.items()])
+
+        edit_tip = ("（仅待执行、已暂停任务可编辑；目标贴吧与策略需经「复制配置」到批量发帖页调整）"
+                    if editable else "（当前状态不可编辑；失败/停止任务可用「重新激活」，配置复用「复制」）")
+
+        edit_controls = []
+        if editable:
+            edit_controls = [
+                ft.Container(content=ft.Column(
+                    [fields["schedule"]] + ([fields["weekday"]] if "weekday" in fields else []) + [
+                        ft.Text("账号池（终态账号自动被调度剔除）:", size=12, color="onSurfaceVariant"),
+                        fields["accounts"],
+                        ft.Row([fields["total"], fields["delay_min"], fields["delay_max"]], spacing=10),
+                        ft.Row([fields["use_ai"], fields["persona"]], spacing=20),
+                    ], spacing=10),
+                    padding=12, bgcolor=with_opacity(0.04, "primary"), border_radius=10),
+            ]
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"任务 #{task.id} 详情", size=16, weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=ft.Column(
+                    [ft.Column(info_rows, spacing=6),
+                     ft.Text(edit_tip, size=11, color="onSurfaceVariant"),
+                     *edit_controls],
+                    spacing=10, scroll=ft.ScrollMode.AUTO,
+                ),
+                width=560,
+            ),
+            actions=[
+                ft.TextButton("关闭", on_click=lambda _: self.page.close(dialog)),
+                *([
+                    ft.FilledButton("保存修改",
+                                    on_click=lambda _: self.page.run_task(
+                                        self._on_save_task_detail, task, dialog, fields))
+                ] if editable else []),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dialog)
+
+    async def _on_save_task_detail(self, task, dialog, fields):
+        """保存任务修改：校验 → 落库 → 重算下次时间 → 重挂精确触发器。"""
+        from ...core.daemon import calc_batch_task_resume_time, daemon_instance
+
+        try:
+            updates = {}
+            schedule_type = getattr(task, "schedule_type", "once") or "once"
+
+            # 计划时间
+            new_st_raw = (fields["schedule"].value or "").strip()
+            if schedule_type == "once":
+                try:
+                    new_st = datetime.strptime(new_st_raw, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    self._show_snackbar("计划时间格式应为 YYYY-MM-DD HH:MM", "error")
+                    return
+                if new_st <= datetime.now():
+                    self._show_snackbar("计划时间必须晚于当前时间", "error")
+                    return
+                updates["schedule_time"] = new_st
+            elif schedule_type in ("daily", "weekly"):
+                try:
+                    hh, mm = [int(x) for x in new_st_raw.split(":")]
+                    assert 0 <= hh < 24 and 0 <= mm < 60
+                except (ValueError, AssertionError):
+                    self._show_snackbar("执行时刻格式应为 HH:MM", "error")
+                    return
+                # 用今天+新时刻做载体，交由 _calc_next_schedule_time 归一到下一档
+                updates["schedule_time"] = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if schedule_type == "weekly" and "weekday" in fields:
+                    updates["schedule_day_of_week"] = int(fields["weekday"].value)
+
+            # 账号池
+            acc_ids = sorted(cb.data for cb in fields["accounts"].controls if cb.value)
+            if not acc_ids:
+                self._show_snackbar("至少勾选一个账号", "error")
+                return
+            updates["accounts_json"] = json.dumps(acc_ids)
+
+            # 数量与间隔
+            try:
+                total = int(fields["total"].value)
+                d_min = float(fields["delay_min"].value)
+                d_max = float(fields["delay_max"].value)
+            except (ValueError, TypeError):
+                self._show_snackbar("发帖数量/间隔需为数字", "error")
+                return
+            if total <= 0 or d_min < 0 or d_max < d_min:
+                self._show_snackbar("数量需>0，且 Max 间隔不小于 Min", "error")
+                return
+            updates.update(total=total, delay_min=d_min, delay_max=d_max,
+                           use_ai=bool(fields["use_ai"].value), ai_persona=fields["persona"].value)
+
+            await self.db.update_batch_task(task.id, **updates)
+
+            # 重算下次时间：paused 交给恢复时的重算，pending 立即重挂触发器
+            if task.status == "pending":
+                fresh = await self.db.get_batch_task(task.id)
+                next_time = calc_batch_task_resume_time(fresh)
+                await self.db.update_batch_task(task.id, schedule_time=next_time)
+                daemon_instance.schedule_batch_task(task.id, next_time)
+                self._show_snackbar(
+                    f"任务 #{task.id} 已更新，下次执行: {next_time.strftime('%m-%d %H:%M')}", "success")
+            else:
+                self._show_snackbar(f"任务 #{task.id} 已更新（已暂停状态，恢复时按新配置重算）", "success")
+            self.page.close(dialog)
+            await self.load_data()
+        except Exception as e:
+            self._show_snackbar(f"保存失败: {str(e)}", "error")
 
     async def _on_pause_task(self, task):
         """暂停待执行任务：置为 paused 并撤销精确触发器，恢复前不再触发。"""

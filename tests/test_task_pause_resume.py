@@ -120,3 +120,37 @@ class TestResumeTimeCalc:
         resumed = calc_batch_task_resume_time(task)
         assert resumed > now
         assert (resumed.hour, resumed.minute) == (slot.hour, slot.minute)
+
+
+@pytest.mark.asyncio
+class TestDetailEditReschedule:
+    """任务详情/编辑保存链路：改期/换号落库后，重算逻辑认新配置（2026-09-22）。"""
+
+    async def test_daily_reschedule_honors_new_time(self, db):
+        from tieba_mecha.core.daemon import _calc_next_schedule_time
+
+        task = await _make_task(db, schedule_type="daily",
+                                schedule_time=datetime.now() + timedelta(hours=5))
+        # 模拟编辑改期：新时刻 03:07（以今天为载体落库，重算归一到下一档）
+        await db.update_batch_task(
+            task.id, schedule_time=datetime.now().replace(hour=3, minute=7, second=0, microsecond=0))
+        fresh = await db.get_batch_task(task.id)
+        nxt = _calc_next_schedule_time(fresh)
+        assert nxt > datetime.now()
+        assert (nxt.hour, nxt.minute) == (3, 7)
+
+    async def test_once_reschedule_keeps_new_time(self, db):
+        task = await _make_task(db)
+        future = datetime.now().replace(second=0, microsecond=0) + timedelta(days=3)
+        await db.update_batch_task(task.id, schedule_time=future)
+        fresh = await db.get_batch_task(task.id)
+        # once 任务重算保留新计划时刻（编辑保存链路与恢复共用 calc_batch_task_resume_time）
+        assert abs((calc_batch_task_resume_time(fresh) - future).total_seconds()) < 1
+
+    async def test_account_pool_update_persists(self, db):
+        import json as _json
+
+        task = await _make_task(db, accounts_json="[1]")
+        await db.update_batch_task(task.id, accounts_json=_json.dumps([1, 5, 6]))
+        fresh = await db.get_batch_task(task.id)
+        assert _json.loads(fresh.accounts_json) == [1, 5, 6]
