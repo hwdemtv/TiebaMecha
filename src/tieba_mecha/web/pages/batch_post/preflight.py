@@ -5,7 +5,8 @@
 - "干跑预检"按钮的完整体检报告
 
 口径必须与 core/batch_post.execute_task 保持一致：
-- 终态账号（banned/suspended/expired）不参与执行 → 排除出有效账号池
+- 终态账号（TERMINAL_ACCOUNT_STATUSES：banned/suspended/expired/suspended_proxy）
+  不参与执行 → 排除出有效账号池
 - 发布次数 = post_count，上限为 min(待发物料数, Free 配额)
 - Free 版：单账号、单次 ≤3 帖、AI 关闭
 - 凌晨 1-6 点时段延迟 ×2（TimeWindowDispatcher）
@@ -18,9 +19,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ....core.auth import get_auth_manager, AuthStatus
+from ....core.batch_post import TERMINAL_ACCOUNT_STATUSES
 
-# 与引擎 _EXCLUDED_STATUSES 保持一致：完全排除出加权池的终态状态
-_TERMINAL_ACCOUNT_STATUSES = {"banned", "suspended", "expired"}
+# 单一事实源：与引擎完全一致的终态账号集合（含 suspended_proxy）
+_TERMINAL_ACCOUNT_STATUSES = TERMINAL_ACCOUNT_STATUSES
 _STATUS_LABELS = {
     "active": "可用",
     "banned": "封禁",
@@ -54,6 +56,8 @@ class PreflightReport:
     risk_factors: list[str] = field(default_factory=list)
     # 预检后的有效目标（剔除已封禁贴吧），启动时应以此为准
     effective_fnames: list[str] = field(default_factory=list)
+    # 预检后的有效账号（剔除终态账号），建任务时应以此为准
+    effective_account_ids: list[int] = field(default_factory=list)
 
     @property
     def errors(self) -> list[PreflightIssue]:
@@ -228,6 +232,8 @@ class PreflightService:
         stats["accounts_excluded"] = {k: v for k, v in by_status.items()}
         stats["accounts_no_proxy"] = no_proxy
         stats["accounts_warmup"] = warmup
+        # 建任务时应以有效账号集为准（剔除终态账号），与 effective_fnames 同口径
+        report.effective_account_ids = effective_ids
 
         if not selected:
             report.issues.append(PreflightIssue("error", "no_accounts", "未选择任何执行账号"))

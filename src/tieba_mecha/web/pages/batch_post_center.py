@@ -16,31 +16,7 @@ from ..utils import with_opacity
 from ..components import icons
 from ...core.ai_optimizer import AIOptimizer
 from .batch_post.log_stream import LogStream, format_log_timestamp
-
-
-def _format_schedule_display(task) -> str:
-    """格式化任务的调度信息显示"""
-    schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
-    schedule_time = getattr(task, 'schedule_time', None)
-
-    if schedule_type == 'once':
-        return schedule_time.strftime("%m-%d %H:%M") if schedule_time else "即时"
-    elif schedule_type == 'daily':
-        time_str = schedule_time.strftime("%H:%M") if schedule_time else "??:??"
-        cycle = getattr(task, 'cycle_count', 0) or 0
-        return f"每天 {time_str} (第{cycle+1}轮)"
-    elif schedule_type == 'weekly':
-        day_names = ["一", "二", "三", "四", "五", "六", "日"]
-        day_idx = getattr(task, 'schedule_day_of_week', 0) or 0
-        time_str = schedule_time.strftime("%H:%M") if schedule_time else "??:??"
-        cycle = getattr(task, 'cycle_count', 0) or 0
-        return f"每周{day_names[day_idx]} {time_str} (第{cycle+1}轮)"
-    elif schedule_type == 'interval':
-        hours = getattr(task, 'interval_hours', 6) or 6
-        cycle = getattr(task, 'cycle_count', 0) or 0
-        next_str = schedule_time.strftime("%m-%d %H:%M") if schedule_time else ""
-        return f"每{hours}h (第{cycle+1}轮) {next_str}"
-    return schedule_time.strftime("%m-%d %H:%M") if schedule_time else "即时"
+from .batch_post_page import _format_schedule_display  # 单源：与批量发帖页共用调度显示
 
 
 class BatchPostCenterPage:

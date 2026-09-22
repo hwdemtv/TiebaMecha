@@ -179,9 +179,6 @@ def _install_stubs():
                 "get_tactical_advice": staticmethod(lambda msg: ""),
             }),
         },
-        "tieba_mecha.core.link_manager": {
-            "SmartLinkConnector": type("SmartLinkConnector", (), {"__init__": lambda self, db=None: None}),
-        },
         "tieba_mecha.core.ai_optimizer": {
             "AIOptimizer": type("AIOptimizer", (), {}),
         },

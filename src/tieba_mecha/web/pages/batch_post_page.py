@@ -9,9 +9,8 @@ from ..utils import with_opacity
 from ..components import icons
 from ...core.account import get_account_credentials
 from ...core.batch_post import BatchPostTask, BatchPostManager
-from ...core.link_manager import SmartLinkConnector
 from ...core.ai_optimizer import AIOptimizer
-from .batch_post.launch_config import LaunchConfig, LaunchConfigError
+from .batch_post.launch_config import LaunchConfig, LaunchConfigError, calc_next_weekly
 from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport, scan_import_pairs
 
 def _format_schedule_display(task) -> str:
@@ -46,11 +45,11 @@ class BatchPostPage:
         self.on_navigate = on_navigate
         self.manager = BatchPostManager(db)
         self._is_running = False
+        self._bg_tasks = set()  # 后台执行中的即时任务强引用（防 GC，页面断开不受影响）
         self._accounts = []
         self._materials = [] # now mapped to DB MaterialPool (当前页数据)
         self._all_fnames = []
 
-        self.connector = SmartLinkConnector(db)
         self._file_picker = ft.FilePicker(
             on_result=self._on_file_result,
             on_upload=self._on_upload_progress
@@ -450,7 +449,11 @@ class BatchPostPage:
                 is_suspended = (acc.status == "suspended_proxy")
                 is_banned = (acc.status == "banned")
                 is_expired = (acc.status == "expired")
-                
+                # 终态账号不可选（与运行中心编辑对话框口径一致），并从已选集剔除
+                is_terminal = is_suspended or is_banned or is_expired
+                if is_terminal:
+                    self._selected_account_ids.discard(acc.id)
+
                 # 状态标识
                 proxy_label = "🟢 代理正常" if acc.proxy_id else "🟡 裸连警告"
                 if is_suspended: proxy_label = "🔴 代理失效"
@@ -475,7 +478,7 @@ class BatchPostPage:
                         value=acc.id in self._selected_account_ids,
                         data=acc.id,
                         on_change=self._on_account_select_change, # 修正为正确的名称
-                        disabled=is_suspended,
+                        disabled=is_terminal,
                         label_style=ft.TextStyle(size=11),
                     )
                 )
@@ -894,7 +897,7 @@ class BatchPostPage:
             extra = sum(len(g) - 1 for g in scan.duplicate_groups)
             issue_rows.append(("⚠️", f"{len(scan.duplicate_groups)} 组完全重复（去重可减少 {extra} 条，同内容重复投放易触发风控）"))
         if scan.with_links:
-            issue_rows.append(("ℹ️", f"{len(scan.with_links)} 条含链接/短链（建议导入后执行短链同步）"))
+            issue_rows.append(("ℹ️", f"{len(scan.with_links)} 条物料正文含链接（主帖应净文化，链接请填在 link_url 走楼中楼首评）"))
 
         content = ft.Column([
             ft.Text(f"共解析 {scan.total} 条，导入前请确认：", size=12, weight=ft.FontWeight.BOLD),
@@ -1021,22 +1024,6 @@ class BatchPostPage:
 
         self._update_bulk_visibility()
         await self._refresh_material_table()
-
-    async def _sync_shortlinks(self, e):
-        """手动触发向外部 API 同步并持久化短链资产"""
-        e.control.disabled = True
-        self.page.update()
-        
-        self._show_snackbar("正在从公网 API 同步短码...", "info")
-        success, msg = await self.connector.sync_shortlinks_to_db()
-        
-        if success:
-            self._show_snackbar(f"⚡ {msg}", "success")
-        else:
-            self._show_snackbar(f"❌ 同步失败: {msg}", "error")
-            
-        e.control.disabled = False
-        self.page.update()
 
     async def _on_batch_ai_rewrite_click(self, e):
         """触发选中物料或所有待发物料的批量 AI 改写"""
@@ -1167,154 +1154,6 @@ class BatchPostPage:
             ]
         )
         self.page.open(preview_dialog)
-
-    def _obfuscate_link(self, url: str) -> str:
-        """针对百度网盘链接进行零宽字符混淆防御"""
-        if "pan.baidu.com" in url:
-            # 在 domain 中间插入零宽空格 \u200b，有效降低自动化爬虫识别
-            return url.replace("pan.baidu.com", "pan.ba\u200bidu.com")
-        return url
-
-    async def _open_shortlink_dialog(self, e):
-        """显示短链选择对话框 (带搜索与状态筛选)"""
-        
-        # 1. 获取增强型短链列表
-        self._all_links = await self.connector.get_shortlinks_with_status(self.db)
-        if not self._all_links:
-            self._show_snackbar("本地数据库中未发现短码，请先点击【同步云端短码】拉取最新资产。", "error")
-            return
-
-        # 2. 状态变量
-        self._filter_status = "all"  # all / posted / unposted
-        self._search_keyword = ""
-        self._selected_links = set() # 存储 shortCode
-
-        # 3. UI 组件
-        self._search_field = ft.TextField(
-            label="搜索短码或标题...",
-            prefix_icon=icons.SEARCH,
-            on_change=self._on_shortlink_search_change,
-            text_size=13,
-            dense=True,
-            expand=True
-        )
-
-        def create_filter_button(label, status):
-            is_selected = (self._filter_status == status)
-            return ft.ElevatedButton(
-                text=label,
-                data=status,
-                on_click=self._on_shortlink_filter_change,
-                style=ft.ButtonStyle(
-                    color=COLORS.ON_PRIMARY if is_selected else COLORS.ON_SURFACE,
-                    bgcolor=COLORS.PRIMARY if is_selected else with_opacity(0.1, "onSurface"),
-                    shape=ft.RoundedRectangleBorder(radius=20),
-                ),
-                height=32,
-            )
-
-        self._filter_chips = ft.Row([
-            create_filter_button("全部", "all"),
-            create_filter_button("未发", "unposted"),
-            create_filter_button("已发", "posted"),
-        ], spacing=10)
-
-        self._link_table = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Checkbox(on_change=self._on_shortlink_select_all)),
-                ft.DataColumn(ft.Text("短码")),
-                ft.DataColumn(ft.Text("标题")),
-                ft.DataColumn(ft.Text("状态")),
-                ft.DataColumn(ft.Text("次数")),
-            ],
-            rows=[],
-            column_spacing=15,
-            data_row_min_height=40,
-        )
-
-        self._table_container = ft.Column([
-            self._link_table
-        ], scroll=ft.ScrollMode.ADAPTIVE, height=300)
-
-        # 4. 底部开关
-        overwrite_switch = ft.Switch(
-            label="覆盖现有物料池",
-            value=False,
-            label_position=ft.LabelPosition.RIGHT,
-            scale=0.8
-        )
-        direct_mode_switch = ft.Switch(
-            label="注入网盘原链模式 (直连分享)",
-            value=False,
-            label_position=ft.LabelPosition.RIGHT,
-            scale=0.8,
-            active_color="orange"
-        )
-
-        def on_confirm(_):
-            if not self._selected_links:
-                self._show_snackbar("请选择至少一个短链资产", "warning")
-                return
-
-            pairs = []
-            # 从原始列表中找到选中的数据
-            selected_data = [link for link in self._all_links if link['shortCode'] in self._selected_links]
-            
-            is_direct = direct_mode_switch.value
-            for link_data in selected_data:
-                code = link_data['shortCode']
-                seo_title = link_data.get('seoTitle') or ""
-                desc = link_data.get('description') or ""
-                original_url = link_data.get('originalUrl') or ""
-
-                if is_direct and original_url:
-                    effective_title = seo_title if seo_title else f"网盘资源分享 - {code}"
-                    # 执行混淆防御
-                    final_url = self._obfuscate_link(original_url)
-                    new_content = f"{desc}\n\n{final_url}" if desc else final_url
-                else:
-                    effective_title = seo_title if seo_title else f"主页输入【{code}】立刻查看网盘资源"
-                    new_content = f"{desc}\n\n主页搜【{code}】马上查阅" if desc else f"主页搜【{code}】马上查阅"
-                
-                pairs.append((effective_title, new_content))
-
-            async def _bg_task():
-                if overwrite_switch.value:
-                    await self.db.clear_materials()
-                added_count = await self.db.add_materials_bulk(pairs)
-                if added_count == 0:
-                    self._show_snackbar("选中的短链均已存在，无需重复注入", "info")
-                else:
-                    self._show_snackbar(f"✅ 成功注入 {added_count} 条短链物料", "success")
-                await self._refresh_material_table()
-                self.page.close(self.link_dialog)
-
-            self.page.run_task(_bg_task)
-
-        # 5. 构建对话框
-        self.link_dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(icons.LINK_ROUNDED, color="primary"), ft.Text("短链资产库精华选取")]),
-            content=ft.Container(
-                content=ft.Column([
-                    ft.Row([self._search_field]),
-                    self._filter_chips,
-                    ft.Divider(height=1),
-                    self._table_container,
-                    ft.Divider(height=1),
-                    ft.Row([overwrite_switch, direct_mode_switch], spacing=20),
-                ], tight=True, spacing=10),
-                width=550,
-            ),
-            actions=[
-                ft.TextButton("取消", on_click=lambda _: self.page.close(self.link_dialog)),
-                ft.FilledButton("确认并注入子弹袋", icon=icons.BOLT, on_click=on_confirm),
-            ],
-        )
-
-        # 初始渲染
-        await self._render_filtered_links()
-        self.page.open(self.link_dialog)
-        self.page.update()
 
     async def _open_forum_dialog(self, e):
         """直接进入火力配置主页面"""
@@ -1886,81 +1725,6 @@ class BatchPostPage:
                 await asyncio.sleep(0.5)
                 self._show_snackbar(f"已自动移除 {_local_warn_count} 个已封禁/失效贴吧", "warning")
             self.page.run_task(_delayed_warn)
-    async def _on_shortlink_search_change(self, e):
-        self._search_keyword = e.control.value.lower()
-        await self._render_filtered_links()
-
-    async def _on_shortlink_filter_change(self, e):
-        status = e.control.data
-        self._filter_status = status
-        
-        # 更新按钮样式以模拟单选卡片
-        for btn in self._filter_chips.controls:
-            is_sel = (btn.data == status)
-            btn.style.color = COLORS.ON_PRIMARY if is_sel else COLORS.ON_SURFACE
-            btn.style.bgcolor = COLORS.PRIMARY if is_sel else with_opacity(0.1, "onSurface")
-            
-        await self._render_filtered_links()
-
-    def _on_shortlink_select_all(self, e):
-        # 获取当前显示的行
-        value = e.control.value
-        for row in self._link_table.rows:
-            cb = row.cells[0].content
-            cb.value = value
-            code = cb.data
-            if value:
-                self._selected_links.add(code)
-            else:
-                self._selected_links.discard(code)
-        self.page.update()
-
-    def _on_shortlink_item_check(self, e):
-        code = e.control.data
-        if e.control.value:
-            self._selected_links.add(code)
-        else:
-            self._selected_links.discard(code)
-
-    async def _render_filtered_links(self):
-        """核心渲染逻辑：根据筛选器刷新表格"""
-        rows = []
-        for link in self._all_links:
-            # 搜索过滤
-            if self._search_keyword:
-                seo_title = link.get('seoTitle') or ""
-                if (self._search_keyword not in link.get('shortCode', '').lower() and 
-                    self._search_keyword not in seo_title.lower()):
-                    continue
-            
-            # 状态过滤
-            if self._filter_status == "posted" and link['post_count'] == 0:
-                continue
-            if self._filter_status == "unposted" and link['post_count'] > 0:
-                continue
-            
-            # 构建行
-            status_icon = "✅" if link['post_count'] > 0 else "⏳"
-            rows.append(ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Checkbox(
-                        value=(link['shortCode'] in self._selected_links),
-                        data=link['shortCode'],
-                        on_change=self._on_shortlink_item_check
-                    )),
-                    ft.DataCell(ft.Text(link['shortCode'], weight=ft.FontWeight.BOLD, size=12)),
-                    ft.DataCell(ft.Text((link.get('seoTitle') or '无标题')[:25], size=12)),
-                    ft.DataCell(ft.Text(f"{status_icon} {link['status']}", size=12)),
-                    ft.DataCell(ft.Text(str(link['post_count']), size=12)),
-                ]
-            ))
-        
-        self._link_table.rows = rows
-        try:
-            self.page.update()
-        except Exception:
-            pass
-
     def _build_material_view(self):
         """独立构建物料池 Tab 内容 - 增加搜索与批量控制"""
         material_search = ft.TextField(
@@ -2386,8 +2150,6 @@ class BatchPostPage:
                 ft.Row([
                     ft.Text("全域指令集", size=14, weight=ft.FontWeight.W_500),
                     ft.Row([
-                        ft.IconButton(icons.ADD_LINK, tooltip="从短链库选取注入物料池", on_click=self._open_shortlink_dialog, icon_color="primary"),
-                        ft.IconButton(icons.SYNC_ROUNDED, tooltip="同步云端短码到本地库", on_click=self._sync_shortlinks, icon_color="onSurfaceVariant"),
                         ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
                         ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
                         ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
@@ -2708,9 +2470,16 @@ class BatchPostPage:
     def _collect_launch_config(self) -> LaunchConfig:
         """从 UI 控件收集结构化任务配置（唯一读取点）。
 
-        解析失败抛 LaunchConfigError，由调用方转 Snackbar——
-        文案与既有拦截提示保持一致。
+        解析失败抛 LaunchConfigError，由调用方转 Snackbar；
+        文案精确指向出错的字段，不做一刀切。
         """
+        try:
+            post_count = int(self.post_count.value)
+            delay_min = float(self.min_delay.value)
+            delay_max = float(self.max_delay.value)
+        except (ValueError, TypeError) as ex:
+            raise LaunchConfigError(f"发帖数量/延迟需为数字: {ex}") from ex
+
         try:
             if self.use_schedule.value:
                 schedule_type = self.schedule_type_dropdown.value or "once"
@@ -2718,11 +2487,21 @@ class BatchPostPage:
                 now = datetime.now()
                 if schedule_type == "once":
                     st = datetime.strptime(self.schedule_time.value, "%Y-%m-%d %H:%M")
-                elif schedule_type in ("daily", "weekly"):
+                    if st <= now:
+                        raise LaunchConfigError("单次排期时间必须晚于当前时间（过去的时刻会被轮询立即执行）")
+                elif schedule_type == "daily":
                     hm = datetime.strptime(self.schedule_time_hm.value, "%H:%M")
                     st = now.replace(hour=hm.hour, minute=hm.minute, second=0, microsecond=0)
                     if st <= now:
-                        st += timedelta(days=1 if schedule_type == "daily" else 7)
+                        st += timedelta(days=1)
+                elif schedule_type == "weekly":
+                    hm = datetime.strptime(self.schedule_time_hm.value, "%H:%M")
+                    # 对齐到所选星期：P1 修复——此前只做"时刻已过 +7 天"，
+                    # 所选星期≠今天时首轮会落在错误的星期
+                    st = calc_next_weekly(
+                        now, int(self.schedule_day_of_week.value),
+                        hm.hour, hm.minute,
+                    )
                 else:  # interval 及未知类型：立即开始（或1小时后）
                     st = now + timedelta(hours=1)
             else:
@@ -2735,9 +2514,9 @@ class BatchPostPage:
                 global_fnames=list(self._temp_global_fnames),
                 strategy=self.strategy_dropdown.value,
                 pairing_mode=self.pairing_mode_dropdown.value,
-                post_count=int(self.post_count.value),
-                delay_min=float(self.min_delay.value),
-                delay_max=float(self.max_delay.value),
+                post_count=post_count,
+                delay_min=delay_min,
+                delay_max=delay_max,
                 use_ai=self.use_ai_switch.value,
                 ai_persona=self.ai_persona_dropdown.value or "normal",
                 use_schedule=self.use_schedule.value,
@@ -2750,7 +2529,7 @@ class BatchPostPage:
         except LaunchConfigError:
             raise
         except Exception as ex:
-            raise LaunchConfigError(f"定时解析失败: {str(ex)}") from ex
+            raise LaunchConfigError(f"排期解析失败: {str(ex)}") from ex
 
     async def _collect_and_preflight(self):
         """收集配置并执行预检。返回 (config, report)；配置异常时弹提示并返回 None。"""
@@ -2901,9 +2680,9 @@ class BatchPostPage:
         if not await self._show_launch_summary_dialog(report):
             return
 
-        # 使用预检后的有效目标（已剔除封禁/失效贴吧）
+        # 使用预检后的有效集合（已剔除封禁/失效贴吧与终态账号）
         fnames = report.effective_fnames
-        selected_accounts = config.account_ids
+        selected_accounts = report.effective_account_ids or config.account_ids
         pairing_mode = config.pairing_mode
         strategy = config.strategy
 
@@ -2946,21 +2725,6 @@ class BatchPostPage:
                 self._show_snackbar(f"{type_labels.get(schedule_type, '')}矩阵任务已加入全域队列", "success")
                 await self.load_data()
 
-                # --- 自动步进优化：将界面时间向后推移 ---
-                if schedule_type == "daily":
-                    next_st = st + timedelta(days=1)
-                    self.schedule_time_hm.value = next_st.strftime("%H:%M")
-                elif schedule_type == "weekly":
-                    next_st = st + timedelta(weeks=1)
-                    self.schedule_time_hm.value = next_st.strftime("%H:%M")
-                elif schedule_type == "interval":
-                    step_hours = config.interval_hours if config.interval_hours and config.interval_hours > 0 else 6
-                    next_st = st + timedelta(hours=step_hours)
-                else:
-                    next_st = st + timedelta(hours=1)
-                self.schedule_time.value = next_st.strftime("%Y-%m-%d %H:%M")
-                self.page.update()
-                
                 return
             except Exception as ex:
                 self._show_snackbar(f"定时解析失败: {str(ex)}", "error")
@@ -3013,6 +2777,16 @@ class BatchPostPage:
         except Exception:
             pass  # 持久化失败不阻塞执行
 
+        # [P2 修复] 后台派发：发帖循环不再挂在本页面会话上——
+        # 浏览器刷新/断开不再中断任务（与 daemon._spawn_batch_task 同模式，
+        # 强引用防 GC）。停止按钮经 _is_running 标志通知后台循环。
+        bg_task = asyncio.create_task(self._run_immediate_task_bg(task, db_task_id))
+        self._bg_tasks.add(bg_task)
+        bg_task.add_done_callback(self._bg_tasks.discard)
+        self._show_snackbar("矩阵任务已启动（后台执行，可随时离开本页）", "success")
+
+    async def _run_immediate_task_bg(self, task, db_task_id):
+        """即时任务的执行循环（后台协程）：UI 进度推送 + 状态落库。"""
         try:
             async for update in self.manager.execute_task(task):
                 if not self._is_running:
@@ -3062,14 +2836,17 @@ class BatchPostPage:
                     pass
         finally:
             self._is_running = False
-            self.start_btn.text = "制定矩阵任务"
-            self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
-            self.start_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
-            self.progress_bar.visible = False
-            self.start_btn.update()
-            self.progress_bar.update()
-            # 刷新任务列表以反映最终状态
-            self._refresh_task_list()
+            # 页面可能已关闭（后台执行的意义所在），UI 更新全部容错
+            try:
+                self.start_btn.text = "制定矩阵任务"
+                self.start_btn.icon = icons.PLAY_CIRCLE_FILL_ROUNDED
+                self.start_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
+                self.progress_bar.visible = False
+                self.start_btn.update()
+                self.progress_bar.update()
+                await self.load_data()
+            except Exception:
+                pass
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)

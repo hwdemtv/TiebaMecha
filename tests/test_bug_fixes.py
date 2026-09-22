@@ -139,34 +139,6 @@ class TestPostAddThreadFix:
 
 
 # ========================================================================
-# Fix 6: link_manager.py — self.client and close() removed
-# ========================================================================
-
-
-class TestLinkManagerCleanup:
-    """SmartLinkConnector should not create unused self.client or have close()."""
-
-    def test_no_self_client_in_init(self):
-        """__init__ should not set self.client."""
-        from tieba_mecha.core.link_manager import SmartLinkConnector
-        import inspect
-        init_source = inspect.getsource(SmartLinkConnector.__init__)
-        assert "self.client" not in init_source
-
-    def test_no_close_method(self):
-        """SmartLinkConnector should not have close() method."""
-        from tieba_mecha.core.link_manager import SmartLinkConnector
-        assert not hasattr(SmartLinkConnector, "close")
-
-    def test_methods_use_own_client(self):
-        """test_connection should create its own client via async with."""
-        from tieba_mecha.core.link_manager import SmartLinkConnector
-        import inspect
-        source = inspect.getsource(SmartLinkConnector.test_connection)
-        assert "async with httpx.AsyncClient()" in source
-
-
-# ========================================================================
 # Fix 7: start_web.py — no hardcoded fallback key
 # ========================================================================
 
@@ -381,32 +353,3 @@ class TestNotificationClearAllRead:
         remaining = await db.get_unread_notifications()
         assert len(remaining) == 1
         assert remaining[0].title == "t1"
-
-
-# ========================================================================
-# Integration: SmartLinkConnector works without self.client
-# ========================================================================
-
-
-class TestSmartLinkConnectorWorks:
-    """SmartLinkConnector should work properly without self.client."""
-
-    def test_instantiation_does_not_create_httpx_client(self):
-        """__init__ should not create any httpx client."""
-        mock_db = AsyncMock()
-        from tieba_mecha.core.link_manager import SmartLinkConnector
-        connector = SmartLinkConnector(mock_db)
-        # Should not have client attribute
-        assert not hasattr(connector, "client")
-
-    @pytest.mark.asyncio
-    async def test_get_active_shortlinks(self):
-        """get_active_shortlinks should work with cached data."""
-        mock_db = AsyncMock()
-        mock_db.get_setting = AsyncMock(return_value='[{"shortCode":"ABC123","seoTitle":"Test"}]')
-
-        from tieba_mecha.core.link_manager import SmartLinkConnector
-        connector = SmartLinkConnector(mock_db)
-        links = await connector.get_active_shortlinks()
-        assert len(links) == 1
-        assert links[0]["shortCode"] == "ABC123"

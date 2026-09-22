@@ -9,11 +9,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class LaunchConfigError(ValueError):
     """配置收集/解析失败（对应原页面各处 Snackbar 拦截文案）。"""
+
+
+def calc_next_weekly(now: datetime, weekday: int, hour: int, minute: int) -> datetime:
+    """计算每周任务的首次执行时刻：下一个"星期 weekday"的 hour:minute。
+
+    与 daemon._calc_next_schedule_time 的续注册对齐逻辑保持同一语义：
+    - 目标星期在今天且时刻未到 → 今天该时刻
+    - 否则 → 下一个目标星期（0=周一…6=周日）
+
+    2026-09-22 修复：此前收集逻辑只做"时刻已过则 +7 天"，所选星期与
+    今天不同时首轮会落在"今天的星期+7"而非目标星期。
+    """
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    days_ahead = (weekday - now.weekday()) % 7
+    candidate += timedelta(days=days_ahead)
+    if candidate <= now:
+        candidate += timedelta(weeks=1)
+    return candidate
 
 
 @dataclass

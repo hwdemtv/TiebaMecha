@@ -9,7 +9,6 @@ from ..components import create_gradient_button
 from ..utils import with_opacity
 from ... import __version__
 from ...core.ai_optimizer import AIOptimizer, _decrypt_api_key, _encrypt_api_key
-from ...core.link_manager import SmartLinkConnector
 from ...core.auth import get_auth_manager, AuthStatus
 from ...core.web_auth import is_password_set, set_password, check_password, clear_password
 from ...core.updater import get_update_manager
@@ -59,7 +58,6 @@ class SettingsPage:
             "delay_max": "15.0",
             "quiet_start": "01:00",
             "quiet_end": "06:00",
-            "slm_api_url": "https://s.hubinwei.top",
             "obfuscator_density": "0.1",
             "obfuscator_symbols": "true",
             "obfuscator_spacing": "true",
@@ -69,7 +67,7 @@ class SettingsPage:
         _keys = [
             "ai_api_key", "ai_base_url", "ai_model", "ai_system_prompt", "proxy_fallback",
             "heartbeat_interval", "delay_min", "delay_max", "quiet_start", "quiet_end",
-            "slm_api_url", "slm_api_key", "license_key",
+            "license_key",
             "obfuscator_density", "obfuscator_symbols", "obfuscator_spacing", "obfuscator_shuffling",
             *self._maint_config.keys(),
         ]
@@ -86,8 +84,6 @@ class SettingsPage:
         self._settings["quiet_start"] = raw["quiet_start"]
         self._settings["quiet_end"] = raw["quiet_end"]
 
-        self._settings["slm_api_url"] = raw["slm_api_url"]
-        self._settings["slm_api_key"] = raw["slm_api_key"]
 
         # 3. 加载授权配置
         self._settings["license_key"] = raw["license_key"]
@@ -166,8 +162,6 @@ class SettingsPage:
         self.delay_max_field.value = self._settings.get("delay_max", "15.0")
         self.quiet_start_field.value = self._settings.get("quiet_start", "01:00")
         self.quiet_end_field.value = self._settings.get("quiet_end", "06:00")
-        self.slm_api_url_field.value = self._settings.get("slm_api_url", "")
-        self.slm_api_key_field.value = self._settings.get("slm_api_key", "")
         
         # Web 密码状态
         if self._settings.get("web_password_set"):
@@ -248,8 +242,6 @@ class SettingsPage:
             self._create_section_title("自动化与网络 / AUTOMATION", icons.TIMER_OUTLINED),
             ft.Row([self.delay_min_field, self.delay_max_field, self.heartbeat_field], spacing=10),
             ft.Row([self.quiet_start_field, self.quiet_end_field, self.proxy_fallback_switch], spacing=10),
-            self._create_section_title("短链系统 / SHORT LINKS", icons.LINK_ROUNDED),
-            ft.Row([self.slm_api_url_field, self.slm_api_key_field], spacing=10),
         ], spacing=15, scroll=ft.ScrollMode.AUTO)
 
         # --- 2. 授权中心 ---
@@ -399,8 +391,6 @@ class SettingsPage:
         self.quiet_end_field = ft.TextField(label="静默结束", expand=True)
         # 默认关闭: 与 core/proxy.py 的 proxy_fallback 默认保持一致 (防止 IP 关联导致关联封号)
         self.proxy_fallback_switch = ft.Switch(label="代理容灾", value=False)
-        self.slm_api_url_field = ft.TextField(label="短链 API 地址", expand=True)
-        self.slm_api_key_field = ft.TextField(label="短链 API Key", password=True, can_reveal_password=True, expand=True)
         self._init_general_sec_fields()
 
     def _init_auth_fields(self):
@@ -505,7 +495,6 @@ class SettingsPage:
                 "proxy_fallback": "true" if self.proxy_fallback_switch.value else "false",
                 "heartbeat_interval": self.heartbeat_field.value, "delay_min": self.delay_min_field.value, "delay_max": self.delay_max_field.value,
                 "quiet_start": self.quiet_start_field.value, "quiet_end": self.quiet_end_field.value,
-                "slm_api_url": self.slm_api_url_field.value, "slm_api_key": self.slm_api_key_field.value,
                 "license_key": self.license_key_field.value, "obfuscator_density": str(self.obf_density_slider.value),
                 "obfuscator_symbols": "true" if self.obf_symbols_switch.value else "false",
                 "obfuscator_spacing": "true" if self.obf_spacing_switch.value else "false",
