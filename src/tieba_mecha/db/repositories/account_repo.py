@@ -159,12 +159,14 @@ class AccountRepository:
     })
 
     async def update_account_status(self, account_id: int, status: str) -> None:
-        """更新账号验证状态"""
+        """更新账号验证状态（判定为封禁时联动关闭养号开关，心跳/手动验证/发帖拦截三条路共用此收口）"""
         async with self.async_session() as session:
             account = await session.get(Account, account_id)
             if account:
                 account.status = status
                 account.last_verified = datetime.now()
+                if status == "banned" and account.is_maint_enabled:
+                    account.is_maint_enabled = False
                 await session.commit()
     async def get_account_by_id(self, account_id: int) -> Account | None:
         """根据 ID 获取单个账号（直接查询，避免全表扫描）"""
@@ -199,10 +201,13 @@ class AccountRepository:
             )
             return list(result.scalars().all())
     async def get_maint_accounts(self) -> list[Account]:
-        """获取需要执行 BioWarming 养号任务的账号"""
+        """获取需要执行 BioWarming 养号任务的账号（终态账号排除：封禁号继续养号等于给风控递证据）"""
         async with self.async_session() as session:
             result = await session.execute(
-                select(Account).where(Account.is_maint_enabled == True)
+                select(Account).where(
+                    Account.is_maint_enabled == True,
+                    Account.status.notin_(["banned", "suspended", "suspended_proxy", "expired"]),
+                )
             )
             return list(result.scalars().all())
     async def update_maint_status(self, account_id: int) -> None:

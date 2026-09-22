@@ -94,6 +94,8 @@ async def _account_heartbeat_loop(db: Database):
 
                     if not is_valid:
                         await log_warn(f"账号 [{acc.name}] 验证失败: {msg}")
+                        if status == "banned":
+                            await log_warn(f"账号 [{acc.name}] 判定为全吧封禁：养号开关已联动关闭，发帖调度池将自动剔除该账号")
                 except Exception as e:
                     await log_error(f"扫描账号 [{acc.name}] 时发生异常: {str(e)}")
 

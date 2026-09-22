@@ -30,6 +30,10 @@ _PERMISSION_DENIED: dict[tuple[int, str], str] = {}
 # 同一组合的顺延次数：首次与每第 5 次记 WARN，其余降级 INFO，避免刷屏
 _PERMISSION_SKIP_COUNT: dict[tuple[int, str], int] = {}
 
+# 账号终态状态：进入调度前必须整体剔除，不参与任何取号路径
+# （banned=全吧封禁 / suspended=停用 / expired=过期 / suspended_proxy=代理失效隔离）
+TERMINAL_ACCOUNT_STATUSES: frozenset[str] = frozenset({"banned", "suspended", "expired", "suspended_proxy"})
+
 
 def record_permission_denied(account_id: int, fname: str, reason: str) -> bool:
     """记录权限不足组合，返回是否为该组合首次出现。"""
@@ -1272,6 +1276,27 @@ class BatchPostManager:
         # 同时复用此查询结果构建 account_map，避免重复查询
         all_accounts = await self.db.get_accounts()
         account_map = {acc.id: acc for acc in all_accounts}
+
+        # [终态账号入口过滤] strict_round_robin 等轮询取号直接按 task.accounts 下标
+        # 选取，不走加权池的排除逻辑；若不在此处统一收口，封禁/停用账号会被照常派发
+        # （2026-09-21 hwdemtv3 全吧封禁后仍被 20:50 任务派发的事故根因）
+        dropped_accounts: list[str] = []
+        usable_account_ids: list[int] = []
+        for aid in task.accounts:
+            acc_info = account_map.get(aid)
+            if acc_info is None:
+                dropped_accounts.append(f"ID:{aid}(不存在)")
+            elif acc_info.status in TERMINAL_ACCOUNT_STATUSES:
+                dropped_accounts.append(f"{acc_info.user_name or acc_info.name}(状态:{acc_info.status})")
+            else:
+                usable_account_ids.append(aid)
+        if dropped_accounts:
+            await log_warn(f"任务账号池剔除终态账号: {', '.join(dropped_accounts)}")
+        if not usable_account_ids:
+            yield {"status": "failed", "msg": "任务账号全部不可用（封禁/停用/过期），请调整任务账号池"}
+            return
+        task.accounts = usable_account_ids
+
         weighted_accounts = await self._build_weighted_accounts(task, all_accounts)
 
         # 预构建贴吧→账号映射，避免循环中 N+1 查询
@@ -1326,12 +1351,12 @@ class BatchPostManager:
             # 循环偏移：每轮循环从不同贴吧开始，避免同一贴吧总是先发
             base_target_fname = fnames[(material_ptr + task.forum_offset) % len(fnames)]
             
-            # [死锁检测] 检查是否还有任何账号可用（非熔断、非封禁、非暂停代理）
+            # [死锁检测] 检查是否还有任何账号可用（非熔断、非封禁、非停用/过期/暂停代理）
             available_account_ids = [
                 aid for aid in task.accounts
                 if not captcha_breaker.is_in_cooldown(aid)
                 and not failure_breaker.is_in_cooldown(aid)
-                and (aid in account_map and account_map[aid].status != "suspended_proxy")
+                and (aid in account_map and account_map[aid].status not in TERMINAL_ACCOUNT_STATUSES)
             ]
             if not available_account_ids:
                 consecutive_no_account_skips += 1
@@ -1398,7 +1423,7 @@ class BatchPostManager:
                         continue # 该账号没坑位了，换下一个号尝试本物料
                 
                 acc = account_map.get(account_id)
-                if not acc or acc.status == "suspended_proxy":
+                if not acc or acc.status in TERMINAL_ACCOUNT_STATUSES:
                     continue
                 
                 # 独立限流等待
@@ -1546,6 +1571,12 @@ class BatchPostManager:
                                         await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="发射检测吧封")
                                     else:
                                         await self.db.update_account_status(account_id, "banned")
+                                        # 同步剔除内存态：后续物料仍会按 task.accounts/加权池
+                                        # 选中该账号，只写库不清内存等于白拦（同一任务内继续撞墙）
+                                        task.accounts = [a for a in task.accounts if a != account_id]
+                                        account_map.pop(account_id, None)
+                                        weighted_accounts = [aw for aw in weighted_accounts if aw[0] != account_id]
+                                        await log_warn(f"账号 {acc_display} 已被全吧封禁，本轮任务剩余物料不再使用该账号")
                                 
                                 # 权限不足识别：贴吧级限制 → 物料顺延（下轮轮转自然换吧）
                                 elif "没有权限" in err_msg or "权限不足" in err_msg or "无权" in err_msg:
