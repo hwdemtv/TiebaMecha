@@ -568,7 +568,10 @@ class BatchPostCenterPage:
                     ft.Checkbox(
                         label=(self._account_name_map.get(a.id, f"#{a.id}")
                                + status_label.get(a.status, "")),
-                        value=(a.id in current_acc_ids),
+                        # 终态账号禁选且不预勾：disabled 控件用户无法取消勾选，
+                        # 预勾会在保存时把封禁号混进账号池（2026-09-22 实测事故）
+                        value=(a.id in current_acc_ids
+                               and a.status not in ("banned", "suspended", "expired", "suspended_proxy")),
                         data=a.id,
                         disabled=a.status in ("banned", "suspended", "expired", "suspended_proxy"),
                     ) for a in self._accounts
@@ -628,17 +631,23 @@ class BatchPostCenterPage:
 
     @staticmethod
     def _collect_checked_account_ids(accounts_area) -> list:
-        """从账号池控件区收集勾选的账号 ID（勾选框可能直挂或嵌套在 wrap Row 内）。"""
+        """从账号池控件区收集勾选的账号 ID（勾选框可能直挂或嵌套在 wrap Row 内）。
+
+        终态（disabled）勾选框一律剔除：即使被预勾也不得进入账号池。
+        """
+        terminal_disabled = []
         checked = []
         stack = list(accounts_area.controls)
         while stack:
             ctrl = stack.pop(0)
             if isinstance(ctrl, ft.Checkbox):
-                if ctrl.value and ctrl.data is not None:
+                if ctrl.disabled:
+                    terminal_disabled.append(ctrl.data)
+                elif ctrl.value and ctrl.data is not None:
                     checked.append(ctrl.data)
             elif hasattr(ctrl, "controls"):
                 stack.extend(ctrl.controls)
-        return sorted(checked)
+        return sorted(set(checked) - set(terminal_disabled))
 
     async def _on_save_task_detail(self, task, dialog, fields):
         """保存任务修改：校验 → 落库 → 重算下次时间 → 重挂精确触发器。"""

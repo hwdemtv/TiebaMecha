@@ -37,3 +37,18 @@ def test_collect_deeply_nested_and_sorted():
 def test_collect_none_checked_returns_empty():
     area = ft.Column([ft.Row([_cb(False, 1), _cb(False, 5)], wrap=True)])
     assert BatchPostCenterPage._collect_checked_account_ids(area) == []
+
+
+def test_collect_excludes_disabled_terminal_accounts():
+    """终态账号（disabled）即使处于勾选态也必须被剔除——2026-09-22 封禁号混入账号池事故"""
+    banned = ft.Checkbox(value=True, data=5, disabled=True)  # 封禁号：禁选但被预勾
+    area = ft.Column([ft.Row([
+        _cb(True, 6), banned, _cb(True, 10),
+    ], wrap=True, spacing=12)])
+    assert BatchPostCenterPage._collect_checked_account_ids(area) == [6, 10]
+
+
+def test_collect_disabled_unchecked_still_excluded():
+    disabled_unchecked = ft.Checkbox(value=False, data=9, disabled=True)
+    area = ft.Column([ft.Row([_cb(True, 6), disabled_unchecked], wrap=True)])
+    assert BatchPostCenterPage._collect_checked_account_ids(area) == [6]
