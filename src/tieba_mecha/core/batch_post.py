@@ -1459,7 +1459,9 @@ class BatchPostManager:
                             timeout=30.0
                         )
                         if s_ai:
-                            title, content = opt_t, opt_c
+                            # 只采纳正文改写；标题保持入库规范格式——片名即检索价值，
+                            # 标题侧的长尾词注入是营销模式源头（2026-09-22 内容池整改口径）
+                            content = opt_c
                             await self.db.update_material_ai(current_material.id, title, content)
                     except Exception as ai_err:
                         await log_warn(f"AI改写失败，使用原文: {ai_err}")
