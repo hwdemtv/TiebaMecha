@@ -573,7 +573,7 @@ class BatchPostCenterPage:
                         disabled=a.status in ("banned", "suspended", "expired", "suspended_proxy"),
                     ) for a in self._accounts
                 ], wrap=True, spacing=12, run_spacing=8),
-            ], height=90, scroll=ft.ScrollMode.AUTO)
+            ], height=130, scroll=ft.ScrollMode.AUTO)
 
             fields["total"] = ft.TextField(label="发帖数量", value=str(task.total), width=110,
                                            keyboard_type=ft.KeyboardType.NUMBER)
@@ -626,6 +626,20 @@ class BatchPostCenterPage:
         )
         self.page.open(dialog)
 
+    @staticmethod
+    def _collect_checked_account_ids(accounts_area) -> list:
+        """从账号池控件区收集勾选的账号 ID（勾选框可能直挂或嵌套在 wrap Row 内）。"""
+        checked = []
+        stack = list(accounts_area.controls)
+        while stack:
+            ctrl = stack.pop(0)
+            if isinstance(ctrl, ft.Checkbox):
+                if ctrl.value and ctrl.data is not None:
+                    checked.append(ctrl.data)
+            elif hasattr(ctrl, "controls"):
+                stack.extend(ctrl.controls)
+        return sorted(checked)
+
     async def _on_save_task_detail(self, task, dialog, fields):
         """保存任务修改：校验 → 落库 → 重算下次时间 → 重挂精确触发器。"""
         from ...core.daemon import calc_batch_task_resume_time, daemon_instance
@@ -659,7 +673,7 @@ class BatchPostCenterPage:
                     updates["schedule_day_of_week"] = int(fields["weekday"].value)
 
             # 账号池
-            acc_ids = sorted(cb.data for cb in fields["accounts"].controls if cb.value)
+            acc_ids = self._collect_checked_account_ids(fields["accounts"])
             if not acc_ids:
                 self._show_snackbar("至少勾选一个账号", "error")
                 return
