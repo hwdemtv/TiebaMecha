@@ -144,6 +144,70 @@ class AIOptimizer:
             "model": model
         }
 
+    async def check_connectivity(self, api_key: str = None, base_url: str = None, model: str = None) -> dict:
+        """AI 网关连通性检查：发一次最小 chat 请求，走与改写完全相同的请求链路。
+
+        Args:
+            api_key/base_url/model: 传入时优先使用（设置页可对未保存的表单值先检后存），
+                                    为 None 时读库内配置。
+
+        Returns:
+            {ok, latency_ms, model, detail}
+        """
+        config = await self._get_config()
+        api_key = (api_key or config.get("api_key") or "").strip()
+        base_url = ((base_url or config.get("base_url") or "").strip()).rstrip("/")
+        model = (model or config.get("model") or "").strip()
+
+        if not api_key:
+            return {"ok": False, "latency_ms": 0, "model": model, "detail": "未配置 API Key"}
+        if not base_url:
+            return {"ok": False, "latency_ms": 0, "model": model, "detail": "未配置 Base URL"}
+
+        url = f"{base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "回复：OK"}],
+        }
+        started = time.monotonic()
+        try:
+            session = await self._get_session()
+            async with session.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                if resp.status == 200:
+                    reply = ""
+                    try:
+                        data = await resp.json()
+                        choices = data.get("choices") or []
+                        reply = (choices[0].get("message", {}).get("content", "") if choices else "").strip()
+                    except Exception:
+                        pass
+                    return {"ok": True, "latency_ms": latency_ms, "model": model,
+                            "detail": f"连通正常（{latency_ms}ms，模型 {model}，响应: {reply[:20] or '空'}）"}
+                detail = f"HTTP {resp.status}（{latency_ms}ms）: {(await resp.text())[:150]}"
+                if resp.status in (401, 403):
+                    detail = f"认证失败（HTTP {resp.status}，{latency_ms}ms）：API Key 无效或无权限"
+                return {"ok": False, "latency_ms": latency_ms, "model": model, "detail": detail}
+        except asyncio.TimeoutError:
+            return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000), "model": model,
+                    "detail": "连接超时（15s）：网关无响应"}
+        except Exception as ex:
+            msg = str(ex)
+            latency_ms = int((time.monotonic() - started) * 1000)
+            if "SSL" in msg or "certificate" in msg.lower():
+                detail = "SSL 证书校验失败：证书与域名不匹配或已过期（检查网关反代证书配置）"
+            elif "Cannot connect" in msg or "getaddrinfo" in msg or "resolved" in msg.lower():
+                detail = "无法连接：域名解析失败或网关不可达"
+            else:
+                detail = f"{type(ex).__name__}: {msg[:120]}"
+            return {"ok": False, "latency_ms": latency_ms, "model": model, "detail": detail}
+
     # 预设人格配置库
     PERSONA_PROMPTS = {
         "normal": {

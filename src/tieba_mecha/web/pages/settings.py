@@ -244,6 +244,7 @@ class SettingsPage:
             self._create_section_title("智谱神经网络 / AI CORE", icons.MEMORY_ROUNDED),
             ft.Row([self.ai_key_field, self.ai_url_field, self.ai_model_field], spacing=10),
             self.ai_prompt_field,
+            ft.Row([self.ai_check_btn, self.ai_check_result], spacing=10),
             self._create_section_title("自动化与网络 / AUTOMATION", icons.TIMER_OUTLINED),
             ft.Row([self.delay_min_field, self.delay_max_field, self.heartbeat_field], spacing=10),
             ft.Row([self.quiet_start_field, self.quiet_end_field, self.proxy_fallback_switch], spacing=10),
@@ -387,6 +388,10 @@ class SettingsPage:
         self.ai_url_field = ft.TextField(label="Base URL", expand=True)
         self.ai_model_field = ft.TextField(label="Model", width=150)
         self.ai_prompt_field = ft.TextField(label="System Prompt", multiline=True, min_lines=3, max_lines=6, text_size=12)
+        self.ai_check_btn = ft.TextButton("AI 连通性检查", icon=icons.NETWORK_CHECK_ROUNDED,
+                                          on_click=self._on_ai_check,
+                                          tooltip="用当前表单配置发一次最小请求，检测网关/证书/密钥是否可用")
+        self.ai_check_result = ft.Text("", size=12, color="onSurfaceVariant", expand=True)
         self.delay_min_field = ft.TextField(label="签到延迟Min", expand=True)
         self.delay_max_field = ft.TextField(label="签到延迟Max", expand=True)
         self.heartbeat_field = ft.TextField(label="检测间隔(h)", expand=True)
@@ -518,6 +523,40 @@ class SettingsPage:
             await daemon_instance.reload(self.db) # 强制刷新调度器
             self._show_snackbar("所有设置已保存", "success")
         except Exception as ex: self._show_snackbar(f"保存失败: {ex}", "error")
+
+    async def _on_ai_check(self, e):
+        """AI 连通性检查：优先用表单当前值（可对未保存配置先检后存）"""
+        btn = self.ai_check_btn
+        btn.disabled = True
+        self.ai_check_result.value = "检查中…"
+        self.ai_check_result.color = "onSurfaceVariant"
+        try:
+            btn.update(); self.ai_check_result.update()
+        except Exception:
+            pass
+        try:
+            async with AIOptimizer(self.db) as optimizer:
+                result = await optimizer.check_connectivity(
+                    api_key=(self.ai_key_field.value or "").strip() or None,
+                    base_url=(self.ai_url_field.value or "").strip() or None,
+                    model=(self.ai_model_field.value or "").strip() or None,
+                )
+        except Exception as ex:
+            result = {"ok": False, "latency_ms": 0, "model": "",
+                      "detail": f"检查异常: {type(ex).__name__}: {str(ex)[:120]}"}
+        btn.disabled = False
+        if result.get("ok"):
+            self.ai_check_result.value = f"✓ {result['detail']}"
+            self.ai_check_result.color = "green"
+            self._show_snackbar("AI 连通性正常", "success")
+        else:
+            self.ai_check_result.value = f"✗ {result.get('detail', '未知错误')}"
+            self.ai_check_result.color = COLORS.RED_ACCENT_400
+            self._show_snackbar("AI 连通性异常", "error")
+        try:
+            btn.update(); self.ai_check_result.update()
+        except Exception:
+            pass
 
     # 复用授权、更新、密码逻辑
     async def _verify_license_online(self, e):
