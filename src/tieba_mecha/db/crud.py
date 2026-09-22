@@ -190,6 +190,9 @@ class Database(
                 ("bump_account_index", "INTEGER DEFAULT 0"),
                 ("bump_last_date", "DATE DEFAULT NULL"),
                 ("task_id", "VARCHAR(50) DEFAULT NULL"),
+                ("link_url", "VARCHAR(500) DEFAULT NULL"),
+                ("link_reply_at", "DATETIME DEFAULT NULL"),
+                ("link_reply_fail_count", "INTEGER DEFAULT 0"),
             ]
             for col_name, col_type in material_migrations:
                 await self._safe_add_column(conn, "material_pool", col_name, col_type, material_cols)

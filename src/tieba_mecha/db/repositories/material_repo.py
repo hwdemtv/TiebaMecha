@@ -116,8 +116,13 @@ class MaterialRepository:
         except Exception:
             return 0
 
-    async def add_materials_bulk(self, pairs: list[tuple[str, str]]) -> int:
-        """批量添加物料，返回添加成功的条数，执行基于内容的去重逻辑"""
+    async def add_materials_bulk(self, pairs: list[tuple]) -> int:
+        """批量添加物料，返回添加成功的条数，执行基于内容的去重逻辑
+
+        Args:
+            pairs: (title, content) 或 (title, content, link_url) 三元组；
+                   link_url 为网盘链接，不进主帖，发帖成功后由带链首评发出
+        """
         if not pairs:
             return 0
 
@@ -129,7 +134,7 @@ class MaterialRepository:
             existing_contents = set()
 
             # 提取所有待添加内容的前缀用于快速匹配
-            content_prefixes = {c[:100] for _, c in pairs}
+            content_prefixes = {p[1][:100] for p in pairs}
 
             # 分批查询数据库
             for prefix_batch_start in range(0, len(content_prefixes), batch_size):
@@ -144,9 +149,11 @@ class MaterialRepository:
                     existing_contents.update(result.scalars().all())
 
             # 添加新物料
-            for t, c in pairs:
+            for pair in pairs:
+                t, c = pair[0], pair[1]
+                link_url = pair[2] if len(pair) > 2 else None
                 if c not in existing_contents:
-                    material = MaterialPool(title=t, content=c)
+                    material = MaterialPool(title=t, content=c, link_url=link_url or None)
                     session.add(material)
                     existing_contents.add(c)
                     added += 1

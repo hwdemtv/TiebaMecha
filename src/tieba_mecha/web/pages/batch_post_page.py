@@ -784,10 +784,12 @@ class BatchPostPage:
         if not c:
             self._show_snackbar("内容不可为空", "error")
             return
-        
-        await self.db.add_materials_bulk([(t, c)])
+        link = self._quick_link.value.strip() if self._quick_link.value else ""
+
+        await self.db.add_materials_bulk([(t, c, link) if link else (t, c)])
         self._quick_title.value = ""
         self._quick_content.value = ""
+        self._quick_link.value = ""
         await self._refresh_material_table()
         self._show_snackbar("成功添加一条物料录入", "success")
 
@@ -1978,7 +1980,7 @@ class BatchPostPage:
                     self._stats_text or ft.Text(""),
                     ft.IconButton(icons.REFRESH, icon_size=16, on_click=lambda _: self.page.run_task(self.load_data), tooltip="刷新物料库"),
                 ], spacing=10),
-                ft.Row([self._quick_title, self._quick_content, self._add_btn], spacing=10),
+                ft.Row([self._quick_title, self._quick_content, self._quick_link, self._add_btn], spacing=10),
                 ft.Row([
                     material_search,
                     self._material_bulk_actions,
@@ -2059,13 +2061,19 @@ class BatchPostPage:
         # 2. 物料录入与表格
         self._quick_title = ft.TextField(label="快速配置标签(可选)", expand=1, text_size=12, dense=True)
         self._quick_content = ft.TextField(
-            label="正文主段落 (将混合零宽防御)*", 
-            expand=2, 
-            text_size=12, 
+            label="正文主段落 (不写链接，链接走楼中楼)*",
+            expand=2,
+            text_size=12,
             dense=True,
             multiline=True,
             min_lines=1,
             max_lines=5
+        )
+        self._quick_link = ft.TextField(
+            label="网盘链接(选填，发帖后由矩阵号楼中楼发出)",
+            expand=2,
+            text_size=12,
+            dense=True
         )
         self._add_btn = ft.IconButton(icon=icons.ADD_BOX, icon_color="primary", on_click=self._add_material_row, tooltip="写好就塞进去")
         

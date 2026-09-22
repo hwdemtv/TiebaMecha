@@ -382,6 +382,8 @@ async def do_auto_bump_task():
     db = await get_db()
     from .batch_post import AutoBumpManager
     manager = AutoBumpManager(db)
+    # 带链首评优先于常规自顶：链接走楼中楼、主帖净文化（2026-09-22 内容池整改架构）
+    await manager.process_link_first_replies()
     await manager.process_all_candidates()
 
 async def do_behavior_audit_task():

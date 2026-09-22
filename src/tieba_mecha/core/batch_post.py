@@ -2357,6 +2357,99 @@ class AutoBumpManager:
             # 其他模式：使用 bump_count 进行轮换
             return potential_accounts[material.bump_count % len(potential_accounts)].id
 
+    # 带链首评话术库：口语化短句随机轮换，避免多帖同文引发内容相似度风控
+    LINK_REPLY_PHRASES = [
+        "链接在这，自取：{link}",
+        "补个链接：{link}",
+        "忘了说，资源在这里 {link}",
+        "需要的自取哈 {link}",
+        "放这里了 {link}",
+    ]
+
+    async def process_link_first_replies(self) -> int:
+        """带链首评：扫描发帖成功且带 link_url 的物料，由矩阵号楼中楼发出链接。
+
+        主帖净文化（链接不进主帖，规避外链删除），链接走楼中楼；
+        成功记 link_reply_at，失败累计 link_reply_fail_count 达上限放弃（帖子可能已死）。
+        返回本次成功发出的首评条数。
+        """
+        from datetime import datetime, timedelta
+        from sqlalchemy import select, and_
+        from ..db.models import MaterialPool
+
+        if (await self.db.get_setting("link_reply_enabled", "true")).lower() == "false":
+            return 0
+        try:
+            min_delay_min = int(await self.db.get_setting("link_reply_min_delay_minutes", "5"))
+            max_age_hours = int(await self.db.get_setting("link_reply_max_age_hours", "48"))
+            max_fail = int(await self.db.get_setting("link_reply_max_fail", "3"))
+        except Exception:
+            min_delay_min, max_age_hours, max_fail = 5, 48, 3
+
+        now = datetime.now()
+        async with self.db.async_session() as session:
+            stmt = select(MaterialPool).where(and_(
+                MaterialPool.status == "success",
+                MaterialPool.posted_tid != None,
+                MaterialPool.posted_tid != 0,
+                MaterialPool.link_url != None,
+                MaterialPool.link_url != "",
+                MaterialPool.link_reply_at == None,
+                MaterialPool.link_reply_fail_count < max_fail,
+                MaterialPool.posted_time != None,
+                MaterialPool.posted_time <= now - timedelta(minutes=min_delay_min),
+                MaterialPool.posted_time >= now - timedelta(hours=max_age_hours),
+            ))
+            result = await session.execute(stmt)
+            candidates = list(result.scalars().all())
+
+        if not candidates:
+            return 0
+
+        # 矩阵号池（get_matrix_accounts 已排除终态账号）；优先排除发帖原号，
+        # 无可选号回退原号自评（楼主二楼自取亦是自然行为）
+        matrix_pool = await self.db.get_matrix_accounts()
+        if not matrix_pool:
+            await log_warn(f"带链首评：{len(candidates)} 条物料待发，但矩阵号池为空，本轮跳过")
+            return 0
+
+        success_count = 0
+        for material in candidates:
+            pool_wo_poster = [a for a in matrix_pool if a.id != material.posted_account_id]
+            acc = random.choice(pool_wo_poster) if pool_wo_poster else next(
+                (a for a in matrix_pool if a.id == material.posted_account_id), None)
+            if not acc:
+                await log_warn(f"物料 [{material.id}] 带链首评跳过：矩阵池无该帖可用账号")
+                continue
+
+            reply_content = random.choice(self.LINK_REPLY_PHRASES).format(link=material.link_url)
+            ok, err = await self.post_manager.reply_to_thread(
+                acc.id, material.posted_fname, material.posted_tid, reply_content
+            )
+            if ok:
+                material.link_reply_at = now
+                success_count += 1
+                await log_info(
+                    f"物料 [{material.id}] 带链首评已发出: {acc.user_name or acc.name} @ {material.posted_fname}"
+                )
+            else:
+                material.link_reply_fail_count = (material.link_reply_fail_count or 0) + 1
+                if material.link_reply_fail_count >= max_fail:
+                    await log_warn(f"物料 [{material.id}] 带链首评放弃（连续 {max_fail} 次失败，末次: {err}）")
+                else:
+                    await log_warn(f"物料 [{material.id}] 带链首评失败({material.link_reply_fail_count}/{max_fail}): {err}")
+
+            # 逐条即时落库，避免中途异常丢状态
+            async with self.db.async_session() as session:
+                m = await session.get(MaterialPool, material.id)
+                if m:
+                    m.link_reply_at = material.link_reply_at
+                    m.link_reply_fail_count = material.link_reply_fail_count
+                    await session.commit()
+
+            await asyncio.sleep(random.uniform(20, 60))  # 首评间隔，避免批量同刻回帖
+        return success_count
+
     async def process_all_candidates(self):
         """扫描并处理所有待自顶的物料"""
         from datetime import date, datetime, timedelta

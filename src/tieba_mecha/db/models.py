@@ -250,7 +250,10 @@ class MaterialPool(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后存活检测时间")
     task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="关联批量任务ID，空表示手动录入")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="注入时间")
-    
+    link_url: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="网盘链接(不进主帖；发帖成功后由矩阵号楼中楼带链首评发出)")
+    link_reply_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="带链首评发出时间(NULL=未发出)")
+    link_reply_fail_count: Mapped[int] = mapped_column(Integer, default=0, comment="带链首评连续失败次数(达上限放弃)")
+
     __table_args__ = (
         Index("ix_material_pool_status", "status"),  # 高频筛选
         Index("ix_material_pool_created_at", "created_at"),  # 按时间排序
