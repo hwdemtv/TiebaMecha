@@ -178,6 +178,8 @@ def _install_stubs():
                 "__init__": lambda self, db=None: None,
                 "get_tactical_advice": staticmethod(lambda msg: ""),
             }),
+            # preflight.py 引擎终态集合（2026-09-22 e02d590 起从 core.batch_post 导入）
+            "TERMINAL_ACCOUNT_STATUSES": frozenset({"banned", "suspended", "expired", "suspended_proxy"}),
         },
         "tieba_mecha.core.ai_optimizer": {
             "AIOptimizer": type("AIOptimizer", (), {}),
