@@ -192,6 +192,7 @@ class Database(
                 ("task_id", "VARCHAR(50) DEFAULT NULL"),
                 ("link_url", "VARCHAR(500) DEFAULT NULL"),
                 ("link_reply_at", "DATETIME DEFAULT NULL"),
+                ("link_reply_pid", "BIGINT DEFAULT NULL"),
                 ("link_reply_fail_count", "INTEGER DEFAULT 0"),
             ]
             for col_name, col_type in material_migrations:

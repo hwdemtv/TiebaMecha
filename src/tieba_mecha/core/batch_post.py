@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 import urllib.parse
 from collections.abc import AsyncGenerator
@@ -2368,12 +2369,33 @@ class AutoBumpManager:
         "放这里了 {link}",
     ]
 
-    async def process_link_first_replies(self) -> int:
-        """带链首评：扫描发帖成功且带 link_url 的物料，由矩阵号楼中楼发出链接。
+    # 裸 https:// 外链是回复被吞的头号触发词（实测：API 成功但楼层不可见）。
+    # 去 scheme + 百度盘 ?pwd= 拆成"提取码"尾注，可读可复制但不再命中外链正则。
+    _PAN_PWD_RE = re.compile(r"(pan\.baidu\.com/s/[^?\s]+)[?&]pwd=([0-9a-zA-Z]+)")
 
-        主帖净文化（链接不进主帖，规避外链删除），链接走楼中楼；
-        成功记 link_reply_at，失败累计 link_reply_fail_count 达上限放弃（帖子可能已死）。
-        返回本次成功发出的首评条数。
+    @classmethod
+    def format_link_for_share(cls, link_url: str | None) -> str:
+        """链接改写：去掉 https:// 前缀；百度盘链接把 ?pwd= 拆成"提取码"尾注。"""
+        link = (link_url or "").strip()
+        for scheme in ("https://", "http://"):
+            if link.startswith(scheme):
+                link = link[len(scheme):]
+                break
+        m = cls._PAN_PWD_RE.match(link)
+        if m:
+            return f"{m.group(1)} 提取码 {m.group(2)}"
+        return link
+
+    async def process_link_first_replies(self) -> int:
+        """带链首评：主帖净文化（链接不进主帖，规避外链删除），链接走首评楼层。
+
+        两阶段（2026-09-23 吞评整改）：
+        1. 发送阶段——楼主自评优先（发帖号刚在该吧验证过权重，"楼主二楼自取"最自然），
+           有失败记录则轮换矩阵号；API 成功先记 link_reply_at（=已发出、待校验）。
+        2. 校验阶段——API 成功≠可见（实测被吞时 reply_num 照样 +1）：
+           发出超过校验延迟仍搜不到含链接的楼层即判定被吞，清空 link_reply_at
+           触发下轮换号重发，fail_count 累计（API 失败+被吞共用）达上限放弃。
+        返回本次发送阶段 API 成功条数。
         """
         from datetime import datetime, timedelta
         from sqlalchemy import select, and_
@@ -2389,6 +2411,17 @@ class AutoBumpManager:
             min_delay_min, max_age_hours, max_fail = 5, 48, 3
 
         now = datetime.now()
+        # 校验在前：被吞判定与换号重发同轮完成（重发节奏≈一个调度周期）；
+        # 校验延迟过滤保证本调用刚发出的首评不会被同轮误校验
+        await self._verify_link_replies(now, max_fail)
+        sent = await self._send_link_replies(now, min_delay_min, max_age_hours, max_fail)
+        return sent
+
+    async def _send_link_replies(self, now, min_delay_min: int, max_age_hours: int, max_fail: int) -> int:
+        from datetime import timedelta
+        from sqlalchemy import select, and_
+        from ..db.models import MaterialPool
+
         async with self.db.async_session() as session:
             stmt = select(MaterialPool).where(and_(
                 MaterialPool.status == "success",
@@ -2408,8 +2441,7 @@ class AutoBumpManager:
         if not candidates:
             return 0
 
-        # 矩阵号池（get_matrix_accounts 已排除终态账号）；优先排除发帖原号，
-        # 无可选号回退原号自评（楼主二楼自取亦是自然行为）
+        # 矩阵号池（get_matrix_accounts 已排除终态账号）
         matrix_pool = await self.db.get_matrix_accounts()
         if not matrix_pool:
             await log_warn(f"带链首评：{len(candidates)} 条物料待发，但矩阵号池为空，本轮跳过")
@@ -2417,25 +2449,36 @@ class AutoBumpManager:
 
         success_count = 0
         for material in candidates:
+            fail_count = material.link_reply_fail_count or 0
+            poster_acc = next((a for a in matrix_pool if a.id == material.posted_account_id), None)
             pool_wo_poster = [a for a in matrix_pool if a.id != material.posted_account_id]
-            acc = random.choice(pool_wo_poster) if pool_wo_poster else next(
-                (a for a in matrix_pool if a.id == material.posted_account_id), None)
+            # 楼主自评优先（首轮无失败记录时）；已有失败记录则按失败次数轮换矩阵号，
+            # 不再重复押注同一个号
+            if poster_acc and not fail_count:
+                acc = poster_acc
+            elif pool_wo_poster:
+                acc = pool_wo_poster[fail_count % len(pool_wo_poster)]
+            else:
+                acc = poster_acc
             if not acc:
                 await log_warn(f"物料 [{material.id}] 带链首评跳过：矩阵池无该帖可用账号")
                 continue
 
-            reply_content = random.choice(self.LINK_REPLY_PHRASES).format(link=material.link_url)
+            reply_content = random.choice(self.LINK_REPLY_PHRASES).format(
+                link=self.format_link_for_share(material.link_url)
+            )
             ok, err = await self.post_manager.reply_to_thread(
                 acc.id, material.posted_fname, material.posted_tid, reply_content
             )
             if ok:
+                # 仅记发出时间，可见性由校验阶段确认后置 link_reply_pid
                 material.link_reply_at = now
                 success_count += 1
                 await log_info(
-                    f"物料 [{material.id}] 带链首评已发出: {acc.user_name or acc.name} @ {material.posted_fname}"
+                    f"物料 [{material.id}] 带链首评已发出: {acc.user_name or acc.name} @ {material.posted_fname}（待可见性校验）"
                 )
             else:
-                material.link_reply_fail_count = (material.link_reply_fail_count or 0) + 1
+                material.link_reply_fail_count = fail_count + 1
                 if material.link_reply_fail_count >= max_fail:
                     await log_warn(f"物料 [{material.id}] 带链首评放弃（连续 {max_fail} 次失败，末次: {err}）")
                 else:
@@ -2451,6 +2494,82 @@ class AutoBumpManager:
 
             await asyncio.sleep(random.uniform(20, 60))  # 首评间隔，避免批量同刻回帖
         return success_count
+
+    async def _verify_link_replies(self, now, max_fail: int) -> int:
+        """带链首评可见性校验。返回本次确认可见条数。"""
+        from datetime import timedelta
+        from sqlalchemy import select, and_
+        from ..db.models import MaterialPool
+
+        try:
+            verify_delay_min = int(await self.db.get_setting("link_reply_verify_delay_minutes", "3"))
+        except Exception:
+            verify_delay_min = 3
+
+        async with self.db.async_session() as session:
+            stmt = select(MaterialPool).where(and_(
+                MaterialPool.status == "success",
+                MaterialPool.posted_tid != None,
+                MaterialPool.posted_tid != 0,
+                MaterialPool.link_url != None,
+                MaterialPool.link_url != "",
+                MaterialPool.link_reply_at != None,
+                MaterialPool.link_reply_pid == None,
+                MaterialPool.link_reply_fail_count < max_fail,
+                MaterialPool.link_reply_at <= now - timedelta(minutes=verify_delay_min),
+            ))
+            result = await session.execute(stmt)
+            pending = list(result.scalars().all())
+
+        confirmed = 0
+        for material in pending:
+            link_token = self.format_link_for_share(material.link_url)
+            if not link_token:
+                continue
+            ok, pid = await self._find_link_reply(material.posted_tid, link_token)
+            if not ok:
+                # 楼层查询异常（风控/网络）：不动状态，下轮再校验，避免误判被吞浪费重试
+                await log_warn(f"物料 [{material.id}] 带链首评可见性校验查询失败，本轮跳过")
+                continue
+            if pid:
+                async with self.db.async_session() as session:
+                    m = await session.get(MaterialPool, material.id)
+                    if m and m.link_reply_pid is None:
+                        m.link_reply_pid = pid
+                        await session.commit()
+                confirmed += 1
+                await log_info(f"物料 [{material.id}] 带链首评可见性确认 (pid:{pid})")
+            else:
+                # 发出已超校验延迟仍不可见 → 判定被吞，换号重发
+                async with self.db.async_session() as session:
+                    m = await session.get(MaterialPool, material.id)
+                    if m:
+                        m.link_reply_at = None
+                        m.link_reply_fail_count = (m.link_reply_fail_count or 0) + 1
+                        await session.commit()
+                new_fail = (material.link_reply_fail_count or 0) + 1
+                if new_fail >= max_fail:
+                    await log_warn(f"物料 [{material.id}] 带链首评判定被吞且达放弃上限({new_fail}/{max_fail})")
+                else:
+                    await log_warn(f"物料 [{material.id}] 带链首评发出后楼层不可见，判定被吞({new_fail}/{max_fail})，将换号重发")
+        return confirmed
+
+    async def _find_link_reply(self, tid: int, link_token: str) -> tuple[bool, int | None]:
+        """在帖子可见楼层中搜索含链接 token 的首评。
+
+        返回 (查询是否成功, 楼层pid)：查询异常返回 (False, None)；
+        查询成功但无可可见含链楼层返回 (True, None)——即被吞判定依据。
+        """
+        from .post import get_posts
+        try:
+            posts = await get_posts(self.db, tid, pn=1)
+        except Exception as e:
+            await log_warn(f"带链首评可见性校验拉取楼层失败 TID:{tid}: {e}")
+            return False, None
+        for p in posts:
+            if link_token in (p.text or ""):
+                return True, p.pid
+        return True, None
 
     async def process_all_candidates(self):
         """扫描并处理所有待自顶的物料"""
