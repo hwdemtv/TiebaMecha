@@ -28,8 +28,13 @@ async def test_batch_post_encoding_safety():
     mock_db.update_target_pool_status = AsyncMock()
     mock_db.update_material_ai = AsyncMock()
     mock_db.get_proxy = AsyncMock(return_value=None)
-    mock_db.get_accounts = AsyncMock(return_value=[MagicMock(id=1)])
+    mock_db.get_accounts = AsyncMock(return_value=[MagicMock(id=1, user_name="tester", name="tester", status="active")])
     mock_db.get_materials = AsyncMock(return_value=[mock_material])
+    # 发帖成功分支会 await 的 db 方法，缺省 auto-mock 不可 await 会误入「执行链异常」
+    mock_db.get_setting = AsyncMock(return_value="")
+    mock_db.get_active_account = AsyncMock(return_value=None)
+    mock_db.get_survival_examples = AsyncMock(return_value=[])
+    mock_db.add_batch_post_log = AsyncMock()
     
     # 模拟账号凭证
     mock_db.get_account_credentials = AsyncMock(return_value=(1, "bduss", "stoken", None, "cuid", "ua"))
@@ -42,7 +47,9 @@ async def test_batch_post_encoding_safety():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
     mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [1]
+    # 空集模拟无熔断记录/无历史发帖；需同时覆盖 scalars().all()（熔断回种）与 all()（相似度回种）
+    mock_result.scalars.return_value.all.return_value = []
+    mock_result.all.return_value = []
     mock_session.execute = AsyncMock(return_value=mock_result)
     mock_db.async_session = MagicMock(return_value=mock_session)
     
