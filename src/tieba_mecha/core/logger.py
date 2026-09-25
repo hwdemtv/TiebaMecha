@@ -45,6 +45,7 @@ class AsyncQueueHandler(logging.Handler):
         await _LOG_QUEUE.put(log_entry)
 
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
 class _FletNoiseFilter(logging.Filter):
@@ -76,7 +77,9 @@ else:
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-LOG_FILE = os.path.join(DATA_DIR, "system.log")
+# pytest 进程重定向到独立文件，避免测试桩数据污染生产 system.log
+_LOG_FILENAME = "system_test.log" if "pytest" in sys.modules else "system.log"
+LOG_FILE = os.path.join(DATA_DIR, _LOG_FILENAME)
 
 _file_handler = RotatingFileHandler(
     LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'
