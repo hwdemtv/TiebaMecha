@@ -339,7 +339,7 @@ class SettingsPage:
                     self.maint_fields["maint_autofollow_hot_max_per_acc"],
                     self.maint_fields["maint_autofollow_hot_square_cats"],
                 ], spacing=12, expand=True),
-            ], spacing=15, crossAxisAlignment=ft.CrossAxisAlignment.START),
+            ], spacing=15, vertical_alignment=ft.CrossAxisAlignment.START),
             ft.Row([
                 ft.Text("执行日志:", size=14, weight=ft.FontWeight.W_500),
                 ft.Container(expand=True),
