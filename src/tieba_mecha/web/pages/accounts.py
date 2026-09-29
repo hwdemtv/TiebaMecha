@@ -156,6 +156,12 @@ class AccountsPage:
             self.page.run_task(self._load_exception_events)
 
     def build(self) -> ft.Control:
+        # 每次导航都会重建界面（selected_index 固定为 0），交互态必须同步归零，
+        # 否则 refresh_ui 按残留的 _active_tab_index 填错列表，档案中心会空白
+        self._active_tab_index = 0
+        self._selected_ids.clear()
+        self._matrix_selected_fnames.clear()
+
         # 主标签页切换逻辑
         self.tabs = ft.Tabs(
             selected_index=0,
@@ -242,6 +248,7 @@ class AccountsPage:
 
         # 搜索与过滤栏
         search_field = ft.TextField(
+            value=self._search_text,
             hint_text="搜索账号、用户名或UID...",
             prefix_icon=icons.SEARCH,
             border_radius=10,
@@ -342,6 +349,7 @@ class AccountsPage:
         """全域战略吧库标签页"""
         # 工具栏
         self._matrix_search_field = ft.TextField(
+            value=self._matrix_search_text,
             hint_text="搜索吧名或标签...",
             prefix_icon=icons.SEARCH,
             border_radius=10,
@@ -1485,6 +1493,18 @@ class AccountsPage:
 
         # 第二步：排序
         filtered.sort(key=self._account_sort_key)
+
+        # 有账号但当前搜索/筛选无命中：显式占位，避免列表区空白被误认为数据丢失
+        if not filtered:
+            hint = f"未找到匹配的账号：搜索词 “{self._search_text}”" if self._search_text else "未找到匹配的账号，请调整筛选条件"
+            items.append(
+                ft.Container(
+                    content=ft.Text(hint, size=13, color="onSurfaceVariant"),
+                    padding=50,
+                    alignment=ft.alignment.center,
+                )
+            )
+            return items
 
         for acc in filtered:
             is_active = acc.id == self._active_id
