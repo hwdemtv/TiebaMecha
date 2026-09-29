@@ -43,6 +43,7 @@ class BatchPostCenterPage:
             show_snackbar=self._show_snackbar,
             resolve_account=self._resolve_account_name,
             with_toolbar=True,
+            default_filter="all",  # 打开即看完整流水；异常/关键仍可手动切换
         )
         # 兼容别名：拦截详情按钮复用
         self._show_rejection_detail = self._log_stream.show_rejection_detail

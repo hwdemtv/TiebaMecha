@@ -31,16 +31,23 @@ class LogStream:
     """结构化流水：卡片渲染 + 筛选缓存 + 统计 + DB 回放。"""
 
     def __init__(self, page, db=None, show_snackbar=None, resolve_account=None,
-                 with_toolbar: bool = True):
+                 with_toolbar: bool = True, default_filter: str = "key"):
         self.page = page
         self.db = db
         self._show_snackbar = show_snackbar or (lambda *a, **k: None)
         self._resolve_account = resolve_account or (lambda aid: f"账号-{aid}")
         self.raw_items: list = []          # (log_item_control, status_str)
 
+        _valid_filters = {"key", "all", "success", "error", "skipped"}
+        self._default_filter = default_filter if default_filter in _valid_filters else "key"
+
         self.log_list = ft.ListView(expand=True, spacing=5, padding=10)
         self.stats_text = ft.Text("✅0  ❌0  ⏭0", size=11, color="onSurfaceVariant",
                                   weight=ft.FontWeight.W_500)
+        if self._default_filter == "key":
+            filter_tooltip = "默认只展示异常与关键节点，切到“全部”查看完整流水"
+        else:
+            filter_tooltip = "“异常/关键”只看异常与关键节点"
         self.filter_dropdown = ft.Dropdown(
             width=120, height=48, text_size=13,
             options=[
@@ -50,8 +57,8 @@ class LogStream:
                 ft.dropdown.Option("error", "❌ 失败"),
                 ft.dropdown.Option("skipped", "⏭ 跳过"),
             ],
-            value="key",
-            tooltip="默认只展示异常与关键节点，切到“全部”查看完整流水",
+            value=self._default_filter,
+            tooltip=filter_tooltip,
             on_change=self.on_filter_change,
         )
         self.clear_btn = ft.OutlinedButton("清除流水", icon=icons.DELETE_SWEEP,
@@ -64,13 +71,13 @@ class LogStream:
     # ------------------------------------------------------------------
     @property
     def filter_value(self) -> str:
-        """当前筛选值，以下拉框为单一数据源（默认只看异常/关键节点）。"""
+        """当前筛选值，以下拉框为单一数据源（未挂载时回退实例默认值）。"""
         value = getattr(self.filter_dropdown, "value", None)
-        return value if value else "key"
+        return value if value else self._default_filter
 
     @staticmethod
     def matches_filter(status_str: str, filter_val: str) -> bool:
-        """流水条目与筛选值匹配。"key"=异常+关键节点（默认视图）。"""
+        """流水条目与筛选值匹配。"key"=异常+关键节点。"""
         if filter_val == "all":
             return True
         if filter_val == "key":
