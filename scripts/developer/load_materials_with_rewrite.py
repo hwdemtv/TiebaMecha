@@ -51,8 +51,9 @@ async def main(json_path: str):
                     res = await optimizer.optimize_post(title, content, persona="normal")
                     reason = res[3] if res and len(res) > 3 else res
                     if res and res[0]:
-                        orig_t, orig_c = title, content
-                        title, content = res[1], res[2]
+                        # 只采纳正文改写；标题保持入库的《片名》（年份）规范格式（2026-09-22 口径）
+                        orig_c = content
+                        content = res[2]
                         ai_status = "rewritten"
                         ok_cnt += 1
                     else:
