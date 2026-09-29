@@ -305,6 +305,8 @@ class SettingsPage:
         # 之后部分隐形（占位不绘制，滚动也不出现）。因此本页签必须保持紧凑
         # （≤~400px），两路自动关注左右成对并排；执行日志独立成"养号日志"页签。
         maint_tab = ft.Column([
+            # 首控件顶部间隔：页签内容区顶边会裁剪第一个带浮动标签控件的标签上半截
+            ft.Divider(height=10, color="transparent"),
             ft.Row([
                 self.maint_fields["maint_interval_hours"],
                 self.maint_fields["maint_acc_delay_min"],

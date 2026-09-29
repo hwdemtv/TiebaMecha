@@ -80,6 +80,9 @@ class PublishTabMixin:
         self._summary_card = ft.Container(content=None)
 
         form = ft.Column([
+            # 首控件顶部间隔：页签内容区顶边会裁剪第一个带浮动标签控件的标签上半截
+            # （容器 padding 挡不住，必须在滚动列内部留白——见 my_posts 同款注释）
+            ft.Container(height=10),
             self.post_account,
             self.post_forum,
             self.post_title,

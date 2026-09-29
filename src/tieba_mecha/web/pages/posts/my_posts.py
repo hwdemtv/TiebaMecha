@@ -116,6 +116,8 @@ class MyPostsTabMixin:
         # 包 padding 容器：避免下拉框标签被 Tabs 边界裁切（与发布 Tab 一致）
         return ft.Container(
             content=ft.Column([
+                # 首控件顶部间隔：容器 padding 挡不住裁切，必须在滚动列内部留白
+                ft.Container(height=10),
                 filter_bar,
                 ft.Row([self._stats_row, ft.Container(expand=True), self._check_info, self._check_progress, check_all_btn], spacing=10),
                 self._mine_list,
