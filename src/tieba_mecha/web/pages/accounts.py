@@ -1747,7 +1747,12 @@ class AccountsPage:
         for forum in forums:
             deleted_count = deleted_by_forum.get(forum.fname, 0)
             # “当天”判定需双条件：is_sign_today 可能因未触发每日重置而残留昨日状态
-            signed_today = bool(forum.is_sign_today) and forum.last_sign_date == datetime.now().date()
+            # last_sign_date 是 DateTime 列（datetime 对象），必须取 .date() 再比较，否则恒为 False
+            signed_today = (
+                bool(forum.is_sign_today)
+                and bool(forum.last_sign_date)
+                and forum.last_sign_date.date() == datetime.now().date()
+            )
             if signed_today:
                 status_label = {"success": "今日已签", "failure": "今日签到失败"}.get(forum.last_sign_status or "", "今日已签")
             else:
