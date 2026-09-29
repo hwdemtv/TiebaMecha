@@ -2042,7 +2042,7 @@ class BatchPostPage:
         
         # 4. 账号与策略
         self.strategy_dropdown = ft.Dropdown(
-            label="账号调度策略", value="round_robin", text_size=12,
+            label="账号调度策略", value="round_robin", text_size=12, dense=True,
             options=[
                 ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"),
                 ft.dropdown.Option("strict_round_robin", "严格轮询 (Strict RR)"),
@@ -2050,14 +2050,14 @@ class BatchPostPage:
             ]
         )
         self.pairing_mode_dropdown = ft.Dropdown(
-            label="文案提取模式", value="random", text_size=12,
+            label="文案提取模式", value="random", text_size=12, dense=True,
             options=[ft.dropdown.Option("random", "随机混用 (防抽混淆)"), ft.dropdown.Option("strict", "严格配对 (发多资源)")]
         )
-        # 纵向堆叠并横向拉伸，避免窄栏内互相挤压截断（expand 在 Column 里是纵向拉伸，不能用）
-        self._strategy_row = ft.Column(
+        # 两个下拉横向并排（dense 压低高度），与自顶配置同栏铺满半宽卡片，保障排期步骤一屏放下
+        self._strategy_row = ft.Row(
             [self.strategy_dropdown, self.pairing_mode_dropdown],
-            spacing=0,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.START,
         )
         
         # 4.1 自顶配置控件
@@ -2199,7 +2199,7 @@ class BatchPostPage:
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")), border_radius=10,
                 ),
             ], spacing=6),
-            height=260,
+            height=150,  # 压低高度给向导内容让位（日志自带滚动），保障排期步骤一屏显示
             padding=10,
             bgcolor=with_opacity(0.03, "surface"),
             border_radius=10,
@@ -2249,27 +2249,26 @@ class BatchPostPage:
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self._build_material_view(),
             ], expand=True, spacing=12),
-            ft.Column([
+            # 排期步骤：策略/自顶 与 发布/排期 左右双栏并排，纵向压平，保证一屏显示不滚动
+            ft.Row([
                 ft.Container(
                     content=ft.Column([
                         self._strategy_row,
-                        ft.Divider(height=5, color="transparent"),
                         ft.Text("自顶增强配置", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
                         ft.Row([self.bump_max_count_field, self.bump_cooldown_field], spacing=10),
                         ft.Row([self.bump_matrix_switch, self.bump_ai_content_switch], spacing=5),
-                        ft.Divider(height=5, color="transparent"),
                         ft.Text("自顶模式选择", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant"),
                         self.bump_mode_group,
                         self.bump_loop_container,  # 矩阵轮换配置区
                         self.bump_config_save_btn,
-                    ], spacing=10),
+                    ], spacing=8, scroll=ft.ScrollMode.ADAPTIVE),
+                    expand=1,
                     padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                 ),
                 ft.Container(
                     content=ft.Column([
-                        self.post_count,
+                        ft.Row([ft.Container(self.post_count, expand=True), self.use_schedule], spacing=10),
                         ft.Row([self.use_ai_switch, self.ai_persona_dropdown], spacing=10),
-                        ft.Row([self.use_schedule], spacing=10),
                         ft.Row([self.schedule_type_dropdown, self.reset_strategy_dropdown], spacing=10),
                         self.schedule_time,
                         ft.Row([self.schedule_time_hm, self.schedule_day_of_week], spacing=10),
@@ -2286,10 +2285,11 @@ class BatchPostPage:
                             bgcolor=with_opacity(0.08, "orange"),
                             border_radius=8,
                         ),
-                    ], spacing=10),
+                    ], spacing=8, scroll=ft.ScrollMode.ADAPTIVE),
+                    expand=1,
                     padding=15, bgcolor=with_opacity(0.05, "surface"), border_radius=12,
                 ),
-            ], expand=True, spacing=12, scroll=ft.ScrollMode.ADAPTIVE),
+            ], expand=True, spacing=15, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Column([
                 ft.Container(
                     content=ft.Column([
