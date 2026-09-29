@@ -301,6 +301,8 @@ class SettingsPage:
 
         # --- 5. 养号管理 (New) ---
         self._init_maint_fields()
+        # 两条自动关注通道并排；主列直接子控件从 15 收敛到 6——flet 0.23.2 web 端
+        # 对单个滚动 Column 超过 ~8 个直接子控件时，第 9 个起静默不绘制（占位但空白）
         maint_tab = ft.Column([
             ft.Divider(height=10, color="transparent"),
             self._create_section_title("养号行为引擎 / BIOWARMING", ft.icons.SHIELD_MOON_OUTLINED),
@@ -309,32 +311,35 @@ class SettingsPage:
                 self.maint_fields["maint_acc_delay_min"],
                 self.maint_fields["maint_acc_delay_max"]
             ], spacing=10),
-            self._create_section_title("无吧主吧自动关注 / AUTO FOLLOW", ft.icons.GROUP_ADD_ROUNDED),
-            ft.Text(
-                "开启后，养号周期内以设定概率从吧广场发现无吧主贴吧并自动关注（每轮最多 1 个），"
-                "关注的贴吧自动进入靶场池【无吧主】分组，供后续发帖选用。",
-                size=11, color="onSurfaceVariant",
-            ),
-            self.maint_autofollow_switch,
             ft.Row([
-                self.maint_fields["maint_autofollow_prob"],
-                self.maint_fields["maint_autofollow_member_min"],
-                self.maint_fields["maint_autofollow_max_per_acc"],
-            ], spacing=10),
-            self.maint_fields["maint_autofollow_square_cats"],
-            self._create_section_title("热门吧自动关注 / HOT FOLLOW", ft.icons.LOCAL_FIRE_DEPARTMENT_ROUNDED),
-            ft.Text(
-                "开启后，养号周期内以设定概率从吧广场发现人气大吧（默认 10 万成员以上）并自动关注（每轮最多 1 个，与无吧主路径互斥），"
-                "关注的贴吧自动进入靶场池【热门】分组；新号破冰关注的公域大吧同样打此标签。",
-                size=11, color="onSurfaceVariant",
-            ),
-            self.maint_autofollow_hot_switch,
-            ft.Row([
-                self.maint_fields["maint_autofollow_hot_prob"],
-                self.maint_fields["maint_autofollow_hot_member_min"],
-                self.maint_fields["maint_autofollow_hot_max_per_acc"],
-            ], spacing=10),
-            self.maint_fields["maint_autofollow_hot_square_cats"],
+                ft.Column([
+                    self._create_section_title("无吧主吧自动关注 / AUTO FOLLOW", ft.icons.GROUP_ADD_ROUNDED),
+                    ft.Text(
+                        "开启后，养号周期内以设定概率从吧广场发现无吧主贴吧并自动关注（每轮最多 1 个），"
+                        "关注的贴吧自动进入靶场池【无吧主】分组，供后续发帖选用。",
+                        size=11, color="onSurfaceVariant",
+                    ),
+                    self.maint_autofollow_switch,
+                    self.maint_fields["maint_autofollow_prob"],
+                    self.maint_fields["maint_autofollow_member_min"],
+                    self.maint_fields["maint_autofollow_max_per_acc"],
+                    self.maint_fields["maint_autofollow_square_cats"],
+                ], spacing=12, expand=True),
+                ft.Column([
+                    self._create_section_title("热门吧自动关注 / HOT FOLLOW", ft.icons.LOCAL_FIRE_DEPARTMENT_ROUNDED),
+                    ft.Text(
+                        "开启后，养号周期内以设定概率从吧广场发现人气大吧（默认 10 万成员以上）并自动关注"
+                        "（每轮最多 1 个，与无吧主路径互斥），关注的贴吧自动进入靶场池【热门】分组；"
+                        "新号破冰关注的公域大吧同样打此标签。",
+                        size=11, color="onSurfaceVariant",
+                    ),
+                    self.maint_autofollow_hot_switch,
+                    self.maint_fields["maint_autofollow_hot_prob"],
+                    self.maint_fields["maint_autofollow_hot_member_min"],
+                    self.maint_fields["maint_autofollow_hot_max_per_acc"],
+                    self.maint_fields["maint_autofollow_hot_square_cats"],
+                ], spacing=12, expand=True),
+            ], spacing=15, crossAxisAlignment=ft.CrossAxisAlignment.START),
             ft.Row([
                 ft.Text("执行日志:", size=14, weight=ft.FontWeight.W_500),
                 ft.Container(expand=True),
