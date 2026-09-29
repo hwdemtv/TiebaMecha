@@ -34,6 +34,19 @@ AUTOFOLLOW_STATE_KEY = "maint_autofollow_state"
 # 发现的无吧主吧写入靶场池时打的分组标签
 AUTOFOLLOW_GROUP = "无吧主"
 
+# 热门吧机会性关注：配置默认值（与 settings.py 的 _maint_config 保持一致）
+AUTOFOLLOW_HOT_DEFAULTS = {
+    "maint_autofollow_hot_enabled": "false",
+    "maint_autofollow_hot_prob": "0.2",
+    "maint_autofollow_hot_member_min": "100000",
+    "maint_autofollow_hot_max_per_acc": "10",
+    "maint_autofollow_hot_square_cats": "游戏|娱乐|兴趣|动漫",
+}
+# 记账键：记录每个账号已自动关注的热门吧（JSON: {account_id: [fname, ...]}）
+AUTOFOLLOW_HOT_STATE_KEY = "maint_autofollow_hot_state"
+# 关注的热门吧写入靶场池时打的分组标签
+AUTOFOLLOW_HOT_GROUP = "热门"
+
 
 class MaintManager:
     """养号维护管理器"""
@@ -103,7 +116,7 @@ class MaintManager:
                 # [Fix 5] 冷启动阈值从 <=3 调整为 <=10，更准确识别新号
                 is_cold_state = len(forum_names) <= 10
                 is_public_exploration = False
-                # 单轮单关注保证：破冰/机会性关注任一触发后，本轮不再尝试第二种
+                # 单轮单关注保证：破冰/无吧主/热门任一触发后，本轮不再尝试其他自动关注
                 followed_this_cycle = False
 
                 if not forum_names:
@@ -205,17 +218,30 @@ class MaintManager:
                                         pass
                                     if fid:
                                         await self.db.add_forum(fid=fid, fname=target_forum_name, account_id=acc_id)
+                                    # 破冰关注的是公域热门吧，入靶场池打【热门】标签
+                                    try:
+                                        await self.db.upsert_target_pools([target_forum_name], group=AUTOFOLLOW_HOT_GROUP)
+                                    except Exception as tag_err:
+                                        await log_warn(f"[BioWarming] [{target_forum_name}] 打热门标签失败: {tag_err}")
                                     await log_info(f"[BioWarming] {account_name} 破冰关注成功: {target_forum_name}")
                             except Exception as e:
                                 await log_warn(f"[BioWarming] 破冰关注异常: {str(e)}")
                             await self._human_sleep(3, 8)
 
                 # 机会性关注：低概率从吧广场发现并关注一个无吧主吧（受养号配置开关控制）
+                followed_opportunistic = False
                 if not followed_this_cycle:
                     try:
-                        await self._try_autofollow_no_bawu(client, acc_id, account_name, set(forum_names))
+                        followed_opportunistic = await self._try_autofollow_no_bawu(client, acc_id, account_name, set(forum_names))
                     except Exception as e:
                         await log_warn(f"[BioWarming] {account_name} 无吧主自动关注异常: {type(e).__name__}: {str(e)}")
+
+                # 机会性关注热门吧：低概率从吧广场发现并关注一个人气大吧（受养号配置开关控制）
+                if not followed_this_cycle and not followed_opportunistic:
+                    try:
+                        await self._try_autofollow_hot(client, acc_id, account_name, set(forum_names))
+                    except Exception as e:
+                        await log_warn(f"[BioWarming] {account_name} 热门吧自动关注异常: {type(e).__name__}: {str(e)}")
 
                 # 记录成功维护
                 await self.db.update_maint_status(acc_id)
@@ -228,10 +254,11 @@ class MaintManager:
             await log_error(f"[BioWarming] {account_name} 维护过程异常: {type(e).__name__}: {str(e)}")
             return False
 
-    async def _try_autofollow_no_bawu(self, client, acc_id: int, account_name: str, followed: set[str]):
+    async def _try_autofollow_no_bawu(self, client, acc_id: int, account_name: str, followed: set[str]) -> bool:
         """机会性关注：低概率从吧广场发现一个无吧主吧，关注后归档进靶场池【无吧主】分组。
 
         单轮最多关注 1 个；任何失败只降级为跳过，不影响主维护周期。
+        返回本轮是否实际关注成功（调用方据此执行单轮单关注收口）。
         """
         cfg = dict(AUTOFOLLOW_DEFAULTS)
         for key in cfg:
@@ -240,7 +267,7 @@ class MaintManager:
             except Exception:
                 pass
         if cfg["maint_autofollow_enabled"] != "true":
-            return
+            return False
         try:
             prob = min(max(float(cfg["maint_autofollow_prob"]), 0.0), 1.0)
             member_min = max(int(float(cfg["maint_autofollow_member_min"])), 0)
@@ -248,9 +275,9 @@ class MaintManager:
             cats = [c.strip() for c in cfg["maint_autofollow_square_cats"].split("|") if c.strip()]
         except ValueError:
             await log_warn("[BioWarming] 无吧主自动关注配置格式有误，本轮跳过")
-            return
+            return False
         if not cats or max_per_acc <= 0 or random.random() >= prob:
-            return
+            return False
 
         # 记账：该账号累计自动关注数达到上限后不再扩展
         try:
@@ -259,7 +286,7 @@ class MaintManager:
             state = {}
         ledger = state.get(str(acc_id)) or []
         if len(ledger) >= max_per_acc:
-            return
+            return False
 
         try:
             square = await client.get_square_forums(random.choice(cats), pn=random.randint(1, 5))
@@ -268,9 +295,9 @@ class MaintManager:
                 if f.fname and f.fname not in followed and not f.is_followed and f.member_num >= member_min
             ]
         except Exception:
-            return
+            return False
         if not candidates:
-            return
+            return False
 
         random.shuffle(candidates)
         for cand in candidates[:3]:
@@ -283,7 +310,7 @@ class MaintManager:
             if getattr(res, 'err', None):
                 # 关注上限/违规吧等账号级限制：本轮终止，下一轮再试
                 await log_warn(f"[BioWarming] {account_name} 关注 [{cand.fname}] 失败: {res.err}")
-                return
+                return False
             await log_info(f"[BioWarming] {account_name} 机会性关注无吧主吧 [{cand.fname}] (成员 {forum.member_num})")
             ledger.append(cand.fname)
             state[str(acc_id)] = ledger
@@ -296,7 +323,79 @@ class MaintManager:
                     await self.db.add_forum(fid=fid, fname=cand.fname, account_id=acc_id)
             except Exception as e:
                 await log_warn(f"[BioWarming] [{cand.fname}] 记账/落库失败: {type(e).__name__}: {str(e)}")
-            return
+            return True
+        return False
+
+    async def _try_autofollow_hot(self, client, acc_id: int, account_name: str, followed: set[str]) -> bool:
+        """机会性关注热门吧：低概率从吧广场发现一个人气大吧，关注后归档进靶场池【热门】分组。
+
+        与无吧主路径互斥（单轮单关注）；不筛吧主——热门大吧通常有完整吧务团队，
+        该路径目的是丰富养号画像而非发帖破防。单轮最多关注 1 个，失败只降级为跳过。
+        """
+        cfg = dict(AUTOFOLLOW_HOT_DEFAULTS)
+        for key in cfg:
+            try:
+                cfg[key] = (await self.db.get_setting(key, cfg[key])).strip() or cfg[key]
+            except Exception:
+                pass
+        if cfg["maint_autofollow_hot_enabled"] != "true":
+            return False
+        try:
+            prob = min(max(float(cfg["maint_autofollow_hot_prob"]), 0.0), 1.0)
+            member_min = max(int(float(cfg["maint_autofollow_hot_member_min"])), 0)
+            max_per_acc = int(float(cfg["maint_autofollow_hot_max_per_acc"]))
+            cats = [c.strip() for c in cfg["maint_autofollow_hot_square_cats"].split("|") if c.strip()]
+        except ValueError:
+            await log_warn("[BioWarming] 热门吧自动关注配置格式有误，本轮跳过")
+            return False
+        if not cats or max_per_acc <= 0 or random.random() >= prob:
+            return False
+
+        # 记账：该账号累计自动关注热门吧数达到上限后不再扩展
+        try:
+            state = json.loads(await self.db.get_setting(AUTOFOLLOW_HOT_STATE_KEY, "{}") or "{}")
+        except Exception:
+            state = {}
+        ledger = state.get(str(acc_id)) or []
+        if len(ledger) >= max_per_acc:
+            return False
+
+        try:
+            square = await client.get_square_forums(random.choice(cats), pn=random.randint(1, 5))
+            candidates = [
+                f for f in (square.objs if square and not getattr(square, 'err', None) else [])
+                if f.fname and f.fname not in followed and not f.is_followed and f.member_num >= member_min
+            ]
+        except Exception:
+            return False
+        if not candidates:
+            return False
+
+        random.shuffle(candidates)
+        for cand in candidates[:3]:
+            forum = await client.get_forum(cand.fname)
+            if getattr(forum, 'err', None) or forum.member_num < member_min:
+                continue
+            await self._human_sleep(3, 8)
+            # aiotieba 语义：API 失败不抛异常，错误挂在 .err 上
+            res = await client.follow_forum(cand.fname)
+            if getattr(res, 'err', None):
+                await log_warn(f"[BioWarming] {account_name} 关注热门吧 [{cand.fname}] 失败: {res.err}")
+                return False
+            await log_info(f"[BioWarming] {account_name} 机会性关注热门吧 [{cand.fname}] (成员 {forum.member_num})")
+            ledger.append(cand.fname)
+            state[str(acc_id)] = ledger
+            try:
+                await self.db.set_setting(AUTOFOLLOW_HOT_STATE_KEY, json.dumps(state, ensure_ascii=False))
+                await self.db.upsert_target_pools([cand.fname], group=AUTOFOLLOW_HOT_GROUP)
+                # 同步落库 forum 表：否则该吧不参与签到，账号详情关注数也与实际不符
+                fid = getattr(forum, 'fid', 0) or 0
+                if fid:
+                    await self.db.add_forum(fid=fid, fname=cand.fname, account_id=acc_id)
+            except Exception as e:
+                await log_warn(f"[BioWarming] [{cand.fname}] 记账/落库失败: {type(e).__name__}: {str(e)}")
+            return True
+        return False
 
     async def _human_sleep(self, min_s: float, max_s: float):
         """对数正态分布停顿 — 大量短停顿 + 偶尔长停顿，模拟真人行为节奏"""

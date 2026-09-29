@@ -38,6 +38,12 @@ class SettingsPage:
             "maint_autofollow_member_min": "500",
             "maint_autofollow_max_per_acc": "10",
             "maint_autofollow_square_cats": "游戏|娱乐|兴趣|动漫",
+            # 热门吧机会性关注（与 core/maintenance.py 的 AUTOFOLLOW_HOT_DEFAULTS 保持一致）
+            "maint_autofollow_hot_enabled": "false",
+            "maint_autofollow_hot_prob": "0.2",
+            "maint_autofollow_hot_member_min": "100000",
+            "maint_autofollow_hot_max_per_acc": "10",
+            "maint_autofollow_hot_square_cats": "游戏|娱乐|兴趣|动漫",
         }
         
         # 守护任务状态
@@ -209,6 +215,7 @@ class SettingsPage:
             field.value = self._maint_config.get(key, "")
         # Switch 的 value 是 bool，不进 maint_fields 字符串循环
         self.maint_autofollow_switch.value = self._maint_config.get("maint_autofollow_enabled") == "true"
+        self.maint_autofollow_hot_switch.value = self._maint_config.get("maint_autofollow_hot_enabled") == "true"
 
         # 守护任务页签
         self.daemon_container.controls = self._build_daemon_cards()
@@ -315,6 +322,19 @@ class SettingsPage:
                 self.maint_fields["maint_autofollow_max_per_acc"],
             ], spacing=10),
             self.maint_fields["maint_autofollow_square_cats"],
+            self._create_section_title("热门吧自动关注 / HOT FOLLOW", ft.icons.LOCAL_FIRE_DEPARTMENT_ROUNDED),
+            ft.Text(
+                "开启后，养号周期内以设定概率从吧广场发现人气大吧（默认 10 万成员以上）并自动关注（每轮最多 1 个，与无吧主路径互斥），"
+                "关注的贴吧自动进入靶场池【热门】分组；新号破冰关注的公域大吧同样打此标签。",
+                size=11, color="onSurfaceVariant",
+            ),
+            self.maint_autofollow_hot_switch,
+            ft.Row([
+                self.maint_fields["maint_autofollow_hot_prob"],
+                self.maint_fields["maint_autofollow_hot_member_min"],
+                self.maint_fields["maint_autofollow_hot_max_per_acc"],
+            ], spacing=10),
+            self.maint_fields["maint_autofollow_hot_square_cats"],
             ft.Row([
                 ft.Text("执行日志:", size=14, weight=ft.FontWeight.W_500),
                 ft.Container(expand=True),
@@ -434,8 +454,13 @@ class SettingsPage:
             "maint_autofollow_member_min": ft.TextField(label="吧人数下限", expand=True),
             "maint_autofollow_max_per_acc": ft.TextField(label="单账号关注上限", expand=True),
             "maint_autofollow_square_cats": ft.TextField(label="吧广场分类(|分隔)", expand=True),
+            "maint_autofollow_hot_prob": ft.TextField(label="热门触发概率(0~1)", expand=True),
+            "maint_autofollow_hot_member_min": ft.TextField(label="热门吧人数下限", expand=True),
+            "maint_autofollow_hot_max_per_acc": ft.TextField(label="热门单账号关注上限", expand=True),
+            "maint_autofollow_hot_square_cats": ft.TextField(label="热门吧广场分类(|分隔)", expand=True),
         }
         self.maint_autofollow_switch = ft.Switch(label="自动关注无吧主吧", value=False)
+        self.maint_autofollow_hot_switch = ft.Switch(label="自动关注热门吧", value=False)
         from ..components.log_stream import LogStreamView
         self.log_stream = LogStreamView(
             filter_fn=lambda e: "[BioWarming]" in e.get("message", ""),
@@ -515,6 +540,11 @@ class SettingsPage:
                 "maint_autofollow_member_min": self.maint_fields["maint_autofollow_member_min"].value,
                 "maint_autofollow_max_per_acc": self.maint_fields["maint_autofollow_max_per_acc"].value,
                 "maint_autofollow_square_cats": self.maint_fields["maint_autofollow_square_cats"].value,
+                "maint_autofollow_hot_enabled": "true" if self.maint_autofollow_hot_switch.value else "false",
+                "maint_autofollow_hot_prob": self.maint_fields["maint_autofollow_hot_prob"].value,
+                "maint_autofollow_hot_member_min": self.maint_fields["maint_autofollow_hot_member_min"].value,
+                "maint_autofollow_hot_max_per_acc": self.maint_fields["maint_autofollow_hot_max_per_acc"].value,
+                "maint_autofollow_hot_square_cats": self.maint_fields["maint_autofollow_hot_square_cats"].value,
             }
             await self.db.set_settings_bulk(config)
             await daemon_instance.reload(self.db) # 强制刷新调度器
