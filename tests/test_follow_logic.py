@@ -577,21 +577,35 @@ class TestFailureBreakerRenewal:
         breaker = FailureCircuitBreaker(max_consecutive_failures=3, base_cooldown=30)
         await breaker.load()
 
-        # 首次触发：登记一次历史，档位 1（base_cooldown × 1 = 30 分钟）
-        for _ in range(3):
-            triggered = await breaker.record_failure(1)
-        assert triggered is True
-        assert len(breaker._trigger_history[1]) == 1
-        assert breaker._breaker_duration[1] == 30
+        # 可控假时钟：Windows 上 time.time() 分辨率有限，首触发与续期在同一刻度
+        # 内完成会算出 renewed == first_until，使严格 > 断言偶发翻车
+        class _FakeClock:
+            def __init__(self):
+                self.t = time.time()
 
-        first_until = breaker._breaker_until[1]
+            def time(self):
+                return self.t
 
-        # 熔断期内继续失败：仍返回触发，但历史不增、档位不升，仅顺延到期时间
-        for _ in range(2):
-            assert await breaker.record_failure(1) is True
-        assert len(breaker._trigger_history[1]) == 1, "续期不应重复登记触发历史"
-        assert breaker._breaker_duration[1] == 30, "续期不应升级冷却档位"
-        assert breaker._breaker_until[1] > first_until, "续期应顺延熔断到期时间"
+        clock = _FakeClock()
+        with patch("tieba_mecha.core.batch_post.time", clock):
+            # 首次触发：登记一次历史，档位 1（base_cooldown × 1 = 30 分钟）
+            for _ in range(3):
+                triggered = await breaker.record_failure(1)
+            assert triggered is True
+            assert len(breaker._trigger_history[1]) == 1
+            assert breaker._breaker_duration[1] == 30
+
+            first_until = breaker._breaker_until[1]
+
+            # 时钟推进 1 分钟，模拟熔断期内的后续失败
+            clock.t += 60
+
+            # 熔断期内继续失败：仍返回触发，但历史不增、档位不升，仅顺延到期时间
+            for _ in range(2):
+                assert await breaker.record_failure(1) is True
+            assert len(breaker._trigger_history[1]) == 1, "续期不应重复登记触发历史"
+            assert breaker._breaker_duration[1] == 30, "续期不应升级冷却档位"
+            assert breaker._breaker_until[1] > first_until, "续期应顺延熔断到期时间"
 
     @pytest.mark.asyncio
     async def test_retrip_after_expiry_escalates(self):
