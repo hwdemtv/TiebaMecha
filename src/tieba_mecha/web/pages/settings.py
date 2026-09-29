@@ -34,13 +34,13 @@ class SettingsPage:
             "maint_interval_hours": "4",
             # 无吧主吧机会性关注（与 core/maintenance.py 的 AUTOFOLLOW_DEFAULTS 保持一致）
             "maint_autofollow_enabled": "false",
-            "maint_autofollow_prob": "0.2",
+            "maint_autofollow_prob": "0.15",
             "maint_autofollow_member_min": "500",
             "maint_autofollow_max_per_acc": "10",
             "maint_autofollow_square_cats": "游戏|娱乐|兴趣|动漫",
             # 热门吧机会性关注（与 core/maintenance.py 的 AUTOFOLLOW_HOT_DEFAULTS 保持一致）
             "maint_autofollow_hot_enabled": "false",
-            "maint_autofollow_hot_prob": "0.2",
+            "maint_autofollow_hot_prob": "0.15",
             "maint_autofollow_hot_member_min": "100000",
             "maint_autofollow_hot_max_per_acc": "10",
             "maint_autofollow_hot_square_cats": "游戏|娱乐|兴趣|动漫",
@@ -312,7 +312,7 @@ class SettingsPage:
             ], spacing=10),
             self._create_section_title("自动关注 / AUTO FOLLOW（左：无吧主吧 · 右：热门吧）", ft.icons.GROUP_ADD_ROUNDED),
             ft.Text(
-                "开启后养号周期内以设定概率从吧广场发现目标吧并自动关注（两路每轮最多各 1 个且互斥），"
+                "开启后养号周期内以设定概率从吧广场发现目标吧并自动关注（两路独立判定，每路每轮最多 1 个），"
                 "分别进入靶场池【无吧主】/【热门】分组。",
                 size=11, color="onSurfaceVariant",
             ),

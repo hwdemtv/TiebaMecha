@@ -379,8 +379,8 @@ class TestAutofollowHot:
         db.add_forum.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_no_bawu_follow_blocks_hot_same_cycle(self):
-        """单轮单关注：无吧主路径本轮已关注时，热门路径不再执行（走真实 run_maint_cycle）。"""
+    async def test_no_bawu_and_hot_independent_same_cycle(self):
+        """两路独立掷骰：无吧主命中后热门仍执行（互斥已解除，各路每轮最多 1 个）。"""
         mock_db = MagicMock()
         mock_db.update_maint_status = AsyncMock()
         mock_db.get_account_by_id = AsyncMock(return_value=MagicMock(user_name="test_user", name="test_acc"))
@@ -407,7 +407,7 @@ class TestAutofollowHot:
 
         assert result is True
         mock_nb.assert_awaited_once()
-        mock_hot.assert_not_awaited()
+        mock_hot.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_icebreak_follow_tags_hot_group(self):

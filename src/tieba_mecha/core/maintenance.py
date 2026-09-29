@@ -24,7 +24,7 @@ DEFAULT_PUBLIC_FORUMS = ["贴吧", "王者荣耀", "原神", "电脑玩家", "�
 # 无吧主吧机会性关注：配置默认值（与 settings.py 的 _maint_config 保持一致）
 AUTOFOLLOW_DEFAULTS = {
     "maint_autofollow_enabled": "false",
-    "maint_autofollow_prob": "0.2",
+    "maint_autofollow_prob": "0.15",
     "maint_autofollow_member_min": "500",
     "maint_autofollow_max_per_acc": "10",
     "maint_autofollow_square_cats": "游戏|娱乐|兴趣|动漫",
@@ -37,7 +37,7 @@ AUTOFOLLOW_GROUP = "无吧主"
 # 热门吧机会性关注：配置默认值（与 settings.py 的 _maint_config 保持一致）
 AUTOFOLLOW_HOT_DEFAULTS = {
     "maint_autofollow_hot_enabled": "false",
-    "maint_autofollow_hot_prob": "0.2",
+    "maint_autofollow_hot_prob": "0.15",
     "maint_autofollow_hot_member_min": "100000",
     "maint_autofollow_hot_max_per_acc": "10",
     "maint_autofollow_hot_square_cats": "游戏|娱乐|兴趣|动漫",
@@ -228,16 +228,12 @@ class MaintManager:
                                 await log_warn(f"[BioWarming] 破冰关注异常: {str(e)}")
                             await self._human_sleep(3, 8)
 
-                # 机会性关注：低概率从吧广场发现并关注一个无吧主吧（受养号配置开关控制）
-                followed_opportunistic = False
+                # 机会性关注：无吧主与热门两路各自独立掷骰、每路每轮最多 1 个
                 if not followed_this_cycle:
                     try:
-                        followed_opportunistic = await self._try_autofollow_no_bawu(client, acc_id, account_name, set(forum_names))
+                        await self._try_autofollow_no_bawu(client, acc_id, account_name, set(forum_names))
                     except Exception as e:
                         await log_warn(f"[BioWarming] {account_name} 无吧主自动关注异常: {type(e).__name__}: {str(e)}")
-
-                # 机会性关注热门吧：低概率从吧广场发现并关注一个人气大吧（受养号配置开关控制）
-                if not followed_this_cycle and not followed_opportunistic:
                     try:
                         await self._try_autofollow_hot(client, acc_id, account_name, set(forum_names))
                     except Exception as e:
@@ -329,8 +325,8 @@ class MaintManager:
     async def _try_autofollow_hot(self, client, acc_id: int, account_name: str, followed: set[str]) -> bool:
         """机会性关注热门吧：低概率从吧广场发现一个人气大吧，关注后归档进靶场池【热门】分组。
 
-        与无吧主路径互斥（单轮单关注）；不筛吧主——热门大吧通常有完整吧务团队，
-        该路径目的是丰富养号画像而非发帖破防。单轮最多关注 1 个，失败只降级为跳过。
+        与无吧主路径相互独立（各自掷骰、每路每轮最多 1 个）；不筛吧主——热门大吧
+        通常有完整吧务团队，该路径目的是丰富养号画像而非发帖破防。单轮最多关注 1 个，失败只降级为跳过。
         """
         cfg = dict(AUTOFOLLOW_HOT_DEFAULTS)
         for key in cfg:
