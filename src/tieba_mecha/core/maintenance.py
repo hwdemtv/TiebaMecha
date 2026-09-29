@@ -290,8 +290,12 @@ class MaintManager:
             try:
                 await self.db.set_setting(AUTOFOLLOW_STATE_KEY, json.dumps(state, ensure_ascii=False))
                 await self.db.upsert_target_pools([cand.fname], group=AUTOFOLLOW_GROUP)
+                # 同步落库 forum 表：否则该吧不参与签到，账号详情关注数也与实际不符
+                fid = getattr(forum, 'fid', 0) or 0
+                if fid:
+                    await self.db.add_forum(fid=fid, fname=cand.fname, account_id=acc_id)
             except Exception as e:
-                await log_warn(f"[BioWarming] [{cand.fname}] 记账/入靶场池失败: {type(e).__name__}: {str(e)}")
+                await log_warn(f"[BioWarming] [{cand.fname}] 记账/落库失败: {type(e).__name__}: {str(e)}")
             return
 
     async def _human_sleep(self, min_s: float, max_s: float):

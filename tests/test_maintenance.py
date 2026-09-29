@@ -23,6 +23,7 @@ def _make_db(settings: dict | None = None):
     db.get_setting = AsyncMock(side_effect=get_setting)
     db.set_setting = AsyncMock(side_effect=set_setting)
     db.upsert_target_pools = AsyncMock(return_value=1)
+    db.add_forum = AsyncMock(return_value=MagicMock())
     return db, store, saved
 
 
@@ -177,7 +178,7 @@ class TestAutofollowNoBawu:
 
     @pytest.mark.asyncio
     async def test_follows_no_bawu_forum_and_records(self):
-        """开关开启+概率命中时：关注无吧主吧、写记账、入靶场池无吧主分组。"""
+        """开关开启+概率命中时：关注无吧主吧、写记账、入靶场池无吧主分组、落库 forum 表。"""
         db, _, saved = _make_db({
             "maint_autofollow_enabled": "true",
             "maint_autofollow_prob": "1.0",
@@ -186,7 +187,7 @@ class TestAutofollowNoBawu:
         cand = MagicMock(fname="无主吧", is_followed=False, member_num=2000)
         client = MagicMock()
         client.get_square_forums = AsyncMock(return_value=MagicMock(err=None, objs=[cand]))
-        client.get_forum = AsyncMock(return_value=MagicMock(err=None, has_bawu=False, member_num=2000))
+        client.get_forum = AsyncMock(return_value=MagicMock(err=None, fid=12345, has_bawu=False, member_num=2000))
         client.follow_forum = AsyncMock(return_value=MagicMock(err=None))
 
         with patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()):
@@ -195,6 +196,8 @@ class TestAutofollowNoBawu:
         client.follow_forum.assert_awaited_once_with("无主吧")
         db.upsert_target_pools.assert_awaited_once_with(["无主吧"], group="无吧主")
         assert json.loads(saved["maint_autofollow_state"]) == {"1": ["无主吧"]}
+        # 关注成功必须同步落库 forum 表，否则该吧不参与签到
+        db.add_forum.assert_awaited_once_with(fid=12345, fname="无主吧", account_id=1)
 
     @pytest.mark.asyncio
     async def test_skips_forum_with_bawu(self):
@@ -262,6 +265,7 @@ class TestAutofollowNoBawu:
 
         assert saved == {}
         db.upsert_target_pools.assert_not_called()
+        db.add_forum.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_invalid_config_is_noop(self):
