@@ -136,17 +136,7 @@ class ProxyPage:
             )
             return items
 
-        search_lower = self._search_text.lower()
-        for p in self._proxies:
-            # 过滤逻辑
-            if search_lower:
-                match = (
-                    search_lower in p.host.lower() or
-                    search_lower in str(p.port) or
-                    search_lower in p.protocol.lower()
-                )
-                if not match: continue
-
+        for p in self._filtered_proxies():
             is_active = p.is_active
             is_selected = p.id in self._selected_ids
 
@@ -384,9 +374,24 @@ class ProxyPage:
             self._selected_ids.discard(pid)
         self._update_bulk_bar()
 
+    def _filtered_proxies(self) -> list:
+        """当前搜索条件下的可见节点——列表渲染与全选共用同一口径"""
+        search_lower = self._search_text.lower()
+        matched = []
+        for p in self._proxies:
+            if search_lower and not (
+                search_lower in p.host.lower()
+                or search_lower in str(p.port)
+                or search_lower in p.protocol.lower()
+            ):
+                continue
+            matched.append(p)
+        return matched
+
     def _toggle_select_all(self, e):
+        # 仅选择当前过滤后的节点（与账号页口径一致）
         if e.control.value:
-            self._selected_ids = {p.id for p in self._proxies}
+            self._selected_ids = {p.id for p in self._filtered_proxies()}
         else:
             self._selected_ids.clear()
         self.refresh_ui()
