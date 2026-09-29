@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import AsyncGenerator
 
 import aiotieba
@@ -15,6 +15,35 @@ from .account import get_account_credentials
 from .client_factory import create_client
 from .proxy import get_best_proxy_config
 from .logger import log_info, log_warn, log_error
+
+# [防检测] 拟人化随机跳过：模拟真人偶尔忘记签到。
+# 跳过必须落 SignLog（success=False）——行为审计的 sign_rate 以 SignLog 统计，
+# 静默跳过会让审计永远看到 100% 签到率、告警无法闭环。
+SIGN_SKIP_MESSAGE = "拟人化跳过（模拟真人遗忘）"
+SIGN_SKIP_SETTING_KEY = "sign_skip_probability"
+SIGN_SKIP_DEFAULT = 0.08
+SIGN_SKIP_MAX = 0.2
+
+
+def _should_skip_today(account_id: int, fid: int, probability: float) -> bool:
+    """
+    拟人化跳过骰子：以 (账号, 贴吧, 当天日期) 为种子，
+    同一贴吧当天无论重跑几次全扫，跳过决策保持一致，
+    避免守护定时与手动补扫互相稀释跳过率。
+    """
+    if probability <= 0:
+        return False
+    dice = random.Random(f"skip:{account_id}:{fid}:{date.today().isoformat()}").random()
+    return dice < probability
+
+
+async def _get_skip_probability(db: Database) -> float:
+    """读取跳过率设置（0-0.2，解析失败回退默认值）"""
+    try:
+        p = float(await db.get_setting(SIGN_SKIP_SETTING_KEY, str(SIGN_SKIP_DEFAULT)))
+    except Exception:
+        p = SIGN_SKIP_DEFAULT
+    return max(0.0, min(SIGN_SKIP_MAX, p))
 
 
 @dataclass
@@ -313,9 +342,20 @@ async def sign_all_forums(
     # 已熔断 (吧务封禁) 的贴吧跳过，避免每天重撞 3250004
     forums = await db.get_forums(account.id, include_banned=False)
 
+    # [防检测] 拟人化随机跳过率
+    skip_p = await _get_skip_probability(db)
+
     # N+1 优化: 在外层建立单一持久化连接池
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for forum in forums:
+            # [防检测] 拟人化随机跳过：只落 SignLog 供审计统计，不动贴吧签到战绩
+            if _should_skip_today(account.id, forum.fid, skip_p):
+                await db.add_sign_log(forum_id=forum.id, fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
+                await log_info(f"自动签到任务: {forum.fname} | {SIGN_SKIP_MESSAGE}")
+                yield SignResult(fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
+                await asyncio.sleep(random.uniform(delay_min, delay_max))
+                continue
+
             try:
                 # [防检测] 签到前随机浏览伪装（20%概率，模拟真实用户先逛再签到）
                 await _browse_disguise(client, forum.fname)
@@ -453,6 +493,9 @@ async def sign_all_accounts(
 
     await log_info(f"矩阵全扫启动：共 {len(accounts)} 个有效账号进入签到队列")
 
+    # [防检测] 拟人化随机跳过率（整轮读一次）
+    skip_p = await _get_skip_probability(db)
+
     for acc_idx, account in enumerate(accounts):
         # 检查代理健康度
         proxy_status = "ok"
@@ -498,6 +541,21 @@ async def sign_all_accounts(
         # 每个账号使用单一持久化连接，避免重复创建客户端
         async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
             for forum in forums:
+                # [防检测] 拟人化随机跳过：只落 SignLog 供审计统计，不动贴吧签到战绩
+                if _should_skip_today(account.id, forum.fid, skip_p):
+                    await db.add_sign_log(forum_id=forum.id, fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
+                    await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: {SIGN_SKIP_MESSAGE}")
+                    yield {
+                        "account_id": account.id,
+                        "account_name": account.name,
+                        "fname": forum.fname,
+                        "success": False,
+                        "message": SIGN_SKIP_MESSAGE,
+                        "proxy_status": proxy_status,
+                    }
+                    await asyncio.sleep(random.uniform(delay_min, delay_max))
+                    continue
+
                 try:
                     # [防检测] 签到前随机浏览伪装（20%概率）
                     await _browse_disguise(client, forum.fname)

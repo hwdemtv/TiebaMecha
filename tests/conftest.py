@@ -48,6 +48,9 @@ async def db(temp_db_path: Path) -> AsyncGenerator:
 
     database = Database(temp_db_path)
     await database.init_db()
+    # 拟人化跳过率默认 0.08 会让签到流测试概率性翻车（骰子命中时行为改变），
+    # 测试环境固定为 0；跳过行为本身由 TestHumanizedSkip 显式设置概率覆盖
+    await database.set_setting("sign_skip_probability", "0")
     yield database
     await database.close()
 

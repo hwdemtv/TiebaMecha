@@ -177,6 +177,9 @@ class TestSignAllAccountsSingleClient:
         from tieba_mecha.core import sign
 
         mock_db = AsyncMock()
+        # 签到流会读拟人化跳过率设置；AsyncMock 自动返回值会让 float() 失败
+        # 并回退 8% 默认跳过率，骰子偶发命中导致本测试概率性翻车，此处固定为 0
+        mock_db.get_setting = AsyncMock(return_value="0")
         mock_account = MagicMock()
         mock_account.id = 1
         mock_account.name = "acc1"

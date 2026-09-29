@@ -22,6 +22,11 @@ from tieba_mecha.core.sign import (
     ERR_FORUM_BANNED,
     ERR_FORUM_INVALID,
     _parse_sign_result,
+    _get_skip_probability,
+    _should_skip_today,
+    SIGN_SKIP_DEFAULT,
+    SIGN_SKIP_MAX,
+    SIGN_SKIP_MESSAGE,
     sign_all_forums,
     sign_all_accounts,
     sync_forums_to_db,
@@ -472,6 +477,115 @@ class TestSignAllAccountsMatrix:
         fnames = [r["fname"] for r in results]
         assert "melted_forum" not in fnames
         client.sign_forum.assert_not_called()
+
+
+# ========== 拟人化随机跳过 ==========
+
+
+class TestSkipDice:
+    def test_zero_probability_never_skips(self):
+        assert _should_skip_today(1, 100, 0.0) is False
+        assert _should_skip_today(1, 100, -1.0) is False
+
+    def test_unit_probability_always_skips(self):
+        assert _should_skip_today(1, 100, 1.0) is True
+
+    def test_dice_stable_within_same_day(self):
+        """同日重复掷骰结果一致：守护定时与手动重跑互不稀释跳过率"""
+        first = _should_skip_today(7, 12345, 0.5)
+        assert all(_should_skip_today(7, 12345, 0.5) is first for _ in range(10))
+
+
+@pytest.mark.asyncio
+class TestHumanizedSkip:
+    async def _setup(self, db):
+        from tieba_mecha.core.account import add_account
+
+        acc = await add_account(db=db, name="acc_skipper", bduss="a" * 192, stoken="b" * 64)
+        forum = await db.add_forum(fid=1, fname="skip_forum", account_id=acc.id)
+        return acc, forum
+
+    async def _get_forum(self, db, forum_id):
+        from tieba_mecha.db.models import Forum
+
+        async with db.async_session() as session:
+            return await session.get(Forum, forum_id)
+
+    async def test_full_skip_in_single_flow(self, db):
+        """跳过率 1.0(patch 注入, 绕过 clamp): 不发签到请求, 落 SignLog(success=False), 贴吧战绩不动"""
+        acc, forum = await self._setup(db)
+        client = make_client()
+
+        results = []
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("tieba_mecha.core.sign._get_skip_probability", AsyncMock(return_value=1.0)):
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    async for r in sign_all_forums(db, delay_min=0, delay_max=0):
+                        results.append(r)
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].message == SIGN_SKIP_MESSAGE
+        client.sign_forum.assert_not_called()
+
+        # 审计闭环的关键: 跳过必须落日志, 否则审计永远看到 100% 签到率
+        logs = await db.get_sign_logs(forum_id=forum.id)
+        assert len(logs) == 1
+        assert logs[0].success is False
+        assert logs[0].message == SIGN_SKIP_MESSAGE
+
+        f = await self._get_forum(db, forum.id)
+        assert f.last_sign_status == "pending", "拟人化跳过不是真失败, 不得污染签到战绩"
+        assert f.history_failed == 0
+        assert f.sign_count == 0
+
+    async def test_full_skip_in_matrix_flow(self, db):
+        """矩阵路径同样跳过且不动战绩"""
+        acc, forum = await self._setup(db)
+        client = make_client()
+
+        results = []
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("tieba_mecha.core.sign._get_skip_probability", AsyncMock(return_value=1.0)):
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    async for r in sign_all_accounts(db, 0, 0, 0, 0):
+                        results.append(r)
+
+        assert len(results) == 1
+        assert results[0]["success"] is False
+        assert results[0]["message"] == SIGN_SKIP_MESSAGE
+        client.sign_forum.assert_not_called()
+
+        f = await self._get_forum(db, forum.id)
+        assert f.last_sign_status == "pending"
+        assert f.history_failed == 0
+
+    async def test_zero_probability_signs_all(self, db):
+        """跳过率 0: 完全保持原有行为"""
+        acc, forum = await self._setup(db)
+        await db.set_setting("sign_skip_probability", "0")
+        client = make_client([FakeSignResponse()])
+
+        results = []
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                async for r in sign_all_forums(db, delay_min=0, delay_max=0):
+                    results.append(r)
+
+        assert len(results) == 1
+        assert results[0].success is True
+        client.sign_forum.assert_awaited_once()
+
+    async def test_probability_clamped(self, db):
+        """设置异常值时回退/收敛: 超上限截断(1.0 也会被截到 0.2), 非法回退默认, 负数视为关闭"""
+        await db.set_setting("sign_skip_probability", "0.9")
+        assert await _get_skip_probability(db) == SIGN_SKIP_MAX
+        await db.set_setting("sign_skip_probability", "1.0")
+        assert await _get_skip_probability(db) == SIGN_SKIP_MAX
+        await db.set_setting("sign_skip_probability", "garbage")
+        assert await _get_skip_probability(db) == SIGN_SKIP_DEFAULT
+        await db.set_setting("sign_skip_probability", "-5")
+        assert await _get_skip_probability(db) == 0.0
 
 
 # ========== sync_forums_to_db 隐藏标记 ==========

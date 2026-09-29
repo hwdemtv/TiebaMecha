@@ -56,6 +56,7 @@ class SettingsPage:
             "heartbeat_interval": "2",
             "delay_min": "5.0",
             "delay_max": "15.0",
+            "sign_skip_probability": "0.08",
             "quiet_start": "01:00",
             "quiet_end": "06:00",
             "obfuscator_density": "0.1",
@@ -66,7 +67,7 @@ class SettingsPage:
         }
         _keys = [
             "ai_api_key", "ai_base_url", "ai_model", "ai_system_prompt", "proxy_fallback",
-            "heartbeat_interval", "delay_min", "delay_max", "quiet_start", "quiet_end",
+            "heartbeat_interval", "delay_min", "delay_max", "sign_skip_probability", "quiet_start", "quiet_end",
             "license_key",
             "obfuscator_density", "obfuscator_symbols", "obfuscator_spacing", "obfuscator_shuffling",
             *self._maint_config.keys(),
@@ -81,6 +82,7 @@ class SettingsPage:
         self._settings["heartbeat_interval"] = raw["heartbeat_interval"]
         self._settings["delay_min"] = raw["delay_min"]
         self._settings["delay_max"] = raw["delay_max"]
+        self._settings["sign_skip_probability"] = raw["sign_skip_probability"]
         self._settings["quiet_start"] = raw["quiet_start"]
         self._settings["quiet_end"] = raw["quiet_end"]
 
@@ -160,6 +162,7 @@ class SettingsPage:
         self.heartbeat_field.value = self._settings.get("heartbeat_interval", "2")
         self.delay_min_field.value = self._settings.get("delay_min", "5.0")
         self.delay_max_field.value = self._settings.get("delay_max", "15.0")
+        self.sign_skip_field.value = self._settings.get("sign_skip_probability", "0.08")
         self.quiet_start_field.value = self._settings.get("quiet_start", "01:00")
         self.quiet_end_field.value = self._settings.get("quiet_end", "06:00")
         
@@ -240,7 +243,7 @@ class SettingsPage:
             self.ai_prompt_field,
             ft.Row([self.ai_check_btn, self.ai_check_result], spacing=10),
             self._create_section_title("自动化与网络 / AUTOMATION", icons.TIMER_OUTLINED),
-            ft.Row([self.delay_min_field, self.delay_max_field, self.heartbeat_field], spacing=10),
+            ft.Row([self.delay_min_field, self.delay_max_field, self.sign_skip_field, self.heartbeat_field], spacing=10),
             ft.Row([self.quiet_start_field, self.quiet_end_field, self.proxy_fallback_switch], spacing=10),
         ], spacing=15, scroll=ft.ScrollMode.AUTO)
 
@@ -386,6 +389,10 @@ class SettingsPage:
         self.ai_check_result = ft.Text("", size=12, color="onSurfaceVariant", expand=True)
         self.delay_min_field = ft.TextField(label="签到延迟Min", expand=True)
         self.delay_max_field = ft.TextField(label="签到延迟Max", expand=True)
+        self.sign_skip_field = ft.TextField(
+            label="拟人跳过率(0~0.2)", expand=True,
+            tooltip="每次全扫随机跳过该比例的贴吧签到，模拟真人偶尔忘记（0 关闭）；需配合行为审计观察签到率",
+        )
         self.heartbeat_field = ft.TextField(label="检测间隔(h)", expand=True)
         self.quiet_start_field = ft.TextField(label="静默开始", expand=True)
         self.quiet_end_field = ft.TextField(label="静默结束", expand=True)
@@ -494,6 +501,7 @@ class SettingsPage:
                 "ai_model": self.ai_model_field.value, "ai_system_prompt": self.ai_prompt_field.value,
                 "proxy_fallback": "true" if self.proxy_fallback_switch.value else "false",
                 "heartbeat_interval": self.heartbeat_field.value, "delay_min": self.delay_min_field.value, "delay_max": self.delay_max_field.value,
+                "sign_skip_probability": self.sign_skip_field.value,
                 "quiet_start": self.quiet_start_field.value, "quiet_end": self.quiet_end_field.value,
                 "license_key": self.license_key_field.value, "obfuscator_density": str(self.obf_density_slider.value),
                 "obfuscator_symbols": "true" if self.obf_symbols_switch.value else "false",
