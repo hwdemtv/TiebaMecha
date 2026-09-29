@@ -1083,6 +1083,11 @@ class BatchPostCenterPage:
             sel_count = len(self._selected_archive_ids)
             total_count = self._archive_total
             self._archive_selected_count_text.value = f"已选 {sel_count}/{total_count} 项"
+            # 计数文本是该 Row 的子控件，update 父控件即可一并推送
+            try:
+                self._archive_bulk_actions.update()
+            except Exception:
+                pass
 
     # ==================================================================
     # 控件构建
