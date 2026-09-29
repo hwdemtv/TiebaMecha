@@ -68,6 +68,7 @@ class BatchPostPage:
         self._selected_account_ids = set()
         self._temp_local_fnames = []    # 本地自留区锁定的吧名
         self._temp_global_fnames = []   # 全域轰炸组锁定的吧名
+        self._local_safe_only = True    # 本地自留区弹窗默认只看安全吧
 
         # 账号选择增强状态
         self._account_search_text = ""
@@ -1323,6 +1324,7 @@ class BatchPostPage:
             risk_map = {s["fname"]: s for s in await self.db.get_forum_risk_stats()}
         except Exception:
             pass
+        _safe_fnames = {f['fname'] for f in local_forums if f['is_post_target']}
         
         # ===== 两个独立的选中集合 =====
         # 本地自留区选中：若上次有持久化选择则沿用，否则默认选中所有安全吧
@@ -1357,14 +1359,24 @@ class BatchPostPage:
             text_size=12,
             expand=True
         )
+        local_safe_only_cb = ft.Checkbox(label="只看安全", value=self._local_safe_only, scale=0.8)
         local_select_all_cb = ft.Checkbox(label="全选安全", value=False, scale=0.8, fill_color="green")
         local_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
-        local_count_text = ft.Text(f"已选: {len(local_selected)} 个目标", size=12, color="primary", weight=ft.FontWeight.BOLD)
+        local_count_text = ft.Text("", size=12, color="primary", weight=ft.FontWeight.BOLD)
         
         def update_local_count():
-            local_count_text.value = f"已选: {len(local_selected)} 个目标"
+            parts = [f"已选: {len(local_selected)} 个目标"]
+            unsafe_n = len([fn for fn in local_selected if fn not in _safe_fnames])
+            risky_n = len([fn for fn in local_selected if _is_risky(risk_map.get(fn))])
+            if unsafe_n:
+                parts.append(f"{unsafe_n} 非安全")
+            if risky_n:
+                parts.append(f"{risky_n} 高风险")
+            local_count_text.value = " · ".join(parts)
+            local_count_text.color = "red" if risky_n else ("orange" if unsafe_n else "primary")
             try: local_count_text.update()
             except Exception: pass
+        update_local_count()
         
         def on_local_item_check(e):
             fn = e.control.data
@@ -1385,8 +1397,10 @@ class BatchPostPage:
                 for f in local_forums:
                     fn = f['fname']
                     is_safe = f['is_post_target']
+                    if self._local_safe_only and not is_safe: continue
                     if keyword and keyword.lower() not in fn.lower(): continue
                     risk = risk_map.get(fn)
+                    is_risky = _is_risky(risk)
                     badge = _risk_badge(risk)
                     badge_text = f"  ({badge})" if badge else ""
                     is_checked = fn in local_selected
@@ -1396,27 +1410,44 @@ class BatchPostPage:
                         label_text = f"⛔ {fn} [已封禁]{badge_text}"
                         item_color = "error"
                         item_disabled = True
-                    elif is_checked and not is_safe:
-                        label_text = f"⚠️ {fn} [非安全]{badge_text}"
-                        item_color = "orange"
-                    elif _is_risky(risk):
+                        item_tooltip = "已封禁，不可投放"
+                    elif is_risky:
                         # 高风险（删帖率≥50%）默认禁选；持久化已选的保留并标红
+                        # [修复] 高风险判定先于"已选非安全"分支，持久化勾选不再绕过禁选标识
                         label_text = f"🔴 {fn} [高风险]{badge_text}"
                         item_color = "error"
                         item_disabled = not is_checked
+                        item_tooltip = (
+                            "高风险（删帖率高）：将以关注号身份投放，建议先在存活分析复核"
+                            if is_checked else
+                            "高风险贴吧（删帖率高），默认禁选；如需投放请先在存活分析复核"
+                        )
+                    elif is_checked and not is_safe:
+                        label_text = f"⚠️ {fn} [非安全]{badge_text}"
+                        item_color = "orange"
+                        item_tooltip = "未开启本土作战：将以关注号身份投放，无本土作战加成"
                     elif is_safe:
                         label_text = f"🛡️ {fn} [安全]{badge_text}"
                         item_color = "green"
+                        item_tooltip = None
                     else:
                         label_text = f"{fn}{badge_text}"
                         item_color = "onSurface"
+                        item_tooltip = "未开启本土作战：将以关注号身份投放，无本土作战加成"
                     local_container.controls.append(
                         ft.Checkbox(
                             label=label_text, value=is_checked, data=fn, on_change=on_local_item_check,
                             disabled=item_disabled,
-                            tooltip="高风险贴吧（删帖率高或已封禁），默认禁选；如需投放请先在存活分析复核" if item_disabled else None,
-                            fill_color="green" if is_safe else ("orange" if is_checked else None),
+                            tooltip=item_tooltip,
+                            fill_color="red" if (is_risky and is_checked) else ("green" if is_safe else ("orange" if is_checked else None)),
                             label_style=ft.TextStyle(color=item_color, size=11, weight=ft.FontWeight.W_500 if is_safe else None)
+                        )
+                    )
+                if not local_container.controls:
+                    local_container.controls.append(
+                        ft.Container(
+                            content=ft.Text("当前过滤条件下没有匹配的贴吧", color="onSurfaceVariant", text_align="center", size=12),
+                            alignment=ft.alignment.center, padding=ft.padding.only(top=40)
                         )
                     )
             try: local_container.update()
@@ -1445,19 +1476,64 @@ class BatchPostPage:
             except Exception: pass
         
         local_select_all_cb.on_change = on_local_select_all
+
+        def on_local_safe_only_change(e):
+            self._local_safe_only = e.control.value
+            render_local_list(local_search_field.value)
+
+        local_safe_only_cb.on_change = on_local_safe_only_change
+
+        def on_local_clear(_):
+            local_selected.clear()
+            update_local_count()
+            render_local_list(local_search_field.value)
         
-        async def on_local_lock(_):
-            # [修复] 检测并警告非安全贴吧
-            safe_fnames = {f['fname'] for f in local_forums if f['is_post_target']}
-            unsafe_selected = local_selected - safe_fnames
+        async def _do_local_lock(_=None):
+            # [修复] 非安全警告文案对齐引擎实际行为：非安全吧走关注号路径投放，并非被拦截
+            unsafe_selected = local_selected - _safe_fnames
             if unsafe_selected:
-                self._show_snackbar(f"⚠️ 包含 {len(unsafe_selected)} 个非安全贴吧(未标记发布目标)，发帖时可能被拦截", "warning")
+                preview = "、".join(sorted(unsafe_selected)[:5]) + ("…" if len(unsafe_selected) > 5 else "")
+                self._show_snackbar(f"⚠️ 含 {len(unsafe_selected)} 个非安全贴吧，将以关注号身份投放（无本土作战加成）：{preview}", "warning")
             self._temp_local_fnames = list(local_selected)
             if self.db:
                 self.page.run_task(self.db.set_setting, "last_selected_local_forums", json.dumps(self._temp_local_fnames))
             self._update_forum_select_btn()
             self.page.close(fire_dialog)
             self._show_snackbar(f"🏠 本地自留区已锁定 {len(local_selected)} 个目标", "success")
+
+        async def on_local_lock(_):
+            # [修复] 高风险贴吧不再静默放行：锁定前点名二次确认
+            risky_selected = sorted(fn for fn in local_selected if _is_risky(risk_map.get(fn)))
+            if not risky_selected:
+                await _do_local_lock()
+                return
+
+            async def confirm_risky_lock(_):
+                self.page.close(risk_dialog)
+                await _do_local_lock()
+
+            preview = "、".join(risky_selected[:10]) + ("…" if len(risky_selected) > 10 else "")
+            risk_dialog = ft.AlertDialog(
+                title=ft.Row([ft.Icon(icons.WARNING_AMBER_ROUNDED, color="orange"), ft.Text("确认纳入高风险目标？")]),
+                content=ft.Container(
+                    content=ft.Column([
+                        ft.Text("以下贴吧删帖率高，投放大概率被吧务删除：", size=13),
+                        ft.Text(preview, size=13, color="error", weight=ft.FontWeight.BOLD),
+                        ft.Text("如无特殊需要，建议先在存活分析复核后再投放。", size=11, color="onSurfaceVariant"),
+                    ], tight=True, spacing=10),
+                    width=380,
+                ),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda _: self.page.close(risk_dialog)),
+                    ft.FilledButton(
+                        "仍要锁定",
+                        icon=icons.LOCK_ROUNDED,
+                        style=ft.ButtonStyle(bgcolor="orange", color="white"),
+                        on_click=lambda e: self.page.run_task(confirm_risky_lock, e),
+                    ),
+                ],
+            )
+            self.page.open(risk_dialog)
         
         async def on_bulk_unfollow_click(_):
             selected_to_purge = list(local_selected)
@@ -1655,10 +1731,18 @@ class BatchPostPage:
                     icon=icons.GPS_FIXED,
                     content=ft.Container(
                         content=ft.Column([
+                            ft.Text("列出全部已关注贴吧；🛡️安全吧默认勾选，非安全吧勾选后将以关注号身份投放", size=11, color="onSurfaceVariant"),
                             ft.Row([
                                 local_search_field,
+                                local_safe_only_cb,
                                 local_select_all_cb,
-                                ft.IconButton(icons.DELETE_SWEEP, icon_color="error", tooltip="删除选中项并同步取消关注", on_click=on_bulk_unfollow_click),
+                                ft.TextButton(
+                                    "取关选中",
+                                    icon=icons.DELETE_SWEEP,
+                                    tooltip="删除选中项并同步取消关注（不可逆，会弹确认）",
+                                    style=ft.ButtonStyle(color="error"),
+                                    on_click=on_bulk_unfollow_click,
+                                ),
                             ], spacing=5),
                             ft.Container(
                                 content=local_container,
@@ -1667,12 +1751,15 @@ class BatchPostPage:
                             ),
                             ft.Row([
                                 local_count_text,
-                                ft.FilledButton(
-                                    "锁定本地自留区",
-                                    icon=icons.LOCK_ROUNDED,
-                                    style=ft.ButtonStyle(bgcolor="primary", color="white"),
-                                    on_click=lambda e: self.page.run_task(on_local_lock, e)
-                                ),
+                                ft.Row([
+                                    ft.TextButton("清空选择", icon=icons.CLEAR_ALL, tooltip="取消全部勾选", on_click=on_local_clear),
+                                    ft.FilledButton(
+                                        "锁定本地自留区",
+                                        icon=icons.LOCK_ROUNDED,
+                                        style=ft.ButtonStyle(bgcolor="primary", color="white"),
+                                        on_click=lambda e: self.page.run_task(on_local_lock, e)
+                                    ),
+                                ], spacing=5),
                             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ], tight=True),
                         padding=10

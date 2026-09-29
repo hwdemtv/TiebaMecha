@@ -285,7 +285,7 @@ class PreflightService:
         if unsafe:
             report.issues.append(PreflightIssue(
                 "warning", "forums_unsafe",
-                f"{len(unsafe)} 个非安全贴吧（未标记为发帖目标），可能被拦截：{'、'.join(unsafe[:8])}{'…' if len(unsafe) > 8 else ''}"))
+                f"{len(unsafe)} 个非安全贴吧，将以关注号身份投放（无本土作战加成，删帖风险更高）：{'、'.join(unsafe[:8])}{'…' if len(unsafe) > 8 else ''}"))
         return effective
 
     # ------------------------------------------------------------------
