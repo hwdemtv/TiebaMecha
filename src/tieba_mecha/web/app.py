@@ -193,10 +193,15 @@ class TiebaMechaApp:
             from ..core.logger import log_info
             await log_info("密码重置模式：已清除 Web 密码，可进入设置页重新配置")
 
-        # Web 认证检查：未认证则显示登录页（设置密码/登录均由 login 页处理），跳过后台任务初始化
+        # Web 认证门：已设密码且会话未认证时拦截到登录页；未设密码则免密直进，
+        # 避免每个新会话都弹出"设置访问密码"首次配置页（密码可随时在全局设置中配置）
         if self.page.session_id not in _authenticated_sessions:
-            self._show_login_only()
-            await self._navigate("login")
+            from ..core.web_auth import is_password_set
+            if await is_password_set(db):
+                self._show_login_only()
+                await self._navigate("login")
+                return
+            await self._on_login_success()
             return
 
         # 认证已通过，执行完整初始化
