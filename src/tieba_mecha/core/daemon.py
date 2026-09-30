@@ -5,7 +5,10 @@ import random
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .sign import sign_all_forums, sign_all_accounts, sign_flow_lock
+from .sign import (
+    sign_all_forums, sign_all_accounts, sign_account_forums, sign_flow_lock,
+    stagger_offset_seconds, SIGN_STAGGER_SETTING_KEY, SIGN_STAGGER_DEFAULT, SIGN_STAGGER_MAX,
+)
 from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
@@ -13,13 +16,111 @@ from .auth import get_auth_manager
 from .account import get_account_credentials
 from ..db.crud import get_db
 
-async def do_sign_task(attempt: int = 1):
+# 错峰排程的进程内幂等集合：(account_id, date)。重启后清空重放，
+# 重放安全性由核心流"今日已签剔除"保证——已签账号的 worker 零请求秒退
+_STAGGER_SPAWNED = set()
+
+
+async def _stagger_account_worker(account_id: int, run_at: datetime, attempt: int = 1):
+    """错峰账号签到 worker：睡到既定时刻 → 有待签才拿锁执行（不长时间持锁）。"""
+    delay = (run_at - datetime.now()).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    db = await get_db()
+    account = await db.get_account_by_id(account_id)
+    if not account or account.status in ("suspended", "suspended_proxy", "banned", "expired"):
+        return
+
+    forums = await db.get_forums(account.id, include_banned=False)
+    if all(f.is_sign_today for f in forums):
+        print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}]：今日已全部签毕，零请求跳过")
+        return
+
+    # 遇锁（手动流/其他错峰 worker 占用）：进程内延迟重试，至多 5 次
+    if sign_flow_lock.locked():
+        if attempt >= 5:
+            print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 连续遇锁放弃（次日按新种子重排）")
+            return
+        print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 遇锁，10 分钟后重试 ({attempt}/4)")
+        asyncio.create_task(
+            _stagger_account_worker(account_id, datetime.now() + timedelta(minutes=10), attempt + 1)
+        )
+        return
+
+    try:
+        d_min = float(await db.get_setting("sign_delay_min", "5"))
+        d_max = float(await db.get_setting("sign_delay_max", "15"))
+    except Exception:
+        d_min, d_max = 5.0, 15.0
+
+    ok = fail = 0
+    async with sign_flow_lock:
+        async for r in sign_account_forums(db, account.id, delay_min=d_min, delay_max=d_max):
+            if r.get("fname"):
+                if r.get("success"):
+                    ok += 1
+                else:
+                    fail += 1
+    print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 闭环 | 成功: {ok} | 失败: {fail}")
+
+
+async def _register_staggered_signs(db):
+    """矩阵+错峰开启时：把各账号排到当日 sign_time + 稳定随机偏移的独立时刻。
+
+    时刻锚定在配置的 sign_time 上（非注册时刻），保证重启重放得到相同的当日
+    时刻表；已过的时刻（错过锚点/重启）在近期随机补跑。写当日完成标记。
+    """
+    from datetime import time as dtime
+
+    try:
+        window = float(await db.get_setting(SIGN_STAGGER_SETTING_KEY, str(SIGN_STAGGER_DEFAULT)))
+    except Exception:
+        window = SIGN_STAGGER_DEFAULT
+    window = max(0.0, min(SIGN_STAGGER_MAX, window))
+    if window <= 0:
+        return False
+
+    raw = await db.get_setting("schedule", "{}")
+    try:
+        sched = json.loads(raw) if raw else {}
+    except (ValueError, TypeError):
+        sched = {}
+    try:
+        h, m = str(sched.get("sign_time", "08:00")).split(":")
+        base = datetime.combine(datetime.now().date(), dtime(int(h), int(m)))
+    except (ValueError, TypeError):
+        base = datetime.combine(datetime.now().date(), dtime(8, 0))
+
+    accounts = await db.get_matrix_accounts()
+    today = datetime.now().date()
+    now = datetime.now()
+    for account in accounts:
+        key = (account.id, today)
+        if key in _STAGGER_SPAWNED:
+            continue
+        _STAGGER_SPAWNED.add(key)
+        moment = base + timedelta(seconds=stagger_offset_seconds(account.id, today, window))
+        if moment <= now:
+            moment = now + timedelta(seconds=random.uniform(30, 300))
+        print(f"[{datetime.now()}] [DAEMON] 错峰排程 [{account.name}] → {moment:%H:%M:%S}")
+        asyncio.create_task(_stagger_account_worker(account.id, moment))
+
+    try:
+        await db.set_setting("last_daemon_sign_date", today.isoformat())
+    except Exception:
+        pass
+    return True
+
+
+async def do_sign_task(attempt: int = 1, jitter: bool = True):
     """执行定时签到任务的内部包裹（自适应模式；attempt 为遇锁重试计数）"""
     # 触发时间抖动：消除每天精确同分钟的定时指纹（选任务内睡而非改注册，
     # 不动 reload 的 cron 注册逻辑，代价仅是重启丢失当次抖动）
-    jitter = random.uniform(0, 600)
-    print(f"[{datetime.now()}] [DAEMON] 定时触发抖动 {jitter:.0f}s 后开始签到")
-    await asyncio.sleep(jitter)
+    if jitter:
+        jitter_secs = random.uniform(0, 600)
+        print(f"[{datetime.now()}] [DAEMON] 定时触发抖动 {jitter_secs:.0f}s 后开始签到")
+        await asyncio.sleep(jitter_secs)
 
     db = await get_db()
 
@@ -36,7 +137,19 @@ async def do_sign_task(attempt: int = 1):
         print(f"[DAEMON] schedule 配置损坏，按默认单账号模式执行")
         schedule = {}
     mode = schedule.get("mode", "single")
-    
+
+    # 1.5 矩阵+错峰开启：按 (账号,日期) 种子把各账号排到当日独立时刻，
+    # 打散"全部账号同一窗口上线"的群体特征；窗口 0 = 串行全扫旧行为
+    if mode == "matrix":
+        try:
+            stagger_window = float(await db.get_setting(SIGN_STAGGER_SETTING_KEY, str(SIGN_STAGGER_DEFAULT)))
+        except Exception:
+            stagger_window = SIGN_STAGGER_DEFAULT
+        if max(0.0, min(SIGN_STAGGER_MAX, stagger_window)) > 0:
+            print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: MATRIX (错峰窗口 {stagger_window:g} 分钟)")
+            await _register_staggered_signs(db)
+            return
+
     # 2. 获取行为频率参数
     try:
         d_min = float(await db.get_setting("sign_delay_min", "5"))
@@ -645,6 +758,11 @@ class TiebaMechaDaemon:
                         print(f"[DAEMON] 检测到今日 {hour:02d}:{minute:02d} 触发已被错过（重启/宕机），1 分钟后补跑")
             except Exception as catchup_err:
                 print(f"[DAEMON] 签到补跑检查失败（不影响常规调度）: {catchup_err}")
+
+            # 错峰重放：矩阵+错峰开启时，reload（含重启后首次）即重排当日时刻表——
+            # 进程内幂等 + 已签账号 worker 秒退，重复调用无实害
+            if schedule.get("mode", "single") == "matrix":
+                await _register_staggered_signs(db)
         except Exception as e:
             # 解析失败时不动现有任务，避免定时签到静默失效
             print(f"[DAEMON] 解析配置签到时间出错: {e} (已保留原有任务配置)")

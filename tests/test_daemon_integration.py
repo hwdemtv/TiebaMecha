@@ -71,6 +71,7 @@ class TestDaemonIntegration:
         """Test the execution flow of the sign task (matrix vs single)."""
         # Set up settings
         await db.set_setting("schedule", json.dumps({"mode": "matrix"}))
+        await db.set_setting("sign_stagger_minutes", "0")  # 关闭错峰，验证串行全扫旧路径
 
         # Mock the actual sign functions
         with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
@@ -205,6 +206,83 @@ class TestDaemonIntegration:
             await do_sign_task()
 
         assert await db.get_setting("last_daemon_sign_date", "") == datetime.now().date().isoformat()
+
+    async def test_do_sign_task_matrix_stagger_registers(self, db):
+        """错峰: 矩阵+窗口>0 → 派发排程而非串行全扫；写当日完成标记"""
+        await db.set_setting("schedule", json.dumps({"mode": "matrix", "sign_time": "06:45"}))
+        await db.set_setting("sign_stagger_minutes", "90")
+
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+             patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_matrix, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            await do_sign_task(jitter=False)
+
+        mock_matrix.assert_not_called(), "错峰模式不得再走串行全扫"
+        assert await db.get_setting("last_daemon_sign_date", "") == datetime.now().date().isoformat()
+
+    async def test_stagger_offset_deterministic_and_spread(self, db):
+        """错峰偏移: 同账号同日稳定、跨日不同；不同账号当日互相错开"""
+        from tieba_mecha.core.sign import stagger_offset_seconds
+        from datetime import date as real_date
+
+        d1 = real_date(2026, 10, 1)
+        d2 = real_date(2026, 10, 2)
+        o1a = stagger_offset_seconds(7, d1, 90)
+        assert stagger_offset_seconds(7, d1, 90) == o1a, "同账号同日偏移必须稳定"
+        assert stagger_offset_seconds(7, d2, 90) != o1a, "跨日偏移应变化"
+        others = [stagger_offset_seconds(i, d1, 90) for i in (1, 2, 3, 4)]
+        assert all(0 <= o < 90 * 60 for o in [o1a] + others)
+        assert len(set(others)) == 4, "不同账号当日偏移应互不相同"
+
+    async def test_stagger_worker_skips_fully_signed_account(self, db):
+        """错峰 worker: 账号今日已全签 → 零请求秒退（重启重放安全性的根基）"""
+        from tieba_mecha.core.account import add_account
+        from tieba_mecha.core import daemon as daemon_mod
+        from datetime import timedelta as td
+
+        acc = await add_account(db=db, name="acc_stg", bduss="a" * 192, stoken="b" * 64)
+        f = await db.add_forum(fid=1, fname="stg_forum", account_id=acc.id)
+        await db.update_forum_sign(f.id, True)
+
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+             patch("tieba_mecha.core.sign.create_client") as mock_client:
+            await daemon_mod._stagger_account_worker(
+                acc.id, datetime.now() - td(minutes=1)
+            )
+
+        mock_client.assert_not_called(), "已全签账号不得创建客户端/发请求"
+
+    async def test_stagger_worker_signs_pending_account(self, db):
+        """错峰 worker: 有待签的账号独立完成本账号签到（不触及其他账号）"""
+        from tieba_mecha.core.account import add_account
+        from tieba_mecha.core import daemon as daemon_mod
+        from datetime import timedelta as td
+        from types import SimpleNamespace
+
+        acc_a = await add_account(db=db, name="acc_stg_a", bduss="a" * 192, stoken="b" * 64)
+        acc_b = await add_account(db=db, name="acc_stg_b", bduss="c" * 192, stoken="d" * 64)
+        fa = await db.add_forum(fid=1, fname="stg_a", account_id=acc_a.id)
+        fb = await db.add_forum(fid=2, fname="stg_b", account_id=acc_b.id)
+        await db.set_setting("sign_skip_probability", "0")
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get_threads = AsyncMock(return_value=None)
+        mock_client.sign_forum = AsyncMock(
+            return_value=SimpleNamespace(err=None, __bool__=lambda self: True)
+        )
+
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+             patch("tieba_mecha.core.sign.create_client", return_value=mock_client), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            await daemon_mod._stagger_account_worker(
+                acc_a.id, datetime.now() - td(minutes=1)
+            )
+
+        mock_client.sign_forum.assert_awaited_once_with("stg_a")
+        forums = {f.fname: f for f in await db.get_forums(acc_b.id)}
+        assert forums["stg_b"].is_sign_today is False, "其他账号不得被连带签到"
 
     async def test_do_sign_task_tolerates_corrupted_schedule_json(self, db):
         """回归: schedule 为损坏 JSON 时按默认模式执行而非整体失败"""

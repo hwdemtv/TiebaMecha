@@ -18,6 +18,7 @@ from ..utils import with_opacity
 from ...core.sign import (
     get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums,
     get_sign_stats, sign_all_accounts, sign_flow_lock, SIGN_SKIP_MESSAGE,
+    SIGN_STAGGER_SETTING_KEY, SIGN_STAGGER_DEFAULT, SIGN_STAGGER_MAX,
 )
 
 
@@ -89,6 +90,8 @@ class SignPage:
                 self.delay_max_input.value = await _get_fmt_val("sign_delay_max", "15")
                 self.acc_delay_min_input.value = await _get_fmt_val("sign_acc_delay_min", "30")
                 self.acc_delay_max_input.value = await _get_fmt_val("sign_acc_delay_max", "120")
+                if hasattr(self, "stagger_input"):
+                    self.stagger_input.value = await _get_fmt_val("sign_stagger_minutes", "90")
             except Exception:
                 pass
 
@@ -289,8 +292,14 @@ class SignPage:
             label="触发时间",
             value="08:00",
             text_size=12,
+            expand=True,
             prefix_icon=ACCESS_TIME_ROUNDED,
             hint_text="HH:MM",
+        )
+        # 错峰窗口：矩阵模式下各账号在触发时间基础上叠加 0~N 分钟的当日稳定随机偏移
+        self.stagger_input = ft.TextField(
+            label="错峰窗口", value="90", text_size=12, width=110,
+            suffix_text="分", hint_text="0=关闭",
         )
         # 配置类动作用默认描边（颜色语义：青绿=操作，黄=需要注意——黄色只留给待签/跳过等警示信息）
         self.daemon_save_btn = ft.OutlinedButton(
@@ -327,7 +336,7 @@ class SignPage:
                     ft.Text("启用周期执行", size=11, color="onSurfaceVariant"),
                     self.daemon_switch,
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                self.daemon_time,
+                ft.Row([self.daemon_time, self.stagger_input], spacing=8),
                 self.daemon_mode_radio,
                 self.daemon_save_btn,
                 ft.Text("保存范围：节奏参数 + 定时守护", size=9, color="onSurfaceVariant"),
@@ -803,6 +812,15 @@ class SignPage:
         await self.db.set_setting("sign_acc_delay_min", self.acc_delay_min_input.value)
         await self.db.set_setting("sign_acc_delay_max", self.acc_delay_max_input.value)
 
+        # 错峰窗口（0=关闭；钳制 0~360 分钟）
+        try:
+            stagger = float(self.stagger_input.value)
+        except (ValueError, TypeError):
+            stagger = SIGN_STAGGER_DEFAULT
+        stagger = max(0.0, min(SIGN_STAGGER_MAX, stagger))
+        self.stagger_input.value = f"{stagger:g}"
+        await self.db.set_setting(SIGN_STAGGER_SETTING_KEY, self.stagger_input.value)
+
         try:
             from tieba_mecha.core.daemon import daemon_instance
             await daemon_instance.reload(self.db)
@@ -811,7 +829,8 @@ class SignPage:
             mode_zh = "矩阵全扫" if self.daemon_mode_radio.value == "matrix" else "单账号模式"
             self._show_snackbar(
                 f"✔️ 已保存：守护{'启用' if self.daemon_switch.value else '停用'} · 触发 {time_str} · {mode_zh}"
-                f" · 吧间延迟 {d_min:g}~{d_max:g}s · 账号间延迟 {ad_min:g}~{ad_max:g}s",
+                f" · 吧间延迟 {d_min:g}~{d_max:g}s · 账号间延迟 {ad_min:g}~{ad_max:g}s"
+                f" · 错峰窗口 {stagger:g} 分",
                 "success",
             )
         except Exception as err:

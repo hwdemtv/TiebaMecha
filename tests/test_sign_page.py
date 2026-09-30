@@ -469,6 +469,23 @@ class TestBatch3Page:
         buttons = [c.text for c in row.controls if hasattr(c, "text") and c.text]
         assert "签到" not in buttons, "熔断行不得再提供手签（重撞 3250004）"
 
+    async def test_stagger_window_roundtrip(self, sign_page, db):
+        """错峰窗口: 保存钳制落库 + 加载回显"""
+        sign_page.daemon_switch.value = False
+        sign_page.daemon_time.value = "08:00"
+        sign_page.stagger_input.value = "120"
+        with patch("tieba_mecha.core.daemon.daemon_instance.reload", AsyncMock()):
+            await sign_page._save_daemon_config(None)
+        assert await db.get_setting("sign_stagger_minutes") == "120"
+
+        sign_page.stagger_input.value = "9999"
+        with patch("tieba_mecha.core.daemon.daemon_instance.reload", AsyncMock()):
+            await sign_page._save_daemon_config(None)
+        assert await db.get_setting("sign_stagger_minutes") == "360", "超上限应钳制为 360"
+
+        await sign_page.load_data()
+        assert sign_page.stagger_input.value == "360"
+
     async def test_matrix_entry_requires_confirm_dialog(self, sign_page, db):
         """整改#18: 矩阵启动必经确认弹窗，确认前不进入执行态"""
         await _add_account_with_forum(db, "acc_dialog", [(34, "dlg_forum", None)])

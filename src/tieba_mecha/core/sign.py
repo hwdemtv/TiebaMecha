@@ -492,6 +492,195 @@ async def get_sign_stats(db: Database) -> dict:
     }
 
 
+# [防检测] 守护错峰：每账号每天在 sign_time 基础上叠加稳定随机偏移，
+# 打散"全部账号同一窗口上线"的群体特征。0 = 关闭（串行全扫旧行为）。
+SIGN_STAGGER_SETTING_KEY = "sign_stagger_minutes"
+SIGN_STAGGER_DEFAULT = 90.0
+SIGN_STAGGER_MAX = 360.0
+
+
+def stagger_offset_seconds(account_id: int, today, window_minutes: float) -> float:
+    """按 (账号, 日期) 种子给出当天稳定偏移秒数：同日重放同值，跨日必不同。"""
+    if window_minutes <= 0:
+        return 0.0
+    rng = random.Random(f"stagger:{account_id}:{today.isoformat()}")
+    return rng.random() * window_minutes * 60.0
+
+
+async def sign_account_forums(
+    db: Database,
+    account_id: int,
+    delay_min: float = 5.0,
+    delay_max: float = 15.0,
+    ignore_skip: bool = False,
+    stop_event: asyncio.Event | None = None,
+):
+    """
+    单账号签到流：为指定账号的全部待签贴吧签到。
+
+    矩阵全扫按账号复用本流；守护错峰调度（sign_stagger_minutes>0）也以本流
+    为单元按各账号错峰时刻独立触发。yield 格式与 sign_all_accounts 一致。
+    """
+    import random
+    import concurrent.futures
+    from aiotieba.exception import TiebaServerError
+
+    account = await db.get_account_by_id(account_id)
+    if not account:
+        return
+
+    # 检查代理健康度
+    proxy_status = "ok"
+    if account.proxy_id:
+        proxy = await db.get_proxy(account.proxy_id)
+        if not proxy or not proxy.is_active:
+            await log_warn(
+                f"账号 [{account.name}] 绑定代理已失效，已跳过该账号签到"
+            )
+            yield {
+                "account_id": account.id,
+                "account_name": account.name,
+                "fname": "",
+                "success": False,
+                "message": "绑定代理已失效，账号已隔离",
+                "proxy_status": "suspended",
+            }
+            return
+    else:
+        # 无代理绑定：裸连警告但允许继续
+        proxy_status = "missing"
+        await log_warn(f"账号 [{account.name}] 未绑定代理，以裸连模式运行（存在关联风险）")
+
+    # 获取该账号的贴吧列表 (已熔断的吧务封禁贴吧跳过；今日已签剔除不发请求)
+    forums = await db.get_forums(account.id, include_banned=False)
+    forums = [f for f in forums if not f.is_sign_today]
+    if not forums:
+        await log_info(f"账号 [{account.name}] 无待签贴吧")
+        return
+    # 执行顺序按天洗牌，消除恒定字母序的机器人指纹（同账号同日同集合 → 同序）
+    random.Random(f"order:{account.id}:{date.today().isoformat()}").shuffle(forums)
+
+    # 使用指定账号凭证（每个账号只获取一次）
+    creds = await get_account_credentials(db, account.id)
+    if not creds:
+        await log_warn(f"账号 [{account.name}] 凭证获取失败，跳过")
+        return
+
+    _, bduss, stoken, proxy_id, cuid, ua = creds
+
+    # [防检测] 拟人化随机跳过率
+    skip_p = await _get_skip_probability(db)
+
+    # 每个账号使用单一持久化连接，避免重复创建客户端
+    async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
+        for forum in forums:
+            if stop_event is not None and stop_event.is_set():
+                break
+
+            # [防检测] 拟人化随机跳过：只落 SignLog 供审计统计，不动贴吧签到战绩
+            if not ignore_skip and _should_skip_today(account.id, forum.fid, skip_p):
+                await db.add_sign_log(forum_id=forum.id, fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
+                await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: {SIGN_SKIP_MESSAGE}")
+                yield {
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "fname": forum.fname,
+                    "success": False,
+                    "message": SIGN_SKIP_MESSAGE,
+                    "proxy_status": proxy_status,
+                }
+                if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
+                    break
+                continue
+
+            aborted = False
+            try:
+                # [防检测] 签到前随机浏览伪装（20%概率）
+                await _browse_disguise(client, forum.fname, stop_event=stop_event)
+
+                # 针对底层网络抖动增加一次自动重试
+                try:
+                    result_raw = await client.sign_forum(forum.fname)
+                except Exception:
+                    await asyncio.sleep(1)
+                    result_raw = await client.sign_forum(forum.fname)
+
+                success, message, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(result_raw)
+
+                if is_forum_invalid:
+                    if err_code == ERR_FORUM_BANNED:
+                        await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
+                        await db.update_target_pool_status(forum.fname, is_success=False, error_reason="矩阵全扫检测吧务封禁")
+                        message = f"贴吧已封禁 (3250004)"
+                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
+                    else:
+                        # 自动删除无效贴吧
+                        await db.delete_forum(forum.id)
+                        message = f"贴吧已失效 ({err_code})，已自动移除"
+                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
+
+                # 写入日志与数据库
+                await db.add_sign_log(
+                    forum_id=forum.id,
+                    fname=forum.fname,
+                    success=success,
+                    message=message,
+                )
+                await db.update_forum_sign(forum.id, success)
+
+                if success:
+                    await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: 成功")
+                else:
+                    await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
+
+                yield {
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "fname": forum.fname,
+                    "success": success,
+                    "message": message,
+                    "proxy_status": proxy_status,
+                }
+
+                # 吧间延迟（人性化行为模拟，可被停止事件快速中止）
+                if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
+                    break
+
+            except TiebaServerError as e:
+                await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 触发风控或 API 阻隔 ({e.code})，退避 60s...")
+                aborted = await _interruptible_sleep(stop_event, 60)
+                # 与单账号路径保持一致：风控失败同样落日志并更新贴吧状态
+                await db.add_sign_log(
+                    forum_id=forum.id,
+                    fname=forum.fname,
+                    success=False,
+                    message=f"被风控限流: {e.msg}",
+                )
+                await db.update_forum_sign(forum.id, False)
+                yield {
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "fname": forum.fname,
+                    "success": False,
+                    "message": f"被风控限流: {e.msg}",
+                    "proxy_status": proxy_status,
+                }
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                raise
+            except Exception as e:
+                await log_error(f"矩阵签到异常 [{account.name}] → {forum.fname}: {str(e)}")
+                yield {
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "fname": forum.fname,
+                    "success": False,
+                    "message": str(e),
+                    "proxy_status": proxy_status,
+                }
+            if aborted:
+                break
+
+
 async def sign_all_accounts(
     db: Database,
     delay_min: float = 5.0,
@@ -502,7 +691,7 @@ async def sign_all_accounts(
     stop_event: asyncio.Event | None = None,
 ):
     """
-    矩阵全扫签到：遍历所有可用账号，依次完成每个账号下所有贴吧的签到。
+    矩阵全扫签到：顺序遍历所有可用账号，逐账号复用 sign_account_forums。
 
     Args:
         db: 数据库实例
@@ -514,18 +703,10 @@ async def sign_all_accounts(
         stop_event: 置位后在下个间隙快速中止（停止按钮 1-2s 生效）
 
     Yields:
-        dict: {
-            "account_id": int,
-            "account_name": str,
-            "fname": str,
-            "success": bool,
-            "message": str,
-            "proxy_status": "ok" | "missing" | "suspended"
-        }
+        dict: {"account_id", "account_name", "fname", "success", "message",
+               "proxy_status": "ok" | "missing" | "suspended"}
     """
     import random
-    import concurrent.futures
-    from aiotieba.exception import TiebaServerError
 
     # 获取所有矩阵可用账号（跳过 suspended_proxy 状态）
     accounts = await db.get_matrix_accounts()
@@ -542,162 +723,15 @@ async def sign_all_accounts(
 
     await log_info(f"矩阵全扫启动：共 {len(accounts)} 个有效账号进入签到队列")
 
-    # [防检测] 拟人化随机跳过率（整轮读一次）
-    skip_p = await _get_skip_probability(db)
-
     for acc_idx, account in enumerate(accounts):
-        # 检查代理健康度
-        proxy_status = "ok"
-        if account.proxy_id:
-            proxy = await db.get_proxy(account.proxy_id)
-            if not proxy or not proxy.is_active:
-                proxy_status = "suspended"
-                await log_warn(
-                    f"账号 [{account.name}] 绑定代理已失效，已跳过该账号签到"
-                )
-                yield {
-                    "account_id": account.id,
-                    "account_name": account.name,
-                    "fname": "",
-                    "success": False,
-                    "message": "绑定代理已失效，账号已隔离",
-                    "proxy_status": proxy_status,
-                }
-                continue
-        else:
-            # 无代理绑定：裸连警告但允许继续
-            proxy_status = "missing"
-            await log_warn(f"账号 [{account.name}] 未绑定代理，以裸连模式运行（存在关联风险）")
-
         await log_info(
             f"[{acc_idx + 1}/{len(accounts)}] 开始处理账号: {account.name}"
         )
-
-        # 获取该账号的贴吧列表 (已熔断的吧务封禁贴吧跳过；今日已签剔除不发请求)
-        forums = await db.get_forums(account.id, include_banned=False)
-        forums = [f for f in forums if not f.is_sign_today]
-        if not forums:
-            await log_warn(f"账号 [{account.name}] 无待签贴吧，跳过")
-            continue
-        # 执行顺序按天洗牌，消除恒定字母序的机器人指纹（同账号同日同集合 → 同序）
-        random.Random(f"order:{account.id}:{date.today().isoformat()}").shuffle(forums)
-
-        # 使用指定账号凭证（每个账号只获取一次）
-        creds = await get_account_credentials(db, account.id)
-        if not creds:
-            await log_warn(f"账号 [{account.name}] 凭证获取失败，跳过")
-            continue
-
-        _, bduss, stoken, proxy_id, cuid, ua = creds
-
-        # 每个账号使用单一持久化连接，避免重复创建客户端
-        async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
-            for forum in forums:
-                if stop_event is not None and stop_event.is_set():
-                    break
-
-                # [防检测] 拟人化随机跳过：只落 SignLog 供审计统计，不动贴吧签到战绩
-                if not ignore_skip and _should_skip_today(account.id, forum.fid, skip_p):
-                    await db.add_sign_log(forum_id=forum.id, fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
-                    await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: {SIGN_SKIP_MESSAGE}")
-                    yield {
-                        "account_id": account.id,
-                        "account_name": account.name,
-                        "fname": forum.fname,
-                        "success": False,
-                        "message": SIGN_SKIP_MESSAGE,
-                        "proxy_status": proxy_status,
-                    }
-                    if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
-                        break
-                    continue
-
-                aborted = False
-                try:
-                    # [防检测] 签到前随机浏览伪装（20%概率）
-                    await _browse_disguise(client, forum.fname, stop_event=stop_event)
-
-                    # 针对底层网络抖动增加一次自动重试
-                    try:
-                        result_raw = await client.sign_forum(forum.fname)
-                    except Exception:
-                        await asyncio.sleep(1)
-                        result_raw = await client.sign_forum(forum.fname)
-
-                    success, message, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(result_raw)
-
-                    if is_forum_invalid:
-                        if err_code == ERR_FORUM_BANNED:
-                            await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
-                            await db.update_target_pool_status(forum.fname, is_success=False, error_reason="矩阵全扫检测吧务封禁")
-                            message = f"贴吧已封禁 (3250004)"
-                            await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
-                        else:
-                            # 自动删除无效贴吧
-                            await db.delete_forum(forum.id)
-                            message = f"贴吧已失效 ({err_code})，已自动移除"
-                            await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
-
-                    # 写入日志与数据库
-                    await db.add_sign_log(
-                        forum_id=forum.id,
-                        fname=forum.fname,
-                        success=success,
-                        message=message,
-                    )
-                    await db.update_forum_sign(forum.id, success)
-
-                    if success:
-                        await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: 成功")
-                    else:
-                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
-
-                    yield {
-                        "account_id": account.id,
-                        "account_name": account.name,
-                        "fname": forum.fname,
-                        "success": success,
-                        "message": message,
-                        "proxy_status": proxy_status,
-                    }
-
-                    # 吧间延迟（人性化行为模拟，可被停止事件快速中止）
-                    if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
-                        break
-
-                except TiebaServerError as e:
-                    await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 触发风控或 API 阻隔 ({e.code})，退避 60s...")
-                    aborted = await _interruptible_sleep(stop_event, 60)
-                    # 与单账号路径保持一致：风控失败同样落日志并更新贴吧状态
-                    await db.add_sign_log(
-                        forum_id=forum.id,
-                        fname=forum.fname,
-                        success=False,
-                        message=f"被风控限流: {e.msg}",
-                    )
-                    await db.update_forum_sign(forum.id, False)
-                    yield {
-                        "account_id": account.id,
-                        "account_name": account.name,
-                        "fname": forum.fname,
-                        "success": False,
-                        "message": f"被风控限流: {e.msg}",
-                        "proxy_status": proxy_status,
-                    }
-                except (asyncio.CancelledError, concurrent.futures.CancelledError):
-                    raise
-                except Exception as e:
-                    await log_error(f"矩阵签到异常 [{account.name}] → {forum.fname}: {str(e)}")
-                    yield {
-                        "account_id": account.id,
-                        "account_name": account.name,
-                        "fname": forum.fname,
-                        "success": False,
-                        "message": str(e),
-                        "proxy_status": proxy_status,
-                    }
-                if aborted:
-                    break
+        async for result in sign_account_forums(
+            db, account.id, delay_min=delay_min, delay_max=delay_max,
+            ignore_skip=ignore_skip, stop_event=stop_event,
+        ):
+            yield result
 
         # 账号切换延迟（防关联核心防线；停止事件置位则不再进入下一账号）
         if acc_idx < len(accounts) - 1:
@@ -707,6 +741,3 @@ async def sign_all_accounts(
             )
             if await _interruptible_sleep(stop_event, wait):
                 break
-
-    await log_info("矩阵全扫签到任务全部完成")
-
