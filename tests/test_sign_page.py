@@ -83,12 +83,15 @@ class TestSignPageBuild:
         assert hasattr(sp, "delay_min_input")
         assert hasattr(sp, "acc_delay_min_input")
 
-    def test_default_mode_is_single(self, mock_page, db):
+    def test_merged_layout_no_mode_switcher(self, mock_page, db):
+        """模式合并: 页面不再有模式切换器与矩阵队列，矩阵是执行控制的次级按钮"""
         sp = SignPage(mock_page, db)
-        assert sp._mode == "single"
+        assert not hasattr(sp, "_mode")
         sp.build()
-        assert sp.mode_text.value == "单账号模式"
-        assert sp.matrix_settings.visible is False
+        assert not hasattr(sp, "single_mode_btn")
+        assert not hasattr(sp, "matrix_mode_btn")
+        assert hasattr(sp, "matrix_btn")
+        assert sp.matrix_settings.visible is True, "账号间延迟组应常显（与守护共用）"
 
 
 # ========== load_data ==========
@@ -108,17 +111,16 @@ class TestSignPageLoadData:
         assert sign_page.success_stat.value == "1"
         assert sign_page.failure_stat.value == "1"
 
-    async def test_load_matrix_stats_from_rollup(self, sign_page, db):
-        """矩阵态统计 = rollup 各账号行汇总（口径闭合：成功+失败+待签=总数）"""
-        await _add_account_with_forum(db, "acc1", [(1, "alpha", "success"), (2, "beta", "failure")])
-        await _add_account_with_forum(db, "acc2", [(1, "alpha", None)])
+    async def test_header_stats_always_current_account(self, sign_page, db):
+        """合并后头部统计恒为当前账号闭合账目，不随矩阵聚合漂移"""
+        await _add_account_with_forum(db, "acc1", [(1, "alpha", "success"), (2, "beta", None)])
+        await _add_account_with_forum(db, "acc2", [(3, "gamma", None), (4, "delta", None)])
 
         await sign_page.load_data()
-        sign_page._toggle_mode(None)
 
-        assert sign_page.total_stat.value == "3"
+        assert sign_page.total_stat.value == "2"
         assert sign_page.success_stat.value == "1"
-        assert sign_page.failure_stat.value == "1"
+        assert sign_page.failure_stat.value == "0"
         assert sign_page.pending_stat.value == "1"
 
     async def test_load_daemon_settings(self, sign_page, db):
@@ -144,104 +146,53 @@ class TestSignPageLoadData:
         assert sign_page.page.run_task.called
 
 
-# ========== 模式切换 ==========
-
-
-class TestToggleMode:
-    def test_toggle_to_matrix(self, sign_page):
-        sign_page._toggle_mode(None)
-        assert sign_page._mode == "matrix"
-        assert sign_page.mode_text.value == "矩阵全扫模式"
-        assert sign_page.matrix_settings.visible is True
-
-    def test_toggle_back_to_single(self, sign_page):
-        sign_page._toggle_mode(None)
-        sign_page._toggle_mode(None)
-        assert sign_page._mode == "single"
-        assert sign_page.matrix_settings.visible is False
-
-    def test_toggle_blocked_while_signing(self, sign_page):
-        sign_page._is_signing = True
-        sign_page._toggle_mode(None)
-        assert sign_page._mode == "single", "执行中禁止切换模式"
-
-    def test_matrix_mode_stats(self, sign_page, db):
-        sign_page._mode = "matrix"
-        sign_page.refresh_ui()
-        # 由 load_data 填充的 rollup 驱动; 此处仅验证口径切换不崩溃
-        assert isinstance(sign_page.total_stat.value, str)
+# ========== 合并后的矩阵入口（次级按钮 + 确认弹窗） ==========
 
 
 @pytest.mark.asyncio
-class TestMatrixModeStats:
-    async def test_matrix_stats_reflect_all_accounts(self, sign_page, db):
-        await _add_account_with_forum(db, "acc1", [(1, "alpha", "success"), (2, "beta", "failure")])
-        await _add_account_with_forum(db, "acc2", [(3, "gamma", None)])
-        await sign_page.load_data()
-        sign_page._toggle_mode(None)
-
-        assert sign_page.total_stat.value == "3"
-        assert sign_page.success_stat.value == "1"
-        assert sign_page.failure_stat.value == "1"
-
-
-# ========== 矩阵态账号队列 (整改 #11/#12) ==========
-
-
-@pytest.mark.asyncio
-class TestMatrixAccountQueue:
-    def _row_texts(self, items):
-        """提取每行的主要文本（账号名/聚合行标签）"""
-        import flet as ft
-
-        texts = []
-        for card in items:
-            row = card.content
-            for c in row.controls:
-                if isinstance(c, ft.Text) and c.value:
-                    texts.append(c.value)
-        return texts
-
-    async def test_queue_rows_and_stats_closure(self, sign_page, db):
-        """行数 = 可用账号数 + 聚合行；统计与队列所见一致"""
-        acc1 = await _add_account_with_forum(db, "q_active", [(1, "q1", "success"), (2, "q2", None)])
-        acc2 = await _add_account_with_forum(db, "q_susp", [(3, "q3", None)])
-        await db.update_account(acc2.id, status="suspended")
+class TestMergedMatrixLaunch:
+    async def test_matrix_button_label_from_rollup(self, sign_page, db):
+        """矩阵范围常显在次级按钮标签上（取代整页账号队列）"""
+        await _add_account_with_forum(db, "acc1", [(1, "alpha", "success"), (2, "beta", None)])
+        acc2 = await _add_account_with_forum(db, "acc2", [(3, "gamma", None)])
+        await db.update_account(acc2.id, status="suspended")  # 挂起号不计入范围
 
         await sign_page.load_data()
-        sign_page._set_mode("matrix")
 
-        items = sign_page._build_account_queue_items()
-        texts = self._row_texts(items)
-        # 可用账号 1 行 + 挂起聚合 1 行（无孤儿）
-        assert len(items) == 2
-        assert any("q_active" in t for t in texts)
-        assert any("挂起/封禁账号" in t for t in texts)
+        assert "1 账号" in sign_page.matrix_btn.text
+        assert "1 吧待签" in sign_page.matrix_btn.text
 
-        # 统计闭合：成功 + 失败 + 待签 = 总数（仅可用账号口径）
-        assert sign_page.total_stat.value == "2"
-        assert sign_page.success_stat.value == "1"
-        assert sign_page.failure_stat.value == "0"
-        assert sign_page.pending_stat.value == "1"
-
-    async def test_orphan_forums_aggregate_row(self, sign_page, db):
-        """账号已删的吧聚合为孤儿行，不再平铺成卡片"""
-        from sqlalchemy import delete as sa_delete
-        from tieba_mecha.db.models import Account
-
-        acc = await _add_account_with_forum(db, "acc_gone", [(3, "f3", None)])
-        async with db.async_session() as session:
-            await session.execute(sa_delete(Account).where(Account.id == acc.id))
-            await session.commit()
-
+    async def test_matrix_button_opens_confirm_dialog(self, sign_page, db):
+        """点矩阵按钮 → 确认弹窗（范围+预计时长），确认前不进入执行态"""
+        await _add_account_with_forum(db, "acc_dlg", [(5, "dlg_forum", None)])
         await sign_page.load_data()
-        sign_page._set_mode("matrix")
 
-        items = sign_page._build_account_queue_items()
-        texts = self._row_texts(items)
-        assert any("孤儿数据" in t for t in texts)
-        # 无可用账号 → 0 账号行 + 0 挂起行 + 1 孤儿行
-        assert len(items) == 1
+        with patch("tieba_mecha.web.pages.sign.sign_all_accounts") as mock_flow:
+            async def empty_gen(*a, **k):
+                if False: yield {}
+
+            mock_flow.return_value = empty_gen()
+            await sign_page._do_sign_matrix()
+
+        assert sign_page.page.open.called
+        assert sign_page._is_signing is False
+        mock_flow.assert_not_called()
+
+    async def test_big_button_runs_single_flow(self, sign_page, db):
+        """合并后大按钮只跑当前账号流，绝不触发矩阵流"""
+        await _add_account_with_forum(db, "acc_big", [(6, "big_forum", None)])
+        await sign_page.load_data()
+
+        async def fake_stream(*args, **kwargs):
+            from tieba_mecha.core.sign import SignResult
+            yield SignResult(fname="big_forum", success=True, message="签到成功")
+
+        with patch("tieba_mecha.web.pages.sign.sign_all_forums", fake_stream), \
+             patch("tieba_mecha.web.pages.sign.sign_all_accounts") as mock_matrix:
+            await sign_page._do_sign(None)
+
+        mock_matrix.assert_not_called()
+        assert sign_page._is_signing is False
 
 
 # ========== 守护进程配置保存 ==========
@@ -393,19 +344,18 @@ class TestBatch1PageGuards:
         assert sign_page._is_signing is False
 
     async def test_daemon_mode_saved_from_radio_not_page_mode(self, sign_page, db):
-        """整改#1: schedule.mode 取守护面板单选值，与页面执行模式解耦"""
+        """整改#1: schedule.mode 取守护面板单选值（合并后这是唯一模式控制点）"""
         import json
 
         sign_page.daemon_switch.value = True
         sign_page.daemon_time.value = "08:00"
         sign_page.daemon_mode_radio.value = "matrix"
-        sign_page._mode = "single"  # 页面在单账号模式点保存
 
         with patch("tieba_mecha.core.daemon.daemon_instance.reload", AsyncMock()):
             await sign_page._save_daemon_config(None)
 
         sched = json.loads(await db.get_setting("schedule", "{}"))
-        assert sched["mode"] == "matrix", "守护模式必须取单选值而非页面模式快照"
+        assert sched["mode"] == "matrix", "守护模式必须取单选值"
 
     async def test_delay_inputs_sanitized_on_save(self, sign_page, db):
         """整改#9: 保存时非法延迟被钳制后落库"""
@@ -485,7 +435,6 @@ class TestBatch3Page:
         """整改#18: 矩阵启动必经确认弹窗，确认前不进入执行态"""
         await _add_account_with_forum(db, "acc_dialog", [(34, "dlg_forum", None)])
         await sign_page.load_data()
-        sign_page._set_mode("matrix")
 
         with patch("tieba_mecha.web.pages.sign.sign_all_accounts") as mock_flow:
             async def empty_gen(*a, **k):

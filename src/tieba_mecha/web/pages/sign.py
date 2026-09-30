@@ -8,13 +8,12 @@ from typing import List, Optional
 
 from ..components import create_gradient_button, CoreButtonWithLabel, GRADIENT_CYAN
 from ..components.icons import (
-    GROUP_WORK, PERSON, ARROW_BACK_IOS_NEW,
+    GROUP_WORK, ARROW_BACK_IOS_NEW,
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
     CHECK, VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, HISTORY_ROUNDED,
-    PUBLIC, VPN_LOCK, CHECK_CIRCLE,
+    CHECK_CIRCLE,
     ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED,
-    HEART_BROKEN, PAUSE_CIRCLE_OUTLINED, PERSON_OFF,
-    BLOCK, GPP_GOOD_ROUNDED,
+    HEART_BROKEN, BLOCK, GPP_GOOD_ROUNDED,
 )
 from ..utils import with_opacity
 from ...core.sign import (
@@ -32,14 +31,12 @@ class SignPage:
         self.on_navigate = on_navigate
         self._forums = []
         self._accounts = []
-        self._matrix_rollup = None  # get_sign_rollup_by_account 结果（矩阵态单一口径）
-        self._matrix_row_controls = {}  # account_id -> 行控件引用（执行中行内计数联动）
-        self._matrix_live = {}  # account_id -> 执行中实时计数
+        self._matrix_rollup = None  # get_sign_rollup_by_account 结果（矩阵按钮标签/确认弹窗口径）
         self._stats = {"total": 0, "success": 0, "failure": 0}
         self._is_signing = False
         self._stop_requested = False
         self._stop_event = None  # 核心流快速中止信号（1-2s 生效，替代只查 yield 边界的半分钟等待）
-        self._mode = "single"  # single / matrix
+        # 模式已合并：列表恒为当前账号贴吧，矩阵全扫是执行控制卡的次级启动按钮（确认弹窗承载范围）
 
     async def load_data(self):
         """加载数据"""
@@ -116,57 +113,20 @@ class SignPage:
     def refresh_ui(self):
         if hasattr(self, "list_view"):
             self.list_view.controls.clear()
-
-            if self._mode == "single":
-                self.list_view.controls.extend(self._build_single_mode_items())
-                self.total_stat.value = str(self._stats['total'])
-                self.success_stat.value = str(self._stats['success'])
-                self.failure_stat.value = str(self._stats['failure'])
-                self.pending_stat.value = str(self._stats.get('pending', 0))
-                if hasattr(self, "scope_text"):
-                    self.scope_text.value = f"本次将签：当前账号 {self._stats.get('pending', 0)} 吧"
-            else:
-                self.list_view.controls.extend(self._build_account_queue_items())
-                # 矩阵态统计 = 各账号行账目汇总（与队列所见一致，口径自然闭合）
+            self.list_view.controls.extend(self._build_single_mode_items())
+            self.total_stat.value = str(self._stats['total'])
+            self.success_stat.value = str(self._stats['success'])
+            self.failure_stat.value = str(self._stats['failure'])
+            self.pending_stat.value = str(self._stats.get('pending', 0))
+            if hasattr(self, "scope_text"):
+                self.scope_text.value = f"本次将签：当前账号 {self._stats.get('pending', 0)} 吧"
+            # 矩阵范围常显在次级按钮上，取代整页账号队列
+            if hasattr(self, "matrix_btn"):
                 accs = (getattr(self, "_matrix_rollup", None) or {}).get("accounts", [])
-                self.total_stat.value = str(sum(a["total"] for a in accs))
-                self.success_stat.value = str(sum(a["signed"] for a in accs))
-                self.failure_stat.value = str(sum(a["failed_today"] for a in accs))
-                self.pending_stat.value = str(sum(a["pending"] for a in accs))
-                if hasattr(self, "scope_text"):
-                    n_acc = len([a for a in accs if a["pending"] > 0])
-                    self.scope_text.value = f"本次将签：{n_acc} 账号 / {sum(a['pending'] for a in accs)} 吧"
+                n_acc = len([a for a in accs if a["pending"] > 0])
+                self.matrix_btn.text = f"矩阵全扫 · {n_acc} 账号 / {sum(a['pending'] for a in accs)} 吧待签"
 
             self.page.update()
-
-    def _set_mode(self, mode: str):
-        """选择签到模式；使用明确的双选入口，避免用户误触切换。"""
-        if self._is_signing:
-            self._show_snackbar("执行中禁止切换模式", "error")
-            return
-
-        self._mode = mode
-        self.mode_text.value = "矩阵全扫模式" if self._mode == "matrix" else "单账号模式"
-        self.mode_icon.name = GROUP_WORK if self._mode == "matrix" else PERSON
-        self.mode_icon.color = COLORS.ERROR if self._mode == "matrix" else COLORS.PRIMARY
-
-        self.single_mode_btn.style = ft.ButtonStyle(
-            bgcolor="primary" if mode == "single" else None,
-            color="onPrimary" if mode == "single" else "primary",
-        )
-        self.matrix_mode_btn.style = ft.ButtonStyle(
-            bgcolor="secondary" if mode == "matrix" else None,
-            color="onPrimary" if mode == "matrix" else "secondary",
-        )
-        
-        # 切换设置面板可见性
-        self.matrix_settings.visible = (self._mode == "matrix")
-        
-        self.refresh_ui()
-
-    def _toggle_mode(self, e):
-        """兼容已有调用方的模式切换入口。"""
-        self._set_mode("matrix" if self._mode == "single" else "single")
 
     def build(self) -> ft.Control:
         # 统计文本组件（闭合账目：总数 = 成功 + 失败 + 待签，熔断在行内展示）
@@ -175,26 +135,6 @@ class SignPage:
         self.failure_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=COLORS.RED_ACCENT_400)
         self.pending_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="onSurfaceVariant")
         
-        self.mode_text = ft.Text("单账号模式", size=14, weight=ft.FontWeight.BOLD, color="primary")
-        self.mode_icon = ft.Icon(PERSON, color="primary", size=18)
-        
-        self.single_mode_btn = ft.FilledButton(
-            "单账号",
-            icon=PERSON,
-            tooltip="仅对当前活动账号的关注贴吧签到",
-            on_click=lambda e: self._set_mode("single"),
-        )
-        self.matrix_mode_btn = ft.OutlinedButton(
-            "矩阵全扫",
-            icon=GROUP_WORK,
-            tooltip="对所有账号及其关注贴吧执行签到",
-            on_click=lambda e: self._set_mode("matrix"),
-        )
-        mode_switcher = ft.Row(
-            [self.single_mode_btn, self.matrix_mode_btn],
-            spacing=6,
-        )
-
         # 头部账号切换芯片（单账号模式签的就是当前账号）；
         # 执行中禁止切号：切号会重建列表/统计，而签到流仍在跑原账号
         from ..components.account_switcher import AccountSwitchChip
@@ -221,11 +161,8 @@ class SignPage:
                 ),
                 ft.Column(
                     controls=[
-                        ft.Row([
-                            ft.Text("智能签到终端 / SMART SIGN", size=20, weight=ft.FontWeight.BOLD, color="primary"),
-                            mode_switcher
-                        ]),
-                        ft.Text("支持单账号管理与多账号矩阵全扫流", size=11, color="onSurfaceVariant"),
+                        ft.Text("智能签到终端 / SMART SIGN", size=20, weight=ft.FontWeight.BOLD, color="primary"),
+                        ft.Text("管理当前账号签到 · 一键矩阵全扫", size=11, color="onSurfaceVariant"),
                     ],
                     spacing=5,
                 ),
@@ -265,6 +202,17 @@ class SignPage:
         self.sign_btn_text = ft.Text("启动签到流", color="onSurfaceVariant", size=12, weight=ft.FontWeight.W_500)
         # 本次将签范围（启动前可知，不再靠猜）
         self.scope_text = ft.Text("", size=10, color="onSurfaceVariant", text_align=ft.TextAlign.CENTER)
+        # 矩阵全扫次级入口：范围常显在按钮标签上，点击走确认弹窗（取代整页矩阵模式）
+        self.matrix_btn = ft.OutlinedButton(
+            "矩阵全扫",
+            icon=GROUP_WORK,
+            tooltip="所有可用账号依次签到（账号间防关联延迟），点击后确认范围与预计时长",
+            on_click=lambda e: self.page.run_task(self._do_sign_matrix, e),
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.padding.symmetric(horizontal=14, vertical=8),
+            ),
+        )
 
         self.main_action = ft.Container(
             content=ft.Column([
@@ -291,6 +239,7 @@ class SignPage:
                         ),
                         self.sign_btn_text,
                         self.scope_text,
+                        self.matrix_btn,
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
                 ),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
@@ -318,7 +267,7 @@ class SignPage:
             ft.Text("多账号防关联间隔", size=12, color="error"),
             ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Text("账号间延迟：矩阵模式与守护共用", size=9, color="onSurfaceVariant"),
-        ], visible=False)
+        ])
 
         # 侧边设置面板 (Cyber Style)
         settings_panel = ft.Container(
@@ -532,83 +481,6 @@ class SignPage:
             items.append(card)
         return items
 
-    def _build_account_queue_items(self):
-        """矩阵态账号队列：每账号一行账目 + 挂起/孤儿聚合行。
-
-        吧级明细不在矩阵态重复展示——切单账号侧（头部芯片）看更全还能操作；
-        执行中当前账号行高亮、行内计数逐吧跳动（见 _do_sign_matrix 联动）。
-        """
-        rollup = getattr(self, "_matrix_rollup", None) or {
-            "accounts": [], "suspended_forums": 0, "orphan_forums": 0
-        }
-        self._matrix_row_controls = {}
-        items = []
-
-        for a in rollup["accounts"]:
-            done = a["pending"] == 0 and a["total"] > 0
-            if a["proxy_status"] == "ok":
-                proxy_label, proxy_color, proxy_icon = "代理", COLORS.GREEN, VPN_LOCK
-            elif a["proxy_status"] == "suspended":
-                proxy_label, proxy_color, proxy_icon = "代理失效", COLORS.RED_ACCENT_400, VPN_LOCK
-            else:
-                proxy_label, proxy_color, proxy_icon = "裸连", COLORS.AMBER, PUBLIC
-
-            counts_text = ft.Text(
-                f"已签 {a['signed']}  待签 {a['pending']}" + (f"  熔断 {a['banned']}" if a["banned"] else ""),
-                size=11, color="onSurfaceVariant",
-            )
-            status_icon = ft.Icon(
-                CHECK_CIRCLE if done else PLAY_ARROW_ROUNDED,
-                color=COLORS.GREEN_ACCENT_400 if done else "primary", size=20,
-            )
-            row = ft.Container(
-                content=ft.Row([
-                    status_icon,
-                    ft.Text(a["name"], size=13, weight=ft.FontWeight.W_600, expand=True),
-                    ft.Container(
-                        content=ft.Row(
-                            [ft.Icon(proxy_icon, size=10, color="white"),
-                             ft.Text(proxy_label, size=9, color="white")],
-                            spacing=2,
-                        ),
-                        bgcolor=proxy_color,
-                        padding=ft.padding.symmetric(horizontal=5, vertical=2),
-                        border_radius=4,
-                    ),
-                    counts_text,
-                ], spacing=10),
-                bgcolor=with_opacity(0.02, "primary") if done else with_opacity(0.01, "onSurface"),
-                padding=10,
-                border_radius=8,
-                border=ft.border.all(1, with_opacity(0.05, "onSurface")),
-            )
-            self._matrix_row_controls[a["account_id"]] = {
-                "row": row, "counts": counts_text, "icon": status_icon,
-            }
-            items.append(row)
-
-        if rollup.get("suspended_forums"):
-            items.append(ft.Container(
-                content=ft.Row([
-                    ft.Icon(PAUSE_CIRCLE_OUTLINED, color="error", size=18),
-                    ft.Text("挂起/封禁账号", size=12, color="error", expand=True),
-                    ft.Text(f"{rollup['suspended_forums']} 吧不参与执行", size=10, color="onSurfaceVariant"),
-                ], spacing=10),
-                bgcolor=with_opacity(0.03, "error"),
-                padding=10, border_radius=8,
-            ))
-        if rollup.get("orphan_forums"):
-            items.append(ft.Container(
-                content=ft.Row([
-                    ft.Icon(PERSON_OFF, color="onSurfaceVariant", size=18),
-                    ft.Text("孤儿数据（账号已删除）", size=12, color="onSurfaceVariant", expand=True),
-                    ft.Text(f"{rollup['orphan_forums']} 吧仅存历史", size=10, color="onSurfaceVariant"),
-                ], spacing=10),
-                bgcolor=with_opacity(0.01, "onSurface"),
-                padding=10, border_radius=8,
-            ))
-        return items
-
     async def _ensure_fresh_day(self):
         """长开页面跨天自愈：日期变更即重置签到状态并重载（统计陈旧问题）"""
         today = datetime.now().date()
@@ -659,10 +531,7 @@ class SignPage:
                 self.page.update()
             return
 
-        if self._mode == "single":
-            await self._do_sign_single()
-        else:
-            await self._do_sign_matrix()
+        await self._do_sign_single()
 
     async def _do_sign_single(self):
         if self._is_signing: return
@@ -801,12 +670,6 @@ class SignPage:
         d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
         ad_min, ad_max = self._validated_delay(self.acc_delay_min_input.value, self.acc_delay_max_input.value, (30.0, 120.0))
 
-        # 执行期账号队列行内计数基线（从点击时 rollup 起算）
-        self._matrix_live = {
-            a["account_id"]: {"signed": a["signed"], "pending": a["pending"], "total": a["total"], "banned": a["banned"]}
-            for a in rollup["accounts"]
-        }
-
         # 矩阵模式：分母 = 点击时实时全矩阵待签数（与核心流剔除口径一致，进度能走满）
         total_est = max(pending_total, 1)
         current_task_idx = 0
@@ -827,26 +690,6 @@ class SignPage:
 
                     self.progress_bar.value = progress
                     self.status_text.value = f"[{current_task_idx}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
-
-                    # 账号队列行内联动：当前账号行高亮 + 计数逐吧跳动
-                    aid = result.get("account_id")
-                    live = self._matrix_live.get(aid)
-                    row_ctl = self._matrix_row_controls.get(aid)
-                    if live and row_ctl:
-                        live["pending"] = max(live["pending"] - 1, 0)
-                        if result.get("success"):
-                            live["signed"] += 1
-                        suffix = f"  熔断 {live['banned']}" if live.get("banned") else ""
-                        row_ctl["counts"].value = f"已签 {live['signed']}  待签 {live['pending']}{suffix}"
-                        done = live["pending"] == 0 and live["total"] > 0
-                        row_ctl["icon"].name = CHECK_CIRCLE if done else PLAY_ARROW_ROUNDED
-                        row_ctl["icon"].color = COLORS.GREEN_ACCENT_400 if done else "primary"
-                        for rid, ctl in self._matrix_row_controls.items():
-                            ctl["row"].bgcolor = (
-                                with_opacity(0.06, "primary") if rid == aid and live["pending"] > 0
-                                else (with_opacity(0.02, "primary") if self._matrix_live[rid]["pending"] == 0 and self._matrix_live[rid]["total"] > 0
-                                      else with_opacity(0.01, "onSurface"))
-                            )
 
                     # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
                     self.page.pubsub.send_all_on_topic("sign_progress", {
