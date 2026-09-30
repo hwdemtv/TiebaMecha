@@ -84,12 +84,102 @@ class ForumRepository:
             result = await session.execute(stmt.order_by(Forum.fname))
             return list(result.scalars().all())
     async def get_all_unique_fnames(self) -> list[str]:
-        """获取所有账号关注过的唯一贴吧名称列表（唯一实现，勿重复定义）"""
+        """获取所有账号关注过的唯一贴吧名称列表（唯一实现，勿重复定义；排除已隐藏吧）"""
         async with self.async_session() as session:
             result = await session.execute(
-                select(Forum.fname).distinct().order_by(Forum.fname)
+                select(Forum.fname).distinct().where(Forum.is_hidden == False).order_by(Forum.fname)
             )
             return list(result.scalars().all())
+    async def get_sign_rollup_by_account(self) -> dict:
+        """按账号聚合签到账目——矩阵视图 / 头部统计 / 启动分母 / 确认弹窗的单一口径。
+
+        账号行仅含矩阵可用账号（与 get_matrix_accounts 同口径，按权重降序）；
+        挂起/封禁账号与孤儿（账号已删）的吧数各自聚合，不并入账号行。
+        failed_today 依赖跨天复位正确（昨日失败应在次日回到 pending）。
+        """
+        from datetime import datetime, time as dtime
+        from sqlalchemy import and_, case
+
+        async with self.async_session() as session:
+            today_start = datetime.combine(datetime.now().date(), dtime.min)
+
+            acc_list = (await session.execute(
+                select(Account).where(
+                    Account.status.notin_(["suspended", "suspended_proxy", "banned", "expired"])
+                ).order_by(Account.post_weight.desc())
+            )).scalars().all()
+            eligible_ids = {a.id for a in acc_list}
+
+            all_ids = {
+                row[0] for row in (await session.execute(select(Account.id))).all()
+            }
+
+            proxy_ids = {a.proxy_id for a in acc_list if a.proxy_id}
+            proxies = {}
+            if proxy_ids:
+                proxies = {
+                    p.id: p for p in (await session.execute(
+                        select(Proxy).where(Proxy.id.in_(list(proxy_ids)))
+                    )).scalars().all()
+                }
+
+            # 非隐藏吧按账号聚合：total(非熔断) / banned / signed / failed_today
+            rows = (await session.execute(
+                select(
+                    Forum.account_id,
+                    func.sum(case((Forum.is_banned == False, 1), else_=0)),
+                    func.sum(case((Forum.is_banned == True, 1), else_=0)),
+                    func.sum(case(
+                        (and_(Forum.is_banned == False, Forum.is_sign_today == True), 1), else_=0
+                    )),
+                    func.sum(case(
+                        (and_(
+                            Forum.is_banned == False,
+                            Forum.is_sign_today == False,
+                            Forum.last_sign_status == "failure",
+                            Forum.last_sign_date >= today_start,
+                        ), 1), else_=0
+                    )),
+                )
+                .where(Forum.is_hidden == False)
+                .group_by(Forum.account_id)
+            )).all()
+
+            stats: dict[int, dict] = {}
+            suspended_forums = 0
+            orphan_forums = 0
+            for account_id, total, banned, signed, failed_today in rows:
+                total, banned = int(total or 0), int(banned or 0)
+                signed, failed_today = int(signed or 0), int(failed_today or 0)
+                if account_id in eligible_ids:
+                    stats[account_id] = {
+                        "total": total, "banned": banned,
+                        "signed": signed, "failed_today": failed_today,
+                        "pending": max(total - signed - failed_today, 0),
+                    }
+                elif account_id in all_ids:
+                    suspended_forums += total + banned
+                else:
+                    orphan_forums += total + banned
+
+            accounts = []
+            for a in acc_list:
+                s = stats.get(a.id, {"total": 0, "banned": 0, "signed": 0, "failed_today": 0, "pending": 0})
+                if a.proxy_id:
+                    proxy = proxies.get(a.proxy_id)
+                    proxy_status = "ok" if (proxy and proxy.is_active) else "suspended"
+                else:
+                    proxy_status = "missing"
+                accounts.append({
+                    "account_id": a.id, "name": a.name,
+                    "proxy_id": a.proxy_id, "proxy_status": proxy_status, **s,
+                })
+
+            return {
+                "accounts": accounts,
+                "suspended_forums": suspended_forums,
+                "orphan_forums": orphan_forums,
+            }
     async def update_forum_sign(self, forum_id: int, success: bool) -> None:
         """
         更新签到状态（优化版：按天去重计数，保证 Total = Success + Failure）
@@ -157,14 +247,6 @@ class ForumRepository:
             
             await session.commit()
             return {"updated_count": stats_updated}
-    async def reset_daily_sign(self) -> None:
-        """重置每日签到状态(批量更新,避免N+1问题)"""
-        async with self.async_session() as session:
-            # 使用批量更新语句,一次性更新所有记录
-            await session.execute(
-                update(Forum).values(is_sign_today=False, last_sign_status="pending")
-            )
-            await session.commit()
     async def check_and_reset_daily_sign(self) -> None:
         """智能检测并重置跨天的签到状态（包含断签检测）"""
         from datetime import timedelta
@@ -185,9 +267,10 @@ class ForumRepository:
                     # 断签判定必须基于昨日最终状态，须在跨天重置覆盖前留存
                     original_status = forum.last_sign_status
 
-                    # 1. 如果今天还没过完，没跨天，不需要重置签到状态
-                    # 但是如果发现状态异常（比如之前某种错误导致没有重置），则以 last_date 为准
-                    if last_date < today and forum.is_sign_today:
+                    # 1. 跨天重置：is_sign_today 与 last_sign_status 任一残留都要复位。
+                    #    失败路径只置 last_sign_status 不置 is_sign_today，
+                    #    若只判 is_sign_today，昨日失败的吧会以"失败"混入次日账目
+                    if last_date < today and (forum.is_sign_today or forum.last_sign_status != "pending"):
                         forum.is_sign_today = False
                         forum.last_sign_status = "pending"
                         has_changes = True

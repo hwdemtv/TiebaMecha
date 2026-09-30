@@ -272,20 +272,6 @@ class TestForumCRUD:
         forums = await db.get_forums()
         assert forums[0].sign_count == 6
 
-    async def test_reset_daily_sign(self, db):
-        """Test resetting daily sign status."""
-        acc = await db.add_account(name="test", bduss="bduss")
-        forum1 = await db.add_forum(fid=1, fname="forum1", account_id=acc.id)
-        forum2 = await db.add_forum(fid=2, fname="forum2", account_id=acc.id)
-
-        await db.update_forum_sign(forum1.id, success=True)
-        await db.update_forum_sign(forum2.id, success=True)
-
-        await db.reset_daily_sign()
-
-        forums = await db.get_forums()
-        assert all(not f.is_sign_today for f in forums)
-
     async def test_check_and_reset_daily_sign_clears_streak_after_yesterday_failure(self, db):
         """Test that yesterday failure clears continuous streak."""
         from datetime import datetime, timedelta
