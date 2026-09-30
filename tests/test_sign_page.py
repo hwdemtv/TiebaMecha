@@ -293,7 +293,7 @@ class TestDoSignSingle:
 
         assert sign_page._is_signing is False
         assert sign_page.progress_bar.visible is False
-        assert sign_page.sign_btn_text.value == "启动签到流"
+        assert sign_page.sign_btn.text.startswith("启动签到流")
         sign_page.page.pubsub.send_all_on_topic.assert_called()
 
         topic, payload = sign_page.page.pubsub.send_all_on_topic.call_args_list[-1][0]
@@ -314,7 +314,7 @@ class TestDoSignSingle:
             await sign_page._do_sign_single()
 
         assert sign_page._is_signing is False, "异常后必须复位执行状态"
-        assert sign_page.sign_btn_text.value == "启动签到流"
+        assert sign_page.sign_btn.text.startswith("启动签到流")
 
 
 # ========== 整改批次一：页面守卫 ==========
@@ -447,10 +447,13 @@ class TestBatch3Page:
         assert sign_page._is_signing is False, "确认前不得进入执行态"
         mock_flow.assert_not_called()
 
-    async def test_scope_text_reflects_pending(self, sign_page, db):
-        """整改#19: 大按钮旁常显本次将签范围"""
+    async def test_main_button_label_carries_scope(self, sign_page, db):
+        """左侧面板简化: 待签范围并入主按钮标签，节奏摘要行常显当前参数"""
         await _add_account_with_forum(db, "acc_scope", [(35, "scope_forum", "success"), (36, "scope_forum2", None)])
         await sign_page.load_data()
+        sign_page.delay_min_input.value = "8"
+        sign_page.delay_max_input.value = "15"
+        sign_page.refresh_ui()
 
-        assert "本次将签" in (sign_page.scope_text.value or "")
-        assert "1 吧" in (sign_page.scope_text.value or "")
+        assert sign_page.sign_btn.text == "启动签到流 · 当前账号 1 吧"
+        assert "吧间 8~15s" in sign_page.rhythm_summary.value

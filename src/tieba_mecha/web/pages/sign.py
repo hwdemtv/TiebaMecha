@@ -6,7 +6,6 @@ from ..flet_compat import COLORS
 from datetime import datetime
 from typing import List, Optional
 
-from ..components import create_gradient_button, CoreButtonWithLabel, GRADIENT_CYAN
 from ..components.icons import (
     GROUP_WORK, ARROW_BACK_IOS_NEW,
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
@@ -118,8 +117,13 @@ class SignPage:
             self.success_stat.value = str(self._stats['success'])
             self.failure_stat.value = str(self._stats['failure'])
             self.pending_stat.value = str(self._stats.get('pending', 0))
-            if hasattr(self, "scope_text"):
-                self.scope_text.value = f"本次将签：当前账号 {self._stats.get('pending', 0)} 吧"
+            if hasattr(self, "sign_btn") and not self._is_signing:
+                self.sign_btn.text = f"启动签到流 · 当前账号 {self._stats.get('pending', 0)} 吧"
+            if hasattr(self, "rhythm_summary"):
+                self.rhythm_summary.value = (
+                    f"吧间 {self.delay_min_input.value}~{self.delay_max_input.value}s"
+                    f" · 账号间 {self.acc_delay_min_input.value}~{self.acc_delay_max_input.value}s"
+                )
             # 矩阵范围常显在次级按钮上，取代整页账号队列
             if hasattr(self, "matrix_btn"):
                 accs = (getattr(self, "_matrix_rollup", None) or {}).get("accounts", [])
@@ -194,14 +198,24 @@ class SignPage:
             alignment=ft.MainAxisAlignment.START,
         )
 
-        # 操作区
-        self.sync_btn = create_gradient_button("同步贴吧", icon=SYNC_ROUNDED, on_click=lambda e: self.page.run_task(self._do_sync, e))
+        # 同步按钮：语义是刷新右侧列表，归位到执行队列标题行
+        self.sync_btn = ft.IconButton(
+            icon=SYNC_ROUNDED,
+            icon_size=18,
+            tooltip="同步贴吧列表（全矩阵账号轮换拉取关注）",
+            on_click=lambda e: self.page.run_task(self._do_sync, e),
+        )
         
-        # 主控按钮组件
-        self.sign_btn_icon = ft.Icon(PLAY_ARROW_ROUNDED, color="onSurface", size=30)
-        self.sign_btn_text = ft.Text("启动签到流", color="onSurfaceVariant", size=12, weight=ft.FontWeight.W_500)
-        # 本次将签范围（启动前可知，不再靠猜）
-        self.scope_text = ft.Text("", size=10, color="onSurfaceVariant", text_align=ft.TextAlign.CENTER)
+        # 主控按钮：范围并入标签，执行中切换为"停止签到流"（红色）
+        self.sign_btn = ft.FilledButton(
+            "启动签到流",
+            icon=PLAY_ARROW_ROUNDED,
+            on_click=lambda e: self.page.run_task(self._do_sign, e),
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
+            ),
+        )
         # 矩阵全扫次级入口：范围常显在按钮标签上，点击走确认弹窗（取代整页矩阵模式）
         self.matrix_btn = ft.OutlinedButton(
             "矩阵全扫",
@@ -210,41 +224,8 @@ class SignPage:
             on_click=lambda e: self.page.run_task(self._do_sign_matrix, e),
             style=ft.ButtonStyle(
                 shape=ft.RoundedRectangleBorder(radius=8),
-                padding=ft.padding.symmetric(horizontal=14, vertical=8),
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
             ),
-        )
-
-        self.main_action = ft.Container(
-            content=ft.Column([
-                ft.Text("执行控制", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
-                ft.Container(
-                    content=ft.Column([
-                        ft.Container(
-                            content=self.sign_btn_icon,
-                            gradient=ft.RadialGradient(
-                                colors=GRADIENT_CYAN,
-                                center=ft.alignment.center,
-                            ),
-                            width=70,
-                            height=70,
-                            border_radius=35,
-                            shadow=ft.BoxShadow(
-                                spread_radius=3,
-                                blur_radius=30,
-                                color=with_opacity(0.3, GRADIENT_CYAN[0]),
-                            ),
-                            ink=True,
-                            on_click=lambda e: self.page.run_task(self._do_sign, e),
-                            alignment=ft.alignment.center,
-                        ),
-                        self.sign_btn_text,
-                        self.scope_text,
-                        self.matrix_btn,
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
-                ),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            padding=10,
-            width=300,
         )
 
         # 进度与状态
@@ -262,36 +243,25 @@ class SignPage:
         self.acc_delay_min_input = ft.TextField(label="最小延迟", value="30", text_size=11, expand=True, suffix_text="秒")
         self.acc_delay_max_input = ft.TextField(label="最大延迟", value="120", text_size=11, expand=True, suffix_text="秒")
 
-        self.matrix_settings = ft.Column([
-            ft.Divider(height=5, color="transparent"),
-            ft.Text("多账号防关联间隔", size=12, color="error"),
-            ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Text("账号间延迟：矩阵模式与守护共用", size=9, color="onSurfaceVariant"),
-        ])
-
-        # 侧边设置面板 (Cyber Style)
-        settings_panel = ft.Container(
-            content=ft.Column([
-                ft.Text("行为频率配置", size=12, weight=ft.FontWeight.BOLD, color="primary"),
+        # 节奏参数折叠区：专家参数默认收起，摘要行常显当前值
+        self.rhythm_summary = ft.Text("", size=10, color="onSurfaceVariant")
+        self.matrix_settings = ft.ExpansionTile(
+            title=ft.Text("节奏参数", size=12, weight=ft.FontWeight.BOLD, color="primary"),
+            subtitle=self.rhythm_summary,
+            controls=[
                 ft.Row([
                     self.delay_min_input,
                     ft.Text("至", size=11, color="onSurfaceVariant"),
                     self.delay_max_input,
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text("吧间延迟：单账号、矩阵与守护共用", size=9, color="onSurfaceVariant"),
-                self.matrix_settings,
-                ft.Divider(height=20, color="transparent"),
-                self.sync_btn,
-            ], spacing=15),
-            padding=20,
-            bgcolor=with_opacity(0.03, "onSurface"),
-            border_radius=12,
-            width=300,
+                ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Text("账号间延迟：矩阵与守护共用", size=9, color="onSurfaceVariant"),
+            ],
         )
 
-        # 定时守护配置面板
-        self.daemon_switch = ft.Switch(label="启用周期执行", value=False, label_position=ft.LabelPosition.RIGHT)
-        # 守护模式独立单选：与页面执行模式解耦——保存的即此值，不再隐式快照页面当前模式
+        # 定时守护配置（压缩为两行 + 保存键）
+        self.daemon_switch = ft.Switch(value=False)
         self.daemon_mode_radio = ft.RadioGroup(
             value="single",
             content=ft.Row(
@@ -307,34 +277,39 @@ class SignPage:
             label="触发时间",
             value="08:00",
             text_size=12,
-            width=260,
             prefix_icon=ACCESS_TIME_ROUNDED,
-            hint_text="HH:MM (如 08:30)",
+            hint_text="HH:MM",
         )
         self.daemon_save_btn = ft.FilledButton(
             "保存配置并生效",
             icon=BOLT,
             on_click=self._save_daemon_config,
-            width=260,
             style=ft.ButtonStyle(
                 bgcolor=COLORS.SECONDARY,
                 shape=ft.RoundedRectangleBorder(radius=8),
-            )
+            ),
         )
 
-        daemon_panel = ft.Container(
+        # 左侧合并控制面板：执行/节奏/守护三段一卡，消除框架开销
+        control_panel = ft.Container(
             content=ft.Column([
-                ft.Text("守护进程", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
-                ft.Container(content=self.daemon_switch, padding=ft.padding.only(left=-10)),
-                ft.Text("守护执行模式", size=10, color="onSurfaceVariant"),
-                self.daemon_mode_radio,
+                self.sign_btn,
+                self.matrix_btn,
+                ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
+                self.matrix_settings,
+                ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
+                ft.Row([
+                    ft.Text("定时守护", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
+                    ft.Container(expand=True),
+                    ft.Text("启用周期执行", size=11, color="onSurfaceVariant"),
+                    self.daemon_switch,
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.daemon_time,
-                ft.Divider(height=5, color="transparent"),
+                self.daemon_mode_radio,
                 self.daemon_save_btn,
-            ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            padding=20,
-            bgcolor=with_opacity(0.05, "secondary"),
-            border=ft.border.all(1, with_opacity(0.2, "secondary")),
+            ], spacing=12),
+            padding=16,
+            bgcolor=with_opacity(0.03, "onSurface"),
             border_radius=12,
             width=300,
         )
@@ -345,20 +320,16 @@ class SignPage:
                 header,
                 ft.Divider(height=1, color=with_opacity(0.1, "onSurface")),
                 ft.Row([
-                    # 左侧控制面板 (固定宽度，可滚动)
+                    # 左侧控制面板（合并单卡，常规视口零滚动）
                     ft.Container(
-                        content=ft.Column([
-                            self.main_action,
-                            settings_panel,
-                            daemon_panel,
-                        ], spacing=20, scroll=ft.ScrollMode.AUTO),
+                        content=ft.Column([control_panel], spacing=0),
                         width=320,
                     ),
-                    # 右侧执行队列 (自动扩展)
+                    # 右侧执行队列（自动扩展）
                     ft.Column([
                         ft.Row([
                             ft.Text("执行队列", size=14, weight=ft.FontWeight.W_500),
-                            ft.Container(width=10),
+                            self.sync_btn,
                             self.status_text,
                         ]),
                         self.progress_bar,
@@ -520,6 +491,24 @@ class SignPage:
         self.status_text.value = ""
         self.page.update()
 
+    def _set_main_running(self, running: bool):
+        """主按钮运行态：执行中变红色"停止签到流"，结束恢复带待签范围标签"""
+        if running:
+            self.sign_btn.text = "停止签到流"
+            self.sign_btn.icon = STOP_CIRCLE_ROUNDED
+            self.sign_btn.style = ft.ButtonStyle(
+                bgcolor=COLORS.ERROR,
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
+            )
+        else:
+            self.sign_btn.text = f"启动签到流 · 当前账号 {self._stats.get('pending', 0)} 吧"
+            self.sign_btn.icon = PLAY_ARROW_ROUNDED
+            self.sign_btn.style = ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
+            )
+
     async def _do_sign(self, e):
         await self._ensure_fresh_day()
         if self._is_signing:
@@ -553,8 +542,7 @@ class SignPage:
         self.progress_bar.value = 0
 
         # UI 切换为停止状态
-        self.sign_btn_icon.name = STOP_CIRCLE_ROUNDED
-        self.sign_btn_text.value = "停止签到流"
+        self._set_main_running(True)
         self.page.update()
 
         d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
@@ -598,8 +586,7 @@ class SignPage:
             self.status_text.value = ""
 
             # UI 恢复
-            self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
-            self.sign_btn_text.value = "启动签到流"
+            self._set_main_running(False)
 
             # 发送结束广播
             self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
@@ -663,8 +650,7 @@ class SignPage:
         self.progress_bar.value = 0
 
         # UI 切换为停止状态
-        self.sign_btn_icon.name = STOP_CIRCLE_ROUNDED
-        self.sign_btn_text.value = "停止签到流"
+        self._set_main_running(True)
         self.page.update()
 
         d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
@@ -711,8 +697,7 @@ class SignPage:
             self.status_text.value = ""
 
             # UI 恢复
-            self.sign_btn_icon.name = PLAY_ARROW_ROUNDED
-            self.sign_btn_text.value = "启动签到流"
+            self._set_main_running(False)
 
             # 发送结束广播
             self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
