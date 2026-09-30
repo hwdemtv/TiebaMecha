@@ -79,12 +79,13 @@ class MyPostsTabMixin:
         ], spacing=8, wrap=True)
 
         # 存活统计徽章（全部/存活/疑似/已删/未知）：构建期一次性建好静态结构，
-        # 之后只做 text/bgcolor 简单属性填充——flet 0.23.2 web 端 controls 列表替换不可靠
+        # 之后只做 text/bgcolor 简单属性填充——flet 0.23.2 web 端 controls 列表替换不可靠。
+        # wrap 绝不可开：Wrap 布局给子控件有界宽度，内部 Row 撑满整行 → 徽章全宽竖排
         self._stat_badges: dict[str, ft.Container] = {}
         self._stat_texts: dict[str, ft.Text] = {}
         self._stats_row = ft.Row(
             [self._build_stat_badge(s) for s in ("all", "alive", "suspected", "dead", "unknown")],
-            spacing=8, wrap=True,
+            spacing=8,
         )
 
         # 一键检测（当前筛选结果）

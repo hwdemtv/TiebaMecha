@@ -1207,7 +1207,9 @@ class AccountsPage:
             ("banned", icons.BLOCK, "封禁", "error"),
             ("deleted", icons.DELETE_SWEEP_OUTLINED, "有删帖", "#FF9800"),
         ]
-        row = ft.Row(spacing=8, wrap=True)
+        # wrap 绝不可开：Row 带 wrap 变 Wrap 布局，子控件拿到有界宽度后
+        # 内部 Row(mainAxisSize=max)撑满整行 → 徽章全宽竖排（A/B 实测）
+        row = ft.Row(spacing=8)
         for mode, icon, label, color in chip_defs:
             text = ft.Text("", size=12, color=color, weight=ft.FontWeight.W_500)
             body = ft.Container(

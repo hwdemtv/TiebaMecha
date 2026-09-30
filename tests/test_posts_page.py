@@ -240,6 +240,8 @@ class TestSurvivalBadges:
         posts_page.build()
         posts_page.db.rows.extend(self._extra_rows())
         await posts_page._reload_rows()
+        # wrap 绝不可开：Wrap 布局给子控件有界宽度 → 徽章全宽竖排（A/B 实测）
+        assert not posts_page._stats_row.wrap
         assert posts_page._stat_texts["all"].value == "全部 4"
         assert posts_page._stat_texts["alive"].value == "存活 1"
         assert posts_page._stat_texts["suspected"].value == "疑似删除 1"

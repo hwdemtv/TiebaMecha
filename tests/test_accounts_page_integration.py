@@ -421,6 +421,8 @@ async def test_matrix_stat_chip_toggles_and_filters():
     # 徽章须是 Row 直接 Container 子项——包 GestureDetector 会撑满整行致竖排
     assert all(isinstance(c, ft.Container) and c.on_click for c in page.matrix_header_info.controls)
     assert len(page.matrix_header_info.controls) == 4
+    # wrap 绝不可开：Wrap 布局给子控件有界宽度 → 全宽竖排（A/B 实测）
+    assert not page.matrix_header_info.wrap
 
     page._on_matrix_stat_chip_click("banned")  # 再点取消 → 全部
     assert page._matrix_stat_filter == "all"
