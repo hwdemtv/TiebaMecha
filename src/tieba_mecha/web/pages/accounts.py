@@ -34,8 +34,7 @@ class AccountsPage:
         self._matrix_stats = []
         self._matrix_search_text = ""
         self._matrix_selected_fnames: set[str] = set()
-        self._matrix_banned_filter = False  # 封禁筛选开关
-        self._matrix_deleted_filter = False  # 被删筛选开关
+        self._matrix_stat_filter = "all"  # 吧库统计徽章筛选态：all/covered/banned/deleted
         self._banned_forum_details = []
         self._banned_forum_map: dict[str, list[dict]] = {}
         self._active_tab_index = 0
@@ -382,21 +381,7 @@ class AccountsPage:
             on_click=lambda e: self._show_follow_forum_dialog(e),
         )
 
-        self.banned_filter_btn = ft.IconButton(
-            icon=icons.FILTER_LIST,
-            tooltip="筛选封禁贴吧",
-            icon_color="onSurfaceVariant",
-            on_click=self._on_toggle_banned_filter,
-        )
-
-        self.deleted_filter_btn = ft.IconButton(
-            icon=icons.DELETE_SWEEP_OUTLINED,
-            tooltip="筛选有删帖的贴吧",
-            icon_color="onSurfaceVariant",
-            on_click=self._on_toggle_deleted_filter,
-        )
-
-        self.matrix_header_info = ft.Text("战略贴吧总数: 0 | 矩阵覆盖率: 0%", size=12, color="onSurfaceVariant")
+        self.matrix_header_info = self._build_matrix_stat_chips()
 
         # 批量操作栏
         self.matrix_select_all_cb = ft.Checkbox(label="全选", on_change=self._on_matrix_select_all)
@@ -458,7 +443,7 @@ class AccountsPage:
 
         return ft.Column(
             controls=[
-                ft.Row([self._matrix_search_field, self.banned_filter_btn, self.deleted_filter_btn, sync_btn, clear_search_btn, follow_btn], spacing=10),
+                ft.Row([self._matrix_search_field, sync_btn, clear_search_btn, follow_btn], spacing=10),
                 self.matrix_bulk_bar,
                 self.matrix_header_info,
                 ft.Divider(color=with_opacity(0.1, "primary"), height=1),
@@ -607,30 +592,10 @@ class AccountsPage:
         self._matrix_current_page = 1
         self.refresh_ui()
 
-    def _on_toggle_banned_filter(self, e):
-        """切换封禁贴吧筛选"""
-        self._matrix_banned_filter = not self._matrix_banned_filter
+    def _on_matrix_stat_chip_click(self, mode: str):
+        """统计徽章即筛选：点击切换（纯客户端，不查库）；再点已激活的回全部。"""
+        self._matrix_stat_filter = "all" if self._matrix_stat_filter == mode else mode
         self._matrix_current_page = 1
-        if self._matrix_banned_filter:
-            self.banned_filter_btn.icon = icons.FILTER_LIST
-            self.banned_filter_btn.icon_color = "error"
-            self.banned_filter_btn.tooltip = "显示全部贴吧"
-        else:
-            self.banned_filter_btn.icon = icons.FILTER_LIST
-            self.banned_filter_btn.icon_color = "onSurfaceVariant"
-            self.banned_filter_btn.tooltip = "筛选封禁贴吧"
-        self.refresh_ui()
-
-    def _on_toggle_deleted_filter(self, e):
-        """切换被删帖贴吧筛选"""
-        self._matrix_deleted_filter = not self._matrix_deleted_filter
-        self._matrix_current_page = 1
-        if self._matrix_deleted_filter:
-            self.deleted_filter_btn.icon_color = "error"
-            self.deleted_filter_btn.tooltip = "显示全部贴吧"
-        else:
-            self.deleted_filter_btn.icon_color = "onSurfaceVariant"
-            self.deleted_filter_btn.tooltip = "筛选有删帖的贴吧"
         self.refresh_ui()
 
     def _on_clear_matrix_search(self, e):
@@ -924,11 +889,12 @@ class AccountsPage:
                 fname = stat['fname']
                 if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
                     continue
-                # 封禁筛选：仅选中被封禁的贴吧
-                if self._matrix_banned_filter and not stat.get('is_banned', False):
+                # 统计徽章筛选：仅选中符合当前筛选态的贴吧
+                if self._matrix_stat_filter == "banned" and not stat.get('is_banned', False):
                     continue
-                # 被删筛选：仅选中有删帖记录的贴吧
-                if self._matrix_deleted_filter and stat.get('deleted_count', 0) == 0:
+                if self._matrix_stat_filter == "deleted" and stat.get('deleted_count', 0) == 0:
+                    continue
+                if self._matrix_stat_filter == "covered" and stat.get('account_count', 0) == 0:
                     continue
                 self._matrix_selected_fnames.add(fname)
         else:
@@ -1227,23 +1193,57 @@ class AccountsPage:
         )
         self.page.open(dialog)
 
+    def _build_matrix_stat_chips(self) -> ft.Row:
+        """吧库统计徽章行（战略资源/火力覆盖/封禁/有删帖）。
+
+        一次构建静态结构，之后只做 text/bgcolor 简单属性填充——
+        flet 0.23.2 web 端对 controls 列表替换的 patch 不可靠（见 flet_web_layout_pitfalls）。
+        """
+        self._matrix_stat_chips: dict[str, ft.Container] = {}
+        self._matrix_stat_texts: dict[str, ft.Text] = {}
+        chip_defs = [
+            ("all", icons.SELECT_ALL, "战略资源", COLORS.PRIMARY),
+            ("covered", icons.LOCAL_FIRE_DEPARTMENT_ROUNDED, "火力覆盖", "green"),
+            ("banned", icons.BLOCK, "封禁", "error"),
+            ("deleted", icons.DELETE_SWEEP_OUTLINED, "有删帖", "#FF9800"),
+        ]
+        row = ft.Row(spacing=8, wrap=True)
+        for mode, icon, label, color in chip_defs:
+            text = ft.Text("", size=12, color=color, weight=ft.FontWeight.W_500)
+            body = ft.Container(
+                content=ft.Row([ft.Icon(icon, size=14, color=color), text], spacing=4),
+                bgcolor=with_opacity(0.08, color),
+                padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                border_radius=6,
+                tooltip="显示全部贴吧" if mode == "all" else f"点击只看{label}的贴吧，再点一次取消",
+            )
+            self._matrix_stat_chips[mode] = body
+            self._matrix_stat_texts[mode] = text
+            row.controls.append(ft.GestureDetector(
+                content=body,
+                on_tap=lambda e, m=mode: self._on_matrix_stat_chip_click(m),
+                mouse_cursor=ft.MouseCursor.CLICK,
+            ))
+        return row
+
     def _update_matrix_header(self):
-        """更新吧库头部统计信息"""
+        """更新吧库统计徽章：计数恒为全集口径，激活态仅靠 bgcolor 简单属性区分。"""
         total = len(self._matrix_stats)
         covered = sum(1 for s in self._matrix_stats if s['account_count'] > 0)
         banned_count = sum(1 for s in self._matrix_stats if s.get('is_banned'))
         deleted_count = sum(1 for s in self._matrix_stats if s.get('deleted_count', 0) > 0)
         percent = (covered / total * 100) if total > 0 else 0
-        base_info = f"战略资源: {total} 个贴吧 | 矩阵实存火力涵盖: {covered} 个 (覆盖率 {percent:.1f}%)"
-        if banned_count > 0:
-            base_info += f" | 🚫 封禁: {banned_count} 个"
-        if deleted_count > 0:
-            base_info += f" | 🗑️ 有删帖: {deleted_count} 个"
-        if self._matrix_banned_filter:
-            base_info = f"🚫 封禁筛选模式 | 显示 {banned_count} 个被封禁贴吧"
-        elif self._matrix_deleted_filter:
-            base_info = f"🗑️ 删帖筛选模式 | 显示 {deleted_count} 个有删帖的贴吧"
-        self.matrix_header_info.value = base_info
+        labels = {
+            "all": f"战略资源 {total}",
+            "covered": f"火力覆盖 {covered} ({percent:.1f}%)",
+            "banned": f"封禁 {banned_count}",
+            "deleted": f"有删帖 {deleted_count}",
+        }
+        colors = {"all": COLORS.PRIMARY, "covered": "green", "banned": "error", "deleted": "#FF9800"}
+        for mode, text in self._matrix_stat_texts.items():
+            text.value = labels[mode]
+            self._matrix_stat_chips[mode].bgcolor = with_opacity(
+                0.30 if self._matrix_stat_filter == mode else 0.08, colors[mode])
 
     def _build_matrix_items(self) -> list[ft.Control]:
         """构建战略贴吧列表项（含分页）"""
@@ -1256,9 +1256,11 @@ class AccountsPage:
             fname = stat['fname']
             if search_lower and search_lower not in fname.lower() and search_lower not in stat['post_group'].lower():
                 continue
-            if self._matrix_banned_filter and not stat.get('is_banned', False):
+            if self._matrix_stat_filter == "banned" and not stat.get('is_banned', False):
                 continue
-            if self._matrix_deleted_filter and stat.get('deleted_count', 0) == 0:
+            if self._matrix_stat_filter == "deleted" and stat.get('deleted_count', 0) == 0:
+                continue
+            if self._matrix_stat_filter == "covered" and stat.get('account_count', 0) == 0:
                 continue
             filtered.append(stat)
 
@@ -1330,7 +1332,7 @@ class AccountsPage:
 
             # 封禁详情行（仅封禁筛选模式下直接展示）
             ban_detail_row = None
-            if is_banned and self._matrix_banned_filter and banned_items:
+            if is_banned and self._matrix_stat_filter == "banned" and banned_items:
                 ban_detail_row = ft.Column([
                     ft.Row([
                         ft.Icon(icons.BLOCK, size=12, color="error"),
@@ -1445,8 +1447,18 @@ class AccountsPage:
             items.append(item)
             
         if not items:
+            empty_content: ft.Control = ft.Text("没有找到符合条件的战略资源", color="onSurfaceVariant")
+            if self._matrix_stat_filter != "all":
+                empty_content = ft.Column([
+                    ft.Text("该筛选态下没有贴吧", color="onSurfaceVariant"),
+                    ft.OutlinedButton(
+                        "查看全部",
+                        icon=icons.SELECT_ALL,
+                        on_click=lambda e: self._on_matrix_stat_chip_click(self._matrix_stat_filter),
+                    ),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10)
             items.append(ft.Container(
-                content=ft.Text("没有找到符合条件的战略资源", color="onSurfaceVariant"),
+                content=empty_content,
                 padding=50,
                 alignment=ft.alignment.center,
             ))

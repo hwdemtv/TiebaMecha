@@ -394,31 +394,55 @@ async def test_matrix_select_all_respects_banned_filter():
     fp, page = make_page()
     page._build_strategic_tab()
     page._matrix_stats = make_matrix_stats(25)
-    page._matrix_banned_filter = True
+    page._matrix_stat_filter = "banned"
     page._build_matrix_items()
 
     page._on_matrix_select_all(FakeEvent(value=True))
     assert page._matrix_selected_fnames == {"吧0"}
 
-    page._matrix_banned_filter = False
+    page._matrix_stat_filter = "all"
     page._build_matrix_items()
     page._on_matrix_select_all(FakeEvent(value=True))
     assert len(page._matrix_selected_fnames) == 25
 
 
 @pytest.mark.asyncio
-async def test_matrix_banned_filter_toggles_state():
+async def test_matrix_stat_chip_toggles_and_filters():
+    """统计徽章即筛选：点击生效、再点取消、翻页复位。"""
     fp, page = make_page()
     page._build_strategic_tab()
+    page._active_tab_index = 1  # 吧库 tab 活动时 refresh_ui 才会重建列表
     page._matrix_stats = make_matrix_stats(25)
 
-    page._on_toggle_banned_filter(FakeEvent())
-    assert page._matrix_banned_filter is True
-    page._build_matrix_items()
+    page._on_matrix_stat_chip_click("banned")
+    assert page._matrix_stat_filter == "banned"
     assert page._matrix_filtered_count == 1
+    assert page._matrix_current_page == 1
 
-    page._on_toggle_banned_filter(FakeEvent())
-    assert page._matrix_banned_filter is False
+    page._on_matrix_stat_chip_click("banned")  # 再点取消 → 全部
+    assert page._matrix_stat_filter == "all"
+    page._build_matrix_items()
+    assert page._matrix_filtered_count == 25
+
+
+@pytest.mark.asyncio
+async def test_matrix_stat_chip_filters_and_full_set_counts():
+    """徽章计数恒为全集口径，筛选激活时其余徽章不丢全景；激活底色强化。"""
+    fp, page = make_page()
+    page._build_strategic_tab()
+    page._active_tab_index = 1
+    page._matrix_stats = make_matrix_stats(25)
+
+    page._on_matrix_stat_chip_click("covered")
+    # account_count = i % 3，为 0 的共 9 个（i∈{0,3,...,24}）→ covered 16
+    assert page._matrix_filtered_count == 16
+    assert page._matrix_stat_texts["all"].value == "战略资源 25"
+    assert page._matrix_stat_texts["covered"].value == "火力覆盖 16 (64.0%)"
+    assert page._matrix_stat_chips["covered"].bgcolor != page._matrix_stat_chips["all"].bgcolor
+
+    page._on_matrix_stat_chip_click("deleted")  # 直接换状态
+    assert page._matrix_filtered_count == 1
+    assert page._matrix_stat_texts["all"].value == "战略资源 25"
 
 
 def test_update_matrix_header_stats():
@@ -432,8 +456,11 @@ def test_update_matrix_header_stats():
     page._matrix_stats = stats
 
     page._update_matrix_header()
-    assert "战略资源: 4 个贴吧" in page.matrix_header_info.value
-    assert "覆盖率 50.0%" in page.matrix_header_info.value
+    texts = page._matrix_stat_texts
+    assert texts["all"].value == "战略资源 4"
+    assert texts["covered"].value == "火力覆盖 2 (50.0%)"
+    assert texts["banned"].value == "封禁 1"
+    assert texts["deleted"].value == "有删帖 1"
 
 
 # ── 存活分析（信息架构收敛后：账号页不再内置存活 Tab，改为跳转独立分析中心）──
