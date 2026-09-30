@@ -193,8 +193,8 @@ class TestSyncForumsToDB:
         """Test sync_forums_to_db with no account."""
         from tieba_mecha.core.sign import sync_forums_to_db
 
-        count = await sync_forums_to_db(db)
-        assert count == 0
+        rows = [r async for r in sync_forums_to_db(db)]
+        assert rows == []
 
     async def test_sync_forums_adds_new(self, db, sample_account_data, mock_aiotieba_client):
         """Test sync_forums_to_db adds new forums."""
@@ -218,9 +218,9 @@ class TestSyncForumsToDB:
         
         with patch("tieba_mecha.core.sign.create_client", return_value=mock_aiotieba_client):
             with patch("tieba_mecha.core.sign.get_follow_forums", AsyncMock(return_value=[mock_info])):
-                count = await sync_forums_to_db(db)
+                rows = [r async for r in sync_forums_to_db(db)]
 
-        assert count == 1
+        assert sum(r["added"] for r in rows) == 1
 
 
 @pytest.mark.asyncio

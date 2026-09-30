@@ -190,10 +190,12 @@ class TestSignAllAccountsSingleClient:
         mock_forum1.id = 10
         mock_forum1.fname = "forum_a"
         mock_forum1.sign_count = 0
+        mock_forum1.is_sign_today = False
         mock_forum2 = MagicMock()
         mock_forum2.id = 11
         mock_forum2.fname = "forum_b"
         mock_forum2.sign_count = 0
+        mock_forum2.is_sign_today = False
         mock_db.get_forums = AsyncMock(return_value=[mock_forum1, mock_forum2])
         mock_db.add_sign_log = AsyncMock()
         mock_db.update_forum_sign = AsyncMock()

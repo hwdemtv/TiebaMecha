@@ -223,6 +223,24 @@ class TestCheckAndResetDailySign:
         f = await self._get_forum(db, forum.id)
         assert f.sign_count == 0
 
+    async def test_yesterday_failure_resets_to_pending(self, db):
+        """回归(整改#8): 失败路径只置 last_sign_status 不置 is_sign_today，
+        旧重置分支只判 is_sign_today → 失败态跨天残留，混入次日失败账目"""
+        forum = await self._make_forum(db)
+        await self._set_forum_state(
+            db, forum.id,
+            sign_count=3, is_sign_today=False,
+            last_sign_status="failure",
+            last_sign_date=datetime.now() - timedelta(days=1),
+        )
+
+        await db.check_and_reset_daily_sign()
+
+        f = await self._get_forum(db, forum.id)
+        assert f.last_sign_status == "pending", "昨日失败跨天应回到待签"
+        assert f.is_sign_today is False
+        assert f.sign_count == 0, "昨日失败应触发断签清零"
+
     async def test_gap_over_two_days_breaks_streak(self, db):
         """前天之后未签 -> 连续天数清零"""
         forum = await self._make_forum(db)
@@ -605,7 +623,9 @@ class TestSyncForumsHidden:
 
         server_forums = [ForumInfo(fid=1, fname="keep_forum", is_sign_today=False, sign_count=0)]
         with patch("tieba_mecha.core.sign.get_follow_forums", AsyncMock(return_value=server_forums)):
-            count = await sync_forums_to_db(db)
+            count = 0
+            async for r in sync_forums_to_db(db):
+                count += r["added"]
 
         assert count == 0  # 无新增
         visible = await db.get_forums(acc.id)
@@ -616,6 +636,179 @@ class TestSyncForumsHidden:
         all_forums = await db.get_forums(acc.id, include_hidden=True)
         gone = next(f for f in all_forums if f.fname == "gone_forum")
         assert gone.is_hidden is True, "历史数据应保留并标记隐藏"
+
+
+# ========== 整改批次一：剔除已签 / 按天洗牌 / rollup / 同步生成器 ==========
+
+
+@pytest.mark.asyncio
+class TestBatch1CoreFixes:
+    async def _add_account_with_forums(self, db, n, signed_indices=()):
+        from tieba_mecha.core.account import add_account
+
+        acc = await add_account(db=db, name="acc_fix", bduss="a" * 192, stoken="b" * 64)
+        await db.set_setting("sign_skip_probability", "0")
+        for i in range(n):
+            f = await db.add_forum(fid=i + 1, fname=f"forum_{i:02d}", account_id=acc.id)
+            if i in signed_indices:
+                await db.update_forum_sign(f.id, True)
+        return acc
+
+    async def test_already_signed_excluded_from_queue(self, db):
+        """整改#3: 今日已签的吧不发请求、不落新日志（重跑秒级空扫）"""
+        acc = await self._add_account_with_forums(db, 3, signed_indices=(0, 2))
+        client = make_client()
+
+        results = []
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                async for r in sign_all_forums(db, delay_min=0, delay_max=0):
+                    results.append(r)
+
+        assert [r.fname for r in results] == ["forum_01"]
+        client.sign_forum.assert_awaited_once()
+        logs = await db.get_sign_logs(limit=50)
+        assert len(logs) == 1, "已签吧不得产生新日志"
+
+    async def _reset_unsigned(self, db, acc_id):
+        """把账号名下所有吧复位为未签（模拟同日同集合重跑前的状态）"""
+        from sqlalchemy import update as sa_update
+        from tieba_mecha.db.models import Forum
+
+        async with db.async_session() as session:
+            await session.execute(
+                sa_update(Forum).where(Forum.account_id == acc_id)
+                .values(is_sign_today=False, last_sign_status="pending")
+            )
+            await session.commit()
+
+    async def test_order_stable_same_day_and_seeded(self, db):
+        """整改#6: 同账号同日同集合 → 同序，且等于按天种子的洗牌结果"""
+        import random as _random
+        from datetime import date
+
+        acc = await self._add_account_with_forums(db, 8)
+        client = make_client()
+
+        async def run_once():
+            results = []
+            with patch("tieba_mecha.core.sign.create_client", return_value=client):
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    async for r in sign_all_forums(db, delay_min=0, delay_max=0):
+                        results.append(r)
+            return [r.fname for r in results]
+
+        first = await run_once()
+        await self._reset_unsigned(db, acc.id)  # 复位后同集合重跑
+        second = await run_once()
+        assert first == second, "同日重跑顺序应一致"
+
+        expected = [f"forum_{i:02d}" for i in range(8)]
+        _random.Random(f"order:{acc.id}:{date.today().isoformat()}").shuffle(expected)
+        assert first == expected, "顺序应等于按天种子的确定性洗牌"
+
+    async def test_order_changes_across_days(self, db):
+        """整改#6: 跨天顺序必不同（消除字母序指纹）"""
+        import random as _random
+        from datetime import date as real_date, timedelta
+
+        acc = await self._add_account_with_forums(db, 8)
+        client = make_client()
+
+        def expected_order(d):
+            order = [f"forum_{i:02d}" for i in range(8)]
+            _random.Random(f"order:{acc.id}:{d.isoformat()}").shuffle(order)
+            return order
+
+        async def run_on(fake_today):
+            fake_date = MagicMock()
+            fake_date.today.return_value = fake_today
+            results = []
+            with patch("tieba_mecha.core.sign.create_client", return_value=client), \
+                 patch("tieba_mecha.core.sign.date", fake_date), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                async for r in sign_all_forums(db, delay_min=0, delay_max=0):
+                    results.append(r)
+            return [r.fname for r in results]
+
+        base = real_date(2026, 1, 1)
+        other = next(
+            d for d in (base + timedelta(days=k) for k in range(1, 10))
+            if expected_order(d) != expected_order(base)
+        )
+        assert await run_on(other) == expected_order(other)
+        await self._reset_unsigned(db, acc.id)
+        assert await run_on(base) == expected_order(base)
+        assert expected_order(other) != expected_order(base)
+
+
+@pytest.mark.asyncio
+class TestSignRollup:
+    async def test_rollup_accounts_and_aggregates(self, db):
+        """共享基建: 可用账号逐行账目 + 挂起/孤儿聚合，口径闭合"""
+        from sqlalchemy import delete as sa_delete
+        from tieba_mecha.core.account import add_account
+        from tieba_mecha.db.models import Account as AccModel
+
+        acc1 = await add_account(db=db, name="roll_a", bduss="a" * 192, stoken="b" * 64)
+        for fid, fname in [(1, "r1"), (2, "r2")]:
+            f = await db.add_forum(fid=fid, fname=fname, account_id=acc1.id)
+            await db.update_forum_sign(f.id, True)
+        f3 = await db.add_forum(fid=3, fname="r3", account_id=acc1.id)
+        await db.add_forum(fid=4, fname="r4", account_id=acc1.id)
+        await db.mark_forum_banned(acc1.id, "r4", reason="pre-banned")
+        await db.update_forum_sign(f3.id, False)  # 今日失败
+
+        acc2 = await add_account(db=db, name="roll_s", bduss="a" * 192, stoken="b" * 64)
+        await db.update_account(acc2.id, status="suspended")
+        await db.add_forum(fid=5, fname="r5", account_id=acc2.id)
+
+        acc3 = await add_account(db=db, name="roll_gone", bduss="a" * 192, stoken="b" * 64)
+        await db.add_forum(fid=6, fname="r6", account_id=acc3.id)
+        async with db.async_session() as session:
+            await session.execute(sa_delete(AccModel).where(AccModel.id == acc3.id))
+            await session.commit()
+
+        rollup = await db.get_sign_rollup_by_account()
+        ids = [a["account_id"] for a in rollup["accounts"]]
+        assert acc1.id in ids and acc2.id not in ids
+
+        row = next(a for a in rollup["accounts"] if a["account_id"] == acc1.id)
+        assert row["total"] == 3
+        assert row["signed"] == 2
+        assert row["failed_today"] == 1
+        assert row["pending"] == 0
+        assert row["banned"] == 1
+        assert rollup["suspended_forums"] == 1
+        assert rollup["orphan_forums"] == 1
+
+
+@pytest.mark.asyncio
+class TestSyncGenerator:
+    async def test_sync_yields_per_account_with_inter_delay(self, db):
+        """整改#5: 逐账号 yield 账目；账号间有随机延迟且末账号后不加"""
+        from tieba_mecha.core.account import add_account
+        from tieba_mecha.core.sign import ForumInfo, SYNC_ACC_DELAY_MIN, SYNC_ACC_DELAY_MAX
+
+        for i in range(2):
+            await add_account(db=db, name=f"sync_acc{i}", bduss="a" * 192, stoken="b" * 64)
+
+        async def fake_follow(db_, account_id=None):
+            return [ForumInfo(fid=100 + account_id, fname=f"forum_{account_id}", is_sign_today=False, sign_count=0)]
+
+        sleeps = []
+
+        async def fake_sleep(sec):
+            sleeps.append(sec)
+
+        with patch("tieba_mecha.core.sign.get_follow_forums", side_effect=fake_follow), \
+             patch("asyncio.sleep", fake_sleep):
+            rows = [r async for r in sync_forums_to_db(db)]
+
+        assert len(rows) == 2
+        assert all(r["added"] == 1 for r in rows)
+        assert len(sleeps) == 1, "2 账号只在切换间睡一次"
+        assert SYNC_ACC_DELAY_MIN <= sleeps[0] <= SYNC_ACC_DELAY_MAX
 
 
 # ========== daemon.reload ==========

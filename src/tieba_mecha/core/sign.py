@@ -195,19 +195,27 @@ async def get_follow_forums(db: Database, account_id: int | None = None) -> list
     return forums
 
 
-async def sync_forums_to_db(db: Database) -> int:
+# 同步全域贴吧的账号间随机延迟（秒）：裸连账号之间同 IP 连续翻页请求，
+# 与矩阵签到的防关联标准保持一致
+SYNC_ACC_DELAY_MIN = 8.0
+SYNC_ACC_DELAY_MAX = 20.0
+
+
+async def sync_forums_to_db(db: Database) -> AsyncGenerator[dict, None]:
     """
     同步全域贴吧：遍历所有矩阵账号，将所有关注贴吧推入数据库
     仅新增和更新，不删除已失效贴吧（保留签到历史数据）。
+
+    Yields:
+        {"account": 账号名, "added": 新增数, "stale": 标记隐藏数[, "error": 异常信息]}
     """
     accounts = await db.get_matrix_accounts()
     if not accounts:
-        return 0
+        return
 
-    total_added = 0
     await log_info(f"全域同步指令已发出：正在同步 {len(accounts)} 个运行终端的贴吧...")
 
-    for account in accounts:
+    for acc_idx, account in enumerate(accounts):
         try:
             # 获取服务器最新的关注列表
             forums = await get_follow_forums(db, account.id)
@@ -242,7 +250,7 @@ async def sync_forums_to_db(db: Database) -> int:
             if stale_fids:
                 from ..db.models import Forum
                 async with db.async_session() as session:
-                    from sqlalchemy import select, update as sa_update
+                    from sqlalchemy import update as sa_update
                     stmt = (
                         sa_update(Forum)
                         .where(Forum.account_id == account.id, Forum.fid.in_(list(stale_fids)))
@@ -252,12 +260,15 @@ async def sync_forums_to_db(db: Database) -> int:
                     await session.commit()
                 await log_info(f"账号 [{account.name}] 标记了 {len(stale_fids)} 个已取消关注的贴吧（历史数据已保留）")
 
-            total_added += added
             await log_info(f"账号 [{account.name}] 同步完毕 | 新增 {added} 个")
+            yield {"account": account.name, "added": added, "stale": len(stale_fids)}
         except Exception as e:
             await log_error(f"同步账号 [{account.name}] 时发生异常: {str(e)}")
+            yield {"account": account.name, "added": 0, "stale": 0, "error": str(e)}
 
-    return total_added
+        # 账号间随机延迟（防关联核心防线；末账号后不加）
+        if acc_idx < len(accounts) - 1:
+            await asyncio.sleep(random.uniform(SYNC_ACC_DELAY_MIN, SYNC_ACC_DELAY_MAX))
 
 
 async def sign_forum(db: Database, fname: str) -> SignResult:
@@ -341,6 +352,10 @@ async def sign_all_forums(
     _, bduss, stoken, proxy_id, cuid, ua = creds
     # 已熔断 (吧务封禁) 的贴吧跳过，避免每天重撞 3250004
     forums = await db.get_forums(account.id, include_banned=False)
+    # 今日已签的吧直接剔除：不发请求不落日志（重跑秒级空扫）；
+    # 执行顺序按天洗牌，消除恒定字母序的机器人指纹（同账号同日同集合 → 同序）
+    forums = [f for f in forums if not f.is_sign_today]
+    random.Random(f"order:{account.id}:{date.today().isoformat()}").shuffle(forums)
 
     # [防检测] 拟人化随机跳过率
     skip_p = await _get_skip_probability(db)
@@ -524,11 +539,14 @@ async def sign_all_accounts(
             f"[{acc_idx + 1}/{len(accounts)}] 开始处理账号: {account.name}"
         )
 
-        # 获取该账号的贴吧列表 (已熔断的吧务封禁贴吧跳过)
+        # 获取该账号的贴吧列表 (已熔断的吧务封禁贴吧跳过；今日已签剔除不发请求)
         forums = await db.get_forums(account.id, include_banned=False)
+        forums = [f for f in forums if not f.is_sign_today]
         if not forums:
-            await log_warn(f"账号 [{account.name}] 无关注贴吧，跳过")
+            await log_warn(f"账号 [{account.name}] 无待签贴吧，跳过")
             continue
+        # 执行顺序按天洗牌，消除恒定字母序的机器人指纹（同账号同日同集合 → 同序）
+        random.Random(f"order:{account.id}:{date.today().isoformat()}").shuffle(forums)
 
         # 使用指定账号凭证（每个账号只获取一次）
         creds = await get_account_credentials(db, account.id)

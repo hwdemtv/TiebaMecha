@@ -286,8 +286,14 @@ def sign_sync():
 
     async def _sync(db: Database):
         console.print("[cyan]同步关注贴吧中...[/cyan]")
-        added = await sign.sync_forums_to_db(db)
-        console.print(f"[green]新增 {added} 个贴吧[/green]")
+        total = 0
+        async for r in sign.sync_forums_to_db(db):
+            total += r.get("added", 0)
+            if "error" in r:
+                console.print(f"[red]✗ {r['account']}: {r['error']}[/red]")
+            else:
+                console.print(f"[green]✓ {r['account']}: 新增 {r['added']} / 隐藏 {r['stale']}[/green]")
+        console.print(f"[green]同步完成，共新增 {total} 个贴吧[/green]")
 
     run_async(_sync)
 
