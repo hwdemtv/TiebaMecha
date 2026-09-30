@@ -15,6 +15,12 @@ from ..db.crud import get_db
 
 async def do_sign_task():
     """执行定时签到任务的内部包裹（自适应模式）"""
+    # 触发时间抖动：消除每天精确同分钟的定时指纹（选任务内睡而非改注册，
+    # 不动 reload 的 cron 注册逻辑，代价仅是重启丢失当次抖动）
+    jitter = random.uniform(0, 600)
+    print(f"[{datetime.now()}] [DAEMON] 定时触发抖动 {jitter:.0f}s 后开始签到")
+    await asyncio.sleep(jitter)
+
     db = await get_db()
 
     # 跨天状态重置：守护进程路径无 UI 参与，若不在此处重置昨日的 is_sign_today，

@@ -75,7 +75,8 @@ class TestDaemonIntegration:
         # Mock the actual sign functions
         with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
              patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_matrix, \
-             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single:
+             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
 
             # Setup mock generators
             async def empty_gen(*args, **kwargs):
@@ -150,7 +151,8 @@ class TestDaemonIntegration:
 
         async with sign_flow_lock:
             with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-                 patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single:
+                 patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
                 await do_sign_task()
                 mock_single.assert_not_called()
 
@@ -159,7 +161,8 @@ class TestDaemonIntegration:
         await db.set_setting("schedule", "{not-json")
 
         with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single:
+             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
 
             async def empty_gen(*args, **kwargs):
                 if False: yield {}
