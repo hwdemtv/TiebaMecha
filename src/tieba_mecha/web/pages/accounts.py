@@ -1216,14 +1216,13 @@ class AccountsPage:
                 padding=ft.padding.symmetric(horizontal=8, vertical=4),
                 border_radius=6,
                 tooltip="显示全部贴吧" if mode == "all" else f"点击只看{label}的贴吧，再点一次取消",
+                on_click=lambda e, m=mode: self._on_matrix_stat_chip_click(m),
             )
+            # 注意不可再用 GestureDetector 包裹：web 端其占满整行宽度，
+            # 徽章会竖排；on_click 直接挂 Container（与我的帖子徽章同款）
             self._matrix_stat_chips[mode] = body
             self._matrix_stat_texts[mode] = text
-            row.controls.append(ft.GestureDetector(
-                content=body,
-                on_tap=lambda e, m=mode: self._on_matrix_stat_chip_click(m),
-                mouse_cursor=ft.MouseCursor.CLICK,
-            ))
+            row.controls.append(body)
         return row
 
     def _update_matrix_header(self):

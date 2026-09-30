@@ -418,6 +418,9 @@ async def test_matrix_stat_chip_toggles_and_filters():
     assert page._matrix_stat_filter == "banned"
     assert page._matrix_filtered_count == 1
     assert page._matrix_current_page == 1
+    # 徽章须是 Row 直接 Container 子项——包 GestureDetector 会撑满整行致竖排
+    assert all(isinstance(c, ft.Container) and c.on_click for c in page.matrix_header_info.controls)
+    assert len(page.matrix_header_info.controls) == 4
 
     page._on_matrix_stat_chip_click("banned")  # 再点取消 → 全部
     assert page._matrix_stat_filter == "all"
