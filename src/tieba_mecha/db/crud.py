@@ -194,6 +194,12 @@ class Database(
                 ("link_reply_at", "DATETIME DEFAULT NULL"),
                 ("link_reply_pid", "BIGINT DEFAULT NULL"),
                 ("link_reply_fail_count", "INTEGER DEFAULT 0"),
+                # 养号采集：别人的链与自有链(link_url)严格分离
+                ("source_tid", "BIGINT DEFAULT NULL"),
+                ("source_fname", "VARCHAR(100) DEFAULT NULL"),
+                ("source_link_url", "VARCHAR(500) DEFAULT NULL"),
+                ("source_link_note", "TEXT DEFAULT NULL"),
+                ("source_link_type", "VARCHAR(20) DEFAULT NULL"),
             ]
             for col_name, col_type in material_migrations:
                 await self._safe_add_column(conn, "material_pool", col_name, col_type, material_cols)
@@ -233,6 +239,8 @@ class Database(
                 "CREATE INDEX IF NOT EXISTS ix_material_pool_posted_fname ON material_pool (posted_fname)",
                 "CREATE INDEX IF NOT EXISTS ix_material_pool_survival_status ON material_pool (survival_status)",
                 "CREATE INDEX IF NOT EXISTS ix_material_pool_task_id ON material_pool (task_id)",
+                # 采集去重按来源帖查重
+                "CREATE INDEX IF NOT EXISTS ix_material_pool_source_tid ON material_pool (source_tid)",
                 # 矩阵统计按吧+状态聚合
                 "CREATE INDEX IF NOT EXISTS ix_batch_post_logs_fname_status ON batch_post_logs (fname, status)",
             ]

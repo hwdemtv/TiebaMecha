@@ -14,6 +14,7 @@ from aiotieba.logging import get_logger
 from ..db.crud import Database
 from .account import get_account_credentials
 from .client_factory import create_client
+from .harvest import HARVEST_DEFAULTS, harvest_from_posts, pick_harvest_candidate
 from .logger import log_info, log_warn, log_error
 
 logger = get_logger()
@@ -150,17 +151,55 @@ class MaintManager:
                         pass
 
                 if threads and threads.objs:
+                    # 顺手采集热门资源物料（零新增请求）：候选判定只用列表自带元数据
+                    hcfg = None
+                    try:
+                        raw = await self.db.get_settings_bulk(
+                            list(HARVEST_DEFAULTS.keys()), dict(HARVEST_DEFAULTS)
+                        )
+                        if str(raw.get("maint_harvest_enabled", "true")).strip().lower() != "false":
+                            min_reply = max(int(float(raw.get("maint_harvest_min_reply", "30") or 30)), 1)
+                            max_per_cycle = max(int(float(raw.get("maint_harvest_max_per_cycle", "1") or 1)), 0)
+                            if max_per_cycle >= 1:
+                                hcfg = {"min_reply": min_reply, "max_per_cycle": max_per_cycle}
+                    except Exception:
+                        hcfg = None
+                    harvest_candidate = None
+                    if hcfg is not None:
+                        try:
+                            harvest_candidate = pick_harvest_candidate(threads.objs, hcfg["min_reply"])
+                            if harvest_candidate is not None and await self.db.get_harvested_by_source_tid(harvest_candidate.tid):
+                                harvest_candidate = None  # 同源帖已采过，不再偏置浏览
+                        except Exception:
+                            harvest_candidate = None
+
                     # [Fix 6] 浏览 2-3 个帖子而非仅 1 个，增加行为多样性
                     browse_count = random.randint(2, 3)
                     browsed_threads = random.sample(threads.objs[:10], min(browse_count, len(threads.objs[:10])))
+                    # 采集候选换入浏览队列首位：get_posts 本就要发，总请求数不变
+                    if harvest_candidate is not None and all(getattr(t, 'tid', 0) != harvest_candidate.tid for t in browsed_threads):
+                        browsed_threads[0] = harvest_candidate
 
                     # [Fix 3] 点赞限制：单次维护最多点赞 1 次，避免高频检测
                     liked = False
                     for target_thread in browsed_threads:
                         await log_info(f"[BioWarming] {account_name} 正在阅读帖子: {target_thread.title[:20]}...")
 
-                        # 获取帖子内容
-                        await client.get_posts(target_thread.tid, pn=1)
+                        # 获取帖子内容（返回值供采集提取，不再即弃）
+                        posts_page = await client.get_posts(target_thread.tid, pn=1)
+
+                        # 顺手采集：仅候选帖、每轮限量、只扫本页楼层（楼主+首评），零额外请求
+                        if hcfg is not None and harvest_candidate is not None and target_thread.tid == harvest_candidate.tid:
+                            try:
+                                new_id = await harvest_from_posts(self.db, posts_page, target_thread, target_forum_name)
+                            except Exception as e:
+                                new_id = None
+                                await log_warn(f"[BioWarming] {account_name} 采集入库异常: {type(e).__name__}: {str(e)[:80]}")
+                            if new_id:
+                                await log_info(f"[BioWarming] {account_name} 🌾采集热门资源入库: [{target_forum_name}] {target_thread.title[:24]}... -> 物料#{new_id}（待转存/待审核）")
+                            else:
+                                await log_info(f"[BioWarming] {account_name} 候选帖 [{target_forum_name}] 首页楼层无可采链接或已采过，跳过")
+                            harvest_candidate = None  # 每轮最多采 1 条，采完收口
 
                         # 拟真停顿：模拟深度阅读
                         if is_cold_state:

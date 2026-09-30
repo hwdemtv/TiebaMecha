@@ -10,6 +10,12 @@ from ..components import icons
 from ...core.account import get_account_credentials
 from ...core.batch_post import BatchPostTask, BatchPostManager
 from ...core.ai_optimizer import AIOptimizer
+from ...core.harvest import (
+    HARVEST_STATE_CONTENT_ONLY,
+    HARVEST_STATE_PENDING_TRANSFER,
+    HARVEST_STATE_TRANSFERRED,
+    harvest_state,
+)
 from .batch_post.launch_config import LaunchConfig, LaunchConfigError, calc_next_weekly
 from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport, scan_import_pairs
 
@@ -658,12 +664,54 @@ class BatchPostPage:
         pending = self._status_counts.get("pending", 0)
         success = self._status_counts.get("success", 0)
         failed = self._status_counts.get("failed", 0)
+        harvested = self._status_counts.get("harvested", 0)
 
         if hasattr(self, "_stats_text"):
-            self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})"
+            self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})   🌾采集({harvested})"
 
-        # --- 排期池分页查询 ---
+        is_harvest_view = getattr(self, "_material_view_dd", None) is not None and self._material_view_dd.value == "harvest"
+
+        # --- 搜索/分页状态共用 ---
         mat_search = self._material_search_text if self._material_search_text.strip() else None
+
+        if is_harvest_view:
+            # 采集待审视图：harvested 行，处置动作=编辑/放行/跳过链接/删除
+            mat_items, self._material_total = await self.db.get_materials_by_status_paginated(
+                statuses=["harvested"],
+                search_text=mat_search,
+                page=self._material_page,
+                page_size=self._material_page_size,
+                order_desc=True,  # 新采的排前面，先审新鲜的
+            )
+            self._materials = mat_items  # 全选/编辑弹窗等按 id 复用
+            self._material_table.visible = False
+            self._harvest_table.visible = True
+            harvest_rows = []
+            for m in mat_items:
+                try:
+                    harvest_rows.append(self._build_harvest_row(m))
+                except Exception:
+                    continue
+            self._harvest_table.rows = harvest_rows
+            # 采集视图只保留批量删除（重置/自顶/AI改写是排期池语义）
+            self._bulk_reset_btn.visible = False
+            self._bulk_bump_btn.visible = False
+            self._bulk_ai_btn.visible = False
+            self._update_material_pagination()
+            self._update_bulk_visibility()
+            try:
+                self._harvest_table.update()
+                self._material_table.update()
+            except Exception:
+                pass
+            return
+
+        # --- 排期池分页查询（默认视图） ---
+        self._material_table.visible = True
+        self._harvest_table.visible = False
+        self._bulk_reset_btn.visible = True
+        self._bulk_bump_btn.visible = True
+        self._bulk_ai_btn.visible = True
         mat_items, self._material_total = await self.db.get_materials_by_status_paginated(
             statuses=["pending", "failed"],
             search_text=mat_search,
@@ -1005,12 +1053,13 @@ class BatchPostPage:
         self.page.open(dialog)
 
     async def _on_material_select_all(self, e):
-        # 跨页全选：从数据库查询所有符合条件的 ID
+        # 跨页全选：从数据库查询所有符合条件的 ID（按当前视图取口径）
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
+        is_harvest_view = getattr(self, "_material_view_dd", None) is not None and self._material_view_dd.value == "harvest"
         if is_select:
             mat_search = self._material_search_text if self._material_search_text.strip() else None
             all_ids = await self.db.get_material_ids_by_status(
-                statuses=["pending", "failed"],
+                statuses=["harvested"] if is_harvest_view else ["pending", "failed"],
                 search_text=mat_search,
             )
             self._selected_material_ids = set(all_ids)
@@ -1029,6 +1078,61 @@ class BatchPostPage:
             self._selected_material_ids.discard(mid)
 
         self._update_bulk_visibility()
+        await self._refresh_material_table()
+
+    # ========== 采集待审 (harvested) 视图 ==========
+
+    def _build_harvest_row(self, m) -> ft.DataRow:
+        """采集物料行：源链/提取码悬停可见；处置=编辑/放行/跳过链接/删除"""
+        m_title = m.title or ""
+        display_t = m_title if len(m_title) <= 18 else m_title[:18] + "..."
+        _STATE_DISPLAY = {
+            HARVEST_STATE_PENDING_TRANSFER: ("待转存", "orange", icons.HOURGLASS_EMPTY),
+            HARVEST_STATE_TRANSFERRED: ("已转存·待审核", "primary", icons.CHECK_CIRCLE_ROUNDED),
+            HARVEST_STATE_CONTENT_ONLY: ("纯内容·可放行", "onSurfaceVariant", icons.CHECK_CIRCLE_ROUNDED),
+        }
+        st_text, st_color, st_icon = _STATE_DISPLAY[harvest_state(m.source_link_url, m.link_url)]
+        link_raw = m.source_link_url or (m.link_url or "")
+        link_disp = link_raw if len(link_raw) <= 30 else link_raw[:30] + "..."
+        link_tooltip = f"源链: {m.source_link_url or '-'}\n自有链: {m.link_url or '-'}\n提取码/上下文: {m.source_link_note or '-'}"
+        return ft.DataRow(
+            selected=m.id in self._selected_material_ids,
+            on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
+            cells=[
+                ft.DataCell(ft.Text(str(m.id))),
+                ft.DataCell(ft.Container(ft.Text(display_t, size=12, tooltip=m_title), width=170)),
+                ft.DataCell(ft.Text(m.source_fname or "-", size=12)),
+                ft.DataCell(ft.Container(ft.Text(link_disp, size=11, tooltip=link_tooltip), width=210)),
+                ft.DataCell(ft.Text(m.source_link_type or "other", size=12)),
+                ft.DataCell(ft.Row([
+                    ft.Icon(st_icon, color=st_color, size=14),
+                    ft.Text(st_text, color=st_color, size=12),
+                ], spacing=4)),
+                ft.DataCell(ft.Row([
+                    ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="先修剪文案再放行"),
+                    ft.IconButton(icons.CHECK_CIRCLE_ROUNDED, icon_color="green", data=m.id,
+                                  on_click=lambda e, mid=m.id: self.page.run_task(self._on_harvest_approve, mid, False),
+                                  tooltip="审核通过：转存替换完成后放行至待发池"),
+                    ft.IconButton(icons.LINK_OFF, icon_color="orange", data=m.id,
+                                  on_click=lambda e, mid=m.id: self.page.run_task(self._on_harvest_approve, mid, True),
+                                  tooltip="跳过链接：弃用别人的链（不可恢复），降级纯内容帖放行"),
+                    ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
+                ], spacing=0)),
+            ],
+        )
+
+    async def _on_harvest_approve(self, mid: int, allow_no_link: bool):
+        """采集物料放行：走 promote_harvested 次序门（源链未转存不得进发帖队列）"""
+        ok, msg = await self.db.promote_harvested(mid, allow_no_link=allow_no_link)
+        if ok:
+            self._selected_material_ids.discard(mid)
+        await self._refresh_material_table()
+        self._show_snackbar(msg, "success" if ok else "warning")
+
+    async def _on_material_view_change(self, e):
+        """排期池 ↔ 采集待审 视图切换：清选择回第一页"""
+        self._material_page = 1
+        self._selected_material_ids.clear()
         await self._refresh_material_table()
 
     async def _on_batch_ai_rewrite_click(self, e):
@@ -1857,10 +1961,11 @@ class BatchPostPage:
                 ft.Row([self._quick_title, self._quick_content, self._quick_link, self._add_btn], spacing=10),
                 ft.Row([
                     material_search,
+                    self._material_view_dd,
                     self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
-                    content=ft.ListView([ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)], expand=True),
+                    content=ft.ListView([ft.Row([self._material_table, self._harvest_table], scroll=ft.ScrollMode.ADAPTIVE)], expand=True),
                     expand=True,
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
@@ -1907,28 +2012,32 @@ class BatchPostPage:
             style=ft.ButtonStyle(color="onSurfaceVariant"),
             visible=False,
         )
-        self._stats_text = ft.Text("状态分布:  ⏳待发(0)   ✅成功(0)   ❌失败(0)", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant")
+        self._stats_text = ft.Text("状态分布:  ⏳待发(0)   ✅成功(0)   ❌失败(0)   🌾采集(0)", size=12, weight=ft.FontWeight.W_500, color="onSurfaceVariant")
         
         # 归档统计文本
         self._archive_all_count_text = ft.Text(" (0)", size=10, weight=ft.FontWeight.BOLD)
         self._archive_alive_count_text = ft.Text(" (0)", size=10, weight=ft.FontWeight.BOLD)
         self._archive_dead_count_text = ft.Text(" (0)", size=10, weight=ft.FontWeight.BOLD)
         
-        # 批量操作 UI 容器
+        # 批量操作 UI 容器（采集视图下仅暴露批量删除，其余三个是排期池语义）
         self._material_selected_count_text = ft.Text(f"已选 0 项", size=11, color="onSurfaceVariant")
+        self._bulk_delete_btn = ft.FilledButton("批量删除", icon=icons.DELETE_SWEEP,
+                        style=ft.ButtonStyle(bgcolor="error", color="white"),
+                        on_click=self._bulk_delete_materials)
+        self._bulk_reset_btn = ft.FilledButton("批量重置", icon=icons.REPLAY_ROUNDED,
+                        style=ft.ButtonStyle(bgcolor="orange", color="white"),
+                        on_click=self._bulk_reset_materials)
+        self._bulk_bump_btn = ft.FilledButton("批量自顶", icon=icons.BOLT,
+                        style=ft.ButtonStyle(bgcolor="primary", color="white"),
+                        on_click=self._bulk_toggle_auto_bump)
+        self._bulk_ai_btn = ft.FilledButton("AI 批量改写", icon=icons.AUTO_AWESOME,
+                        style=ft.ButtonStyle(bgcolor="teal", color="white"),
+                        on_click=self._on_batch_ai_rewrite_click)
         self._material_bulk_actions = ft.Row([
-            ft.FilledButton("批量删除", icon=icons.DELETE_SWEEP,
-                            style=ft.ButtonStyle(bgcolor="error", color="white"), 
-                            on_click=self._bulk_delete_materials),
-            ft.FilledButton("批量重置", icon=icons.REPLAY_ROUNDED,
-                            style=ft.ButtonStyle(bgcolor="orange", color="white"), 
-                            on_click=self._bulk_reset_materials),
-            ft.FilledButton("批量自顶", icon=icons.BOLT,
-                            style=ft.ButtonStyle(bgcolor="primary", color="white"), 
-                            on_click=self._bulk_toggle_auto_bump),
-            ft.FilledButton("AI 批量改写", icon=icons.AUTO_AWESOME,
-                            style=ft.ButtonStyle(bgcolor="teal", color="white"), 
-                            on_click=self._on_batch_ai_rewrite_click),
+            self._bulk_delete_btn,
+            self._bulk_reset_btn,
+            self._bulk_bump_btn,
+            self._bulk_ai_btn,
             self._material_selected_count_text,
         ], visible=False, spacing=10)
 
@@ -1962,10 +2071,41 @@ class BatchPostPage:
                 ft.DataColumn(ft.Text("自顶", size=11, weight=ft.FontWeight.BOLD)),
             ],
             rows=[],
-            heading_row_height=40, data_row_min_height=45, data_row_max_height=60, 
+            heading_row_height=40, data_row_min_height=45, data_row_max_height=60,
             column_spacing=18,
             show_checkbox_column=True,
             on_select_all=self._on_material_select_all,
+        )
+
+        # 采集待审视图：harvested 物料（别人的链，转存替换/审核后才进排期池）
+        self._harvest_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("ID", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("来源标题", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("来源吧", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("原链(悬停看提取码)", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("类型", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("采集状态", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("处置", size=11, weight=ft.FontWeight.BOLD)),
+            ],
+            rows=[],
+            heading_row_height=40, data_row_min_height=45, data_row_max_height=60,
+            column_spacing=18,
+            show_checkbox_column=True,
+            on_select_all=self._on_material_select_all,
+            visible=False,
+        )
+
+        # 物料池视图切换：排期池(pending/failed) ↔ 采集待审(harvested)
+        self._material_view_dd = ft.Dropdown(
+            label="物料视图",
+            value="schedule",
+            width=160, text_size=12, dense=True,
+            options=[
+                ft.dropdown.Option("schedule", "⏳ 排期池"),
+                ft.dropdown.Option("harvest", "🌾 采集待审"),
+            ],
+            on_change=lambda e: self.page.run_task(self._on_material_view_change, e),
         )
 
         # 3. 参数配置

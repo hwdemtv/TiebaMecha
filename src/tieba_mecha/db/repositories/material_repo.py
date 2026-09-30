@@ -161,6 +161,132 @@ class MaterialRepository:
             if added > 0:
                 await session.commit()
         return added
+
+    # ------------------------------------------------------------------
+    # 养号采集 (harvest)：harvested 状态与 source_* 字段的读写口。
+    # 发帖队列只取 pending，harvested 行进不了发送链路；
+    # promote_harvested 是 harvested→pending 的唯一放行口（次序门）。
+    # ------------------------------------------------------------------
+
+    async def add_harvested_material(
+        self,
+        *,
+        title: str,
+        content: str,
+        source_tid: int,
+        source_fname: str = "",
+        source_link_url: str = "",
+        source_link_note: str = "",
+        source_link_type: str = "other",
+    ) -> int:
+        """采集入库一条 harvested 物料（别人的链）。
+
+        source_tid 去重：同源帖已存在则跳过（返回 0），防止矩阵号
+        反复看到同一个热帖重复入库。插入失败也返回 0。
+        """
+        if not source_tid or not source_link_url:
+            return 0
+        try:
+            async with self.async_session() as session:
+                dup = await session.execute(
+                    select(MaterialPool.id).where(MaterialPool.source_tid == source_tid)
+                )
+                if dup.first() is not None:
+                    return 0
+                m = MaterialPool(
+                    title=title,
+                    content=content,
+                    status="harvested",
+                    ai_status="none",
+                    source_tid=source_tid,
+                    source_fname=source_fname or None,
+                    source_link_url=source_link_url,
+                    source_link_note=source_link_note or None,
+                    source_link_type=source_link_type,
+                )
+                session.add(m)
+                await session.commit()
+                await session.refresh(m)
+                return m.id
+        except Exception:
+            return 0
+
+    async def get_harvested_by_source_tid(self, source_tid: int) -> bool:
+        """该来源帖是否已被采集过（用于养号侧避免重复偏置浏览候选）"""
+        if not source_tid:
+            return False
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(MaterialPool.id).where(MaterialPool.source_tid == source_tid)
+            )
+            return result.first() is not None
+
+    async def mark_link_transferred(
+        self, material_id: int, new_link_url: str, *, new_note: str = ""
+    ) -> tuple[bool, str]:
+        """[转存预留接口] 把转存得到的自有新链写回物料——"替换"动作的唯一合法写路径。
+
+        将来网盘 API 自动转存（core/link_transfer.py 后端）与人工转存确认
+        都必须走这里，不得直写 link_url 绕过断言。
+        """
+        new_link_url = (new_link_url or "").strip()
+        if not new_link_url:
+            return False, "新链接为空"
+        async with self.async_session() as session:
+            m = await session.get(MaterialPool, material_id)
+            if not m:
+                return False, "物料不存在"
+            if m.status != "harvested":
+                return False, f"仅采集待处理(harvested)物料可标记转存，当前 {m.status}"
+            if not (m.source_link_url or "").strip():
+                return False, "该物料没有源链，无需转存"
+            m.link_url = new_link_url
+            if new_note:
+                # 自有提取码等备注追加进 note，保留原链上下文供追溯
+                m.source_link_note = f"{m.source_link_note or ''} | 转存 {new_note}".strip(" |")
+            await session.commit()
+            return True, "已标记转存"
+
+    async def promote_harvested(
+        self,
+        material_id: int,
+        *,
+        title: str | None = None,
+        content: str | None = None,
+        allow_no_link: bool = False,
+    ) -> tuple[bool, str]:
+        """[次序门] harvested→pending 的唯一放行口（人工审核通过时调用）。
+
+        铁律：有源链(source_link_url)且尚未转存(link_url 为空)的物料不得
+        进发帖队列——否则会把别人的链接发出去。allow_no_link=True 显式降级
+        为纯内容帖：清掉源链字段（保留 source_tid/source_fname 防复采溯源）。
+        """
+        async with self.async_session() as session:
+            m = await session.get(MaterialPool, material_id)
+            if not m:
+                return False, "物料不存在"
+            if m.status != "harvested":
+                return False, f"仅采集待处理(harvested)物料可放行，当前 {m.status}"
+            has_source = bool((m.source_link_url or "").strip())
+            has_own = bool((m.link_url or "").strip())
+            if has_source and not has_own:
+                if not allow_no_link:
+                    return False, "源链未转存替换：请先转存写入自有链接，或选择【跳过链接】降级纯内容帖"
+                # 降级纯内容帖：别人的链不随帖发出，也不留在库内诱导误用
+                m.source_link_url = None
+                m.source_link_note = None
+                m.source_link_type = None
+            if title is not None and title.strip():
+                m.title = title.strip()[:500]
+            if content is not None and content.strip():
+                m.content = content
+            # 放行进待发池：ai_status 归 none，走既有 AI 改写链路
+            m.status = "pending"
+            m.ai_status = "none"
+            m.last_used_at = datetime.now()
+            await session.commit()
+            return True, "已放行至待发池"
+
     async def get_material_success_stats(self) -> dict[str, int]:
         """获取各贴吧的发帖成功次数统计"""
         async with self.async_session() as session:

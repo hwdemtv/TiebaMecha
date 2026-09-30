@@ -255,6 +255,15 @@ class MaterialPool(Base):
     link_reply_pid: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="带链首评可见性确认后的楼层pid(NULL=尚未确认，可能被吞待重试)")
     link_reply_fail_count: Mapped[int] = mapped_column(Integer, default=0, comment="带链首评连续失败次数(API失败+被吞判定，达上限放弃)")
 
+    # --- 养号采集 (harvest) 字段：别人的链与自有链(link_url)严格分离 ---
+    # status='harvested' 为采集待处理；次序门(promote_harvested)保证
+    # 源链未转存替换前不得放行进发帖队列
+    source_tid: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="采集来源主题帖ID(跨账号去重)")
+    source_fname: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="采集来源贴吧")
+    source_link_url: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="采集到的原帖网盘链接(别人的链；转存替换为 link_url 前不得发布)")
+    source_link_note: Mapped[str | None] = mapped_column(Text, nullable=True, comment="原链提取码/楼层上下文")
+    source_link_type: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="原链网盘类型: baidu/quark/uc/aliyun/lanzou/pan123/other")
+
     __table_args__ = (
         Index("ix_material_pool_status", "status"),  # 高频筛选
         Index("ix_material_pool_created_at", "created_at"),  # 按时间排序
@@ -262,6 +271,7 @@ class MaterialPool(Base):
         Index("ix_material_pool_posted_fname", "posted_fname"),  # 存活分析按吧筛选
         Index("ix_material_pool_survival_status", "survival_status"),  # 存活状态筛选
         Index("ix_material_pool_task_id", "task_id"),  # 按任务回查物料
+        Index("ix_material_pool_source_tid", "source_tid"),  # 采集去重(普通索引：应用层先查后插)
     )
 
 class TargetPool(Base):
