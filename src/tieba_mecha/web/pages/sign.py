@@ -237,11 +237,12 @@ class SignPage:
         self.list_view = ft.ListView(expand=True, spacing=8, padding=10)
         self.list_container = ft.Container(content=self.list_view, expand=True)
 
-        self.delay_min_input = ft.TextField(label="最小间隔", value="5", text_size=11, expand=True, suffix_text="秒")
-        self.delay_max_input = ft.TextField(label="最大间隔", value="15", text_size=11, expand=True, suffix_text="秒")
-        
-        self.acc_delay_min_input = ft.TextField(label="最小延迟", value="30", text_size=11, expand=True, suffix_text="秒")
-        self.acc_delay_max_input = ft.TextField(label="最大延迟", value="120", text_size=11, expand=True, suffix_text="秒")
+        # 无浮动标签：分组 caption 已说明各行含义，避免窄输入框内标签与"秒"后缀挤压
+        self.delay_min_input = ft.TextField(value="5", text_size=12, expand=True, suffix_text="秒", hint_text="最小")
+        self.delay_max_input = ft.TextField(value="15", text_size=12, expand=True, suffix_text="秒", hint_text="最大")
+
+        self.acc_delay_min_input = ft.TextField(value="30", text_size=12, expand=True, suffix_text="秒", hint_text="最小")
+        self.acc_delay_max_input = ft.TextField(value="120", text_size=12, expand=True, suffix_text="秒", hint_text="最大")
 
         # 节奏参数折叠区：专家参数默认收起，摘要行常显当前值
         self.rhythm_summary = ft.Text("", size=10, color="onSurfaceVariant")
@@ -251,11 +252,11 @@ class SignPage:
             controls=[
                 ft.Row([
                     self.delay_min_input,
-                    ft.Text("至", size=11, color="onSurfaceVariant"),
+                    ft.Text("至", size=12, color="onSurfaceVariant"),
                     self.delay_max_input,
-                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text("吧间延迟：单账号、矩阵与守护共用", size=9, color="onSurfaceVariant"),
-                ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text("账号间延迟：矩阵与守护共用", size=9, color="onSurfaceVariant"),
             ],
         )
