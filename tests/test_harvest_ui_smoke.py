@@ -51,7 +51,9 @@ class TestHarvestViewControls:
     def test_controls_exist_after_init(self, bp):
         # 注：全套跑批时 flet 可能被先行模块装桩，断言只用桩控件也有的属性（value/visible）
         # （构造 kwarg 如 visible=False 桩控件不回读，初始隐藏由刷新测试的切换行为覆盖）
-        assert bp._material_view_dd.value == "schedule"
+        assert bp._material_view == "schedule"
+        # 并排双视图按钮存在
+        assert bp._view_btn_schedule is not None and bp._view_btn_harvest is not None
         # 表格宿主行存在（桩控件不回读 controls 构造 kwarg，初始内容由排期池刷新测试覆盖）
         assert bp._table_row is not None
         # 批量按钮引用化：四个引用都在（刷新测试会实际读写这些属性）
@@ -63,7 +65,7 @@ class TestHarvestViewControls:
     async def test_refresh_switches_to_harvest_view(self, bp):
         mat = _harvested_material()
         bp.db.get_materials_by_status_paginated = AsyncMock(return_value=([mat], 1))
-        bp._material_view_dd.value = "harvest"
+        bp._material_view = "harvest"
 
         await bp._refresh_material_table()
 
@@ -81,7 +83,7 @@ class TestHarvestViewControls:
 
     @pytest.mark.asyncio
     async def test_refresh_schedule_view_restores_buttons(self, bp):
-        bp._material_view_dd.value = "schedule"
+        bp._material_view = "schedule"
         await bp._refresh_material_table()
         assert bp._bulk_reset_btn.visible is True
         # 切回排期池：宿主行换回排期池表（先去采集视图再回来，验证摘除可逆）
@@ -113,15 +115,55 @@ class TestHarvestViewControls:
     @pytest.mark.asyncio
     async def test_select_all_scope_follows_view(self, bp):
         bp.db.get_material_ids_by_status = AsyncMock(return_value=[101, 102])
-        bp._material_view_dd.value = "harvest"
+        bp._material_view = "harvest"
         e = SimpleNamespace(data="true")
         await bp._on_material_select_all(e)
         kwargs = bp.db.get_material_ids_by_status.call_args.kwargs
         assert kwargs["statuses"] == ["harvested"]
 
-        bp._material_view_dd.value = "schedule"
+        bp._material_view = "schedule"
         await bp._on_material_select_all(SimpleNamespace(data="false"))
         assert bp._selected_material_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_view_click_switch_and_noop(self, bp):
+        """双按钮切换：换视图重置页码清选择；同视图重复点击为 no-op"""
+        bp.db.get_materials_by_status_paginated = AsyncMock(return_value=([], 0))
+        bp.db.get_materials_status_counts = AsyncMock(return_value={"pending": 3, "failed": 1, "success": 0, "harvested": 5})
+        bp._material_page = 2
+        bp._selected_material_ids.add(9)
+
+        await bp._on_material_view_click("harvest")
+        assert bp._material_view == "harvest"
+        assert bp._material_page == 1 and bp._selected_material_ids == set()
+        assert bp._table_row.controls == [bp._harvest_table]
+        # 同视图再点：no-op
+        bp._material_page = 3
+        await bp._on_material_view_click("harvest")
+        assert bp._material_page == 3
+
+        await bp._on_material_view_click("schedule")
+        assert bp._material_view == "schedule"
+        assert bp._table_row.controls == [bp._material_table]
+
+    def test_update_view_buttons_text_and_style(self, bp):
+        # 计数进按钮文本；激活态样式切换（桩环境直接属性赋值可读；
+        # 桩 ButtonStyle 按 dict 存 kwarg，真 flet 是属性——双形态取值）
+        def _bgcolor(style):
+            if isinstance(style, dict):
+                return style.get("bgcolor")
+            return getattr(style, "bgcolor", None)
+
+        bp._update_view_buttons(pending=3, failed=1, harvested=5)
+        assert bp._view_btn_schedule.text == "⏳ 排期池(4)"
+        assert bp._view_btn_harvest.text == "🌾 采集待审(5)"
+        assert _bgcolor(bp._view_btn_schedule.style) == "primary"
+        assert _bgcolor(bp._view_btn_harvest.style) is None
+
+        bp._material_view = "harvest"
+        bp._update_view_buttons(pending=3, failed=1, harvested=5)
+        assert _bgcolor(bp._view_btn_harvest.style) == "primary"
+        assert _bgcolor(bp._view_btn_schedule.style) is None
 
 
 class TestSettingsHarvestFields:

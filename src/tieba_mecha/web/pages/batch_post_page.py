@@ -669,7 +669,8 @@ class BatchPostPage:
         if hasattr(self, "_stats_text"):
             self._stats_text.value = f"状态分布:  ⏳待发({pending})   ✅成功({success})   ❌失败({failed})   🌾采集({harvested})"
 
-        is_harvest_view = getattr(self, "_material_view_dd", None) is not None and self._material_view_dd.value == "harvest"
+        is_harvest_view = getattr(self, "_material_view", "schedule") == "harvest"
+        self._update_view_buttons(pending, failed, harvested)
 
         # --- 搜索/分页状态共用 ---
         mat_search = self._material_search_text if self._material_search_text.strip() else None
@@ -781,8 +782,11 @@ class BatchPostPage:
         # 同步更新批量操作栏
         self._update_bulk_visibility()
 
-        # 精确更新而非全页面刷新
+        # 精确更新而非全页面刷新：宿主行必须一起 update——视图切换时 controls 被整体替换，
+        # 只 update 表格自身的话客户端不知道宿主行换了子控件（切回排期池表头残留的根因）
         try:
+            if hasattr(self, "_table_row"):
+                self._table_row.update()
             if hasattr(self, "_material_table"):
                 self._material_table.update()
         except Exception:
@@ -1054,7 +1058,7 @@ class BatchPostPage:
     async def _on_material_select_all(self, e):
         # 跨页全选：从数据库查询所有符合条件的 ID（按当前视图取口径）
         is_select = e.data == "true" if isinstance(e.data, str) else bool(e.data)
-        is_harvest_view = getattr(self, "_material_view_dd", None) is not None and self._material_view_dd.value == "harvest"
+        is_harvest_view = getattr(self, "_material_view", "schedule") == "harvest"
         if is_select:
             mat_search = self._material_search_text if self._material_search_text.strip() else None
             all_ids = await self.db.get_material_ids_by_status(
@@ -1128,11 +1132,37 @@ class BatchPostPage:
         await self._refresh_material_table()
         self._show_snackbar(msg, "success" if ok else "warning")
 
-    async def _on_material_view_change(self, e):
-        """排期池 ↔ 采集待审 视图切换：清选择回第一页"""
+    async def _on_material_view_click(self, view: str):
+        """排期池 ↔ 采集待审 视图切换（并排双按钮）：同视图重复点击忽略，清选择回第一页"""
+        if getattr(self, "_material_view", "schedule") == view:
+            return
+        self._material_view = view
         self._material_page = 1
         self._selected_material_ids.clear()
         await self._refresh_material_table()
+
+    def _update_view_buttons(self, pending: int, failed: int, harvested: int):
+        """视图按钮的计数与激活态同步（激活=实底，非激活=描边）"""
+        if not hasattr(self, "_view_btn_schedule"):
+            return
+        self._view_btn_schedule.text = f"⏳ 排期池({pending + failed})"
+        self._view_btn_harvest.text = f"🌾 采集待审({harvested})"
+        schedule_active = getattr(self, "_material_view", "schedule") == "schedule"
+        self._view_btn_schedule.style = (
+            ft.ButtonStyle(bgcolor="primary", color="white")
+            if schedule_active
+            else ft.ButtonStyle(color="onSurfaceVariant")
+        )
+        self._view_btn_harvest.style = (
+            ft.ButtonStyle(color="onSurfaceVariant")
+            if schedule_active
+            else ft.ButtonStyle(bgcolor="primary", color="white")
+        )
+        try:
+            self._view_btn_schedule.update()
+            self._view_btn_harvest.update()
+        except Exception:
+            pass
 
     async def _on_batch_ai_rewrite_click(self, e):
         """触发选中物料或所有待发物料的批量 AI 改写"""
@@ -1960,7 +1990,8 @@ class BatchPostPage:
                 ft.Row([self._quick_title, self._quick_content, self._quick_link, self._add_btn], spacing=10),
                 ft.Row([
                     material_search,
-                    self._material_view_dd,
+                    self._view_btn_schedule,
+                    self._view_btn_harvest,
                     self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
@@ -2099,16 +2130,19 @@ class BatchPostPage:
         #  故不显示的表格必须摘出控件树）
         self._table_row = ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)
 
-        # 物料池视图切换：排期池(pending/failed) ↔ 采集待审(harvested)
-        self._material_view_dd = ft.Dropdown(
-            label="物料视图",
-            value="schedule",
-            width=160, text_size=12, dense=True,
-            options=[
-                ft.dropdown.Option("schedule", "⏳ 排期池"),
-                ft.dropdown.Option("harvest", "🌾 采集待审"),
-            ],
-            on_change=lambda e: self.page.run_task(self._on_material_view_change, e),
+        # 物料池视图切换：排期池(pending/failed) ↔ 采集待审(harvested)——并排双按钮
+        self._material_view = "schedule"
+        _VIEW_ACTIVE = ft.ButtonStyle(bgcolor="primary", color="white")
+        _VIEW_IDLE = ft.ButtonStyle(color="onSurfaceVariant")
+        self._view_btn_schedule = ft.FilledButton(
+            "⏳ 排期池", style=_VIEW_ACTIVE,
+            on_click=lambda e: self.page.run_task(self._on_material_view_click, "schedule"),
+            tooltip="待发/失败物料的排期池（原物料列表）",
+        )
+        self._view_btn_harvest = ft.OutlinedButton(
+            "🌾 采集待审", style=_VIEW_IDLE,
+            on_click=lambda e: self.page.run_task(self._on_material_view_click, "harvest"),
+            tooltip="养号采集的热门资源物料（转存替换/审核后才进排期池）",
         )
 
         # 3. 参数配置
