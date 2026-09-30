@@ -13,10 +13,14 @@ from ..components.icons import (
     CHECK, VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, HISTORY_ROUNDED,
     PUBLIC, VPN_LOCK, CHECK_CIRCLE,
     ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED,
-    HEART_BROKEN, PAUSE_CIRCLE_OUTLINED, PERSON_OFF
+    HEART_BROKEN, PAUSE_CIRCLE_OUTLINED, PERSON_OFF,
+    BLOCK, GPP_GOOD_ROUNDED,
 )
 from ..utils import with_opacity
-from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts, sign_flow_lock
+from ...core.sign import (
+    get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums,
+    get_sign_stats, sign_all_accounts, sign_flow_lock, SIGN_SKIP_MESSAGE,
+)
 
 
 class SignPage:
@@ -34,17 +38,19 @@ class SignPage:
         self._stats = {"total": 0, "success": 0, "failure": 0}
         self._is_signing = False
         self._stop_requested = False
+        self._stop_event = None  # 核心流快速中止信号（1-2s 生效，替代只查 yield 边界的半分钟等待）
         self._mode = "single"  # single / matrix
 
     async def load_data(self):
         """加载数据"""
         if not self.db: return
-        
+        self._loaded_date = datetime.now().date()
+
         try:
             # [NEW] 数据加载前强制检测并修复跨天签到状态
             if hasattr(self.db, "check_and_reset_daily_sign"):
                 await self.db.check_and_reset_daily_sign()
-                
+
             # 加载贴吧列表 (单账号模式使用)
             account = await self.db.get_active_account()
             if account:
@@ -53,6 +59,11 @@ class SignPage:
             else:
                 self._forums = []
                 self._stats = {"total": 0, "success": 0, "failure": 0}
+
+            # 当日日志映射（未签原因行级判定的数据源，一次查询防 N+1）
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            logs_today = await self.db.get_sign_logs(limit=1000, since=today_start)
+            self._today_logs = {log.forum_id: log for log in logs_today}
 
             # 加载全量账号索引（矩阵前置检查用）
             self._accounts = await self.db.get_accounts()
@@ -112,6 +123,8 @@ class SignPage:
                 self.success_stat.value = str(self._stats['success'])
                 self.failure_stat.value = str(self._stats['failure'])
                 self.pending_stat.value = str(self._stats.get('pending', 0))
+                if hasattr(self, "scope_text"):
+                    self.scope_text.value = f"本次将签：当前账号 {self._stats.get('pending', 0)} 吧"
             else:
                 self.list_view.controls.extend(self._build_account_queue_items())
                 # 矩阵态统计 = 各账号行账目汇总（与队列所见一致，口径自然闭合）
@@ -120,6 +133,9 @@ class SignPage:
                 self.success_stat.value = str(sum(a["signed"] for a in accs))
                 self.failure_stat.value = str(sum(a["failed_today"] for a in accs))
                 self.pending_stat.value = str(sum(a["pending"] for a in accs))
+                if hasattr(self, "scope_text"):
+                    n_acc = len([a for a in accs if a["pending"] > 0])
+                    self.scope_text.value = f"本次将签：{n_acc} 账号 / {sum(a['pending'] for a in accs)} 吧"
 
             self.page.update()
 
@@ -247,10 +263,12 @@ class SignPage:
         # 主控按钮组件
         self.sign_btn_icon = ft.Icon(PLAY_ARROW_ROUNDED, color="onSurface", size=30)
         self.sign_btn_text = ft.Text("启动签到流", color="onSurfaceVariant", size=12, weight=ft.FontWeight.W_500)
-        
+        # 本次将签范围（启动前可知，不再靠猜）
+        self.scope_text = ft.Text("", size=10, color="onSurfaceVariant", text_align=ft.TextAlign.CENTER)
+
         self.main_action = ft.Container(
             content=ft.Column([
-                ft.Text("执行主控", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
+                ft.Text("执行控制", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
                 ft.Container(
                     content=ft.Column([
                         ft.Container(
@@ -272,7 +290,8 @@ class SignPage:
                             alignment=ft.alignment.center,
                         ),
                         self.sign_btn_text,
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        self.scope_text,
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
                 ),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             padding=10,
@@ -304,7 +323,7 @@ class SignPage:
         # 侧边设置面板 (Cyber Style)
         settings_panel = ft.Container(
             content=ft.Column([
-                ft.Text("行为频率配置 / CONFIG", size=12, weight=ft.FontWeight.BOLD, color="primary"),
+                ft.Text("行为频率配置", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                 ft.Row([
                     self.delay_min_input,
                     ft.Text("至", size=11, color="onSurfaceVariant"),
@@ -356,7 +375,7 @@ class SignPage:
 
         daemon_panel = ft.Container(
             content=ft.Column([
-                ft.Text("守护进程 / DAEMON", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
+                ft.Text("守护进程", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
                 ft.Container(content=self.daemon_switch, padding=ft.padding.only(left=-10)),
                 ft.Text("守护执行模式", size=10, color="onSurfaceVariant"),
                 self.daemon_mode_radio,
@@ -407,19 +426,89 @@ class SignPage:
             expand=True,
         )
 
+    @staticmethod
+    def _pending_reason(forum, today_logs: dict):
+        """未签原因判定（整改#13）：集中一处、用模块常量匹配，禁止 UI 散落字符串比较"""
+        if forum.is_banned:
+            return "已熔断", COLORS.RED_ACCENT_400
+        log = (today_logs or {}).get(forum.id)
+        if log is not None and log.message == SIGN_SKIP_MESSAGE:
+            return "今日跳过", COLORS.AMBER
+        if forum.last_sign_status == "failure":
+            msg = (log.message if log else "") or ""
+            if msg.startswith("被风控限流"):
+                return "风控退避", COLORS.AMBER
+            return "失败", COLORS.RED_ACCENT_400
+        return "待签", "onSurfaceVariant"
+
     def _build_single_mode_items(self):
         items = []
+        today_logs = getattr(self, "_today_logs", None) or {}
         for f in self._forums:
-            is_signed = f.is_sign_today
+            is_signed = f.is_sign_today and not f.is_banned
+            if f.is_banned:
+                lead_icon = ft.Icon(BLOCK, color="error", size=18)
+                badge = ("已熔断", COLORS.RED_ACCENT_400)
+            elif is_signed:
+                lead_icon = ft.Icon(VERIFIED_ROUNDED, color="primary", size=18)
+                badge = None
+            else:
+                lead_icon = ft.Icon(RADIO_BUTTON_UNCHECKED, color="onSurfaceVariant", size=18)
+                badge = self._pending_reason(f, today_logs)
+
+            title_row = ft.Row([ft.Text(f.fname, size=13, weight=ft.FontWeight.W_500)], spacing=8)
+            if badge:
+                label, color = badge
+                title_row.controls.append(ft.Container(
+                    content=ft.Text(label, size=9, color="white", weight=ft.FontWeight.BOLD),
+                    bgcolor=color,
+                    padding=ft.padding.symmetric(horizontal=5, vertical=1),
+                    border_radius=4,
+                    tooltip=f.ban_reason if f.is_banned else None,
+                ))
+
+            actions = [
+                ft.IconButton(
+                    icon=HEART_BROKEN,
+                    icon_size=18,
+                    icon_color="error",
+                    tooltip="取消关注",
+                    on_click=lambda e, fname=f.fname: self.page.run_task(self._on_unfollow_forum, fname)
+                ),
+                ft.IconButton(
+                    icon=HISTORY_ROUNDED,
+                    icon_size=18,
+                    icon_color="onSurfaceVariant",
+                    tooltip="查看签到日志",
+                    on_click=lambda e, fid=f.id, fname=f.fname: self.page.run_task(self._show_forum_history, fid, fname)
+                ),
+            ]
+            if f.is_banned:
+                # 熔断行不给手签（再撞 3250004），给恢复入口
+                actions.append(ft.IconButton(
+                    icon=GPP_GOOD_ROUNDED,
+                    icon_size=18,
+                    icon_color="secondary",
+                    tooltip="解除熔断",
+                    on_click=lambda e, acc_id=f.account_id, fname=f.fname: self.page.run_task(self._on_unban_forum, acc_id, fname),
+                ))
+            else:
+                actions.append(ft.FilledButton(
+                    "签到" if not is_signed else "已签",
+                    icon=BOLT if not is_signed else CHECK,
+                    on_click=lambda e, fn=f.fname: self.page.run_task(self._do_sign_one, fn) if not self._is_signing else None,
+                    disabled=is_signed or self._is_signing,
+                    style=ft.ButtonStyle(
+                        shape=ft.RoundedRectangleBorder(radius=6),
+                        padding=ft.padding.symmetric(horizontal=10)
+                    )
+                ))
+
             card = ft.Container(
                 content=ft.Row([
-                    ft.Icon(
-                        VERIFIED_ROUNDED if is_signed else RADIO_BUTTON_UNCHECKED,
-                        color="primary" if is_signed else "onSurfaceVariant",
-                        size=18
-                    ),
+                    lead_icon,
                     ft.Column([
-                        ft.Text(f.fname, size=13, weight=ft.FontWeight.W_500),
+                        title_row,
                         ft.Row([
                             ft.Text(f"等级: LV.{f.level if hasattr(f,'level') else '?'} | 连续: {f.sign_count} 天", size=10, color="onSurfaceVariant"),
                             ft.Container(
@@ -434,30 +523,7 @@ class SignPage:
                             ),
                         ], spacing=10, alignment=ft.MainAxisAlignment.START),
                     ], expand=True, spacing=4),
-                    ft.IconButton(
-                        icon=HEART_BROKEN,
-                        icon_size=18,
-                        icon_color="error",
-                        tooltip="取消关注",
-                        on_click=lambda e, fname=f.fname: self.page.run_task(self._on_unfollow_forum, fname)
-                    ),
-                    ft.IconButton(
-                        icon=HISTORY_ROUNDED,
-                        icon_size=18,
-                        icon_color="onSurfaceVariant",
-                        tooltip="查看签到日志",
-                        on_click=lambda e, fid=f.id, fname=f.fname: self.page.run_task(self._show_forum_history, fid, fname)
-                    ),
-                    ft.FilledButton(
-                        "签到" if not is_signed else "已签",
-                        icon=BOLT if not is_signed else CHECK,
-                        on_click=lambda e, fn=f.fname: self.page.run_task(self._do_sign_one, fn) if not self._is_signing else None,
-                        disabled=is_signed or self._is_signing,
-                        style=ft.ButtonStyle(
-                            shape=ft.RoundedRectangleBorder(radius=6),
-                            padding=ft.padding.symmetric(horizontal=10)
-                        )
-                    ),
+                    *actions,
                 ]),
                 bgcolor=with_opacity(0.02, "primary") if is_signed else with_opacity(0.01, "onSurface"),
                 padding=8,
@@ -543,11 +609,21 @@ class SignPage:
             ))
         return items
 
+    async def _ensure_fresh_day(self):
+        """长开页面跨天自愈：日期变更即重置签到状态并重载（统计陈旧问题）"""
+        today = datetime.now().date()
+        if getattr(self, "_loaded_date", None) != today:
+            self._loaded_date = today
+            if hasattr(self.db, "check_and_reset_daily_sign"):
+                await self.db.check_and_reset_daily_sign()
+            await self.load_data()
+
     async def _do_sync(self, e):
         # 同步会逐账号翻页拉关注列表，与签到流撞同账号即双流并发——必须互斥
         if sign_flow_lock.locked():
             self._show_snackbar("已有签到流在执行中，同步已推迟（避免同账号双流并发）", "warning")
             return
+        await self._ensure_fresh_day()
         # 此时同步逻辑已升级为全自动多账号轮换
         self.sync_btn.disabled = True
         self.status_text.value = "🔍 正在进行全矩阵贴吧深度同步 (多账号轮换)..."
@@ -573,9 +649,12 @@ class SignPage:
         self.page.update()
 
     async def _do_sign(self, e):
+        await self._ensure_fresh_day()
         if self._is_signing:
             if not self._stop_requested:
                 self._stop_requested = True
+                if self._stop_event is not None:
+                    self._stop_event.set()
                 self.status_text.value = "⛔ 正在申请中止执行，请等待当前任务结束..."
                 self.page.update()
             return
@@ -600,6 +679,7 @@ class SignPage:
 
         self._is_signing = True
         self._stop_requested = False
+        self._stop_event = asyncio.Event()
         self.progress_bar.visible = True
         self.progress_bar.value = 0
 
@@ -614,9 +694,12 @@ class SignPage:
         total = max(len(pending), 1)
         current = 0
         try:
-            # 与定时守护签到互斥
+            # 与定时守护签到互斥；ignore_skip：手动补扫=明确意图，无视拟人化跳过骰子
             async with sign_flow_lock:
-                async for result in sign_all_forums(self.db, delay_min=d_min, delay_max=d_max):
+                async for result in sign_all_forums(
+                    self.db, delay_min=d_min, delay_max=d_max,
+                    ignore_skip=True, stop_event=self._stop_event,
+                ):
                     if self._stop_requested:
                         self._show_snackbar("签到流已由用户手动中止", "warning")
                         break
@@ -654,7 +737,8 @@ class SignPage:
 
             await self.load_data()
 
-    async def _do_sign_matrix(self):
+    async def _do_sign_matrix(self, e=None):
+        """矩阵入口：预检 + 范围/预计时长确认（30-60 分钟级大任务，误触归零）"""
         if self._is_signing: return
         if sign_flow_lock.locked():
             self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
@@ -665,12 +749,50 @@ class SignPage:
         if not self._accounts or pending_total == 0:
             self._show_snackbar("矩阵中没有需要签到的贴吧", "info")
             return
+
+        active_accounts = [a for a in rollup["accounts"] if a["pending"] > 0]
+        d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
+        ad_min, ad_max = self._validated_delay(self.acc_delay_min_input.value, self.acc_delay_max_input.value, (30.0, 120.0))
+        eta_min = max(1, round(
+            (pending_total * (d_min + d_max) / 2 + len(active_accounts) * (ad_min + ad_max) / 2) / 60
+        ))
+
+        def _launch(e_):
+            self.page.close(dialog)
+            self.page.run_task(self._do_sign_matrix_run)
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(GROUP_WORK, color="primary"), ft.Text("启动矩阵全扫？")]),
+            content=ft.Text(
+                f"范围：{len(active_accounts)} 个账号 / {pending_total} 个待签贴吧\n"
+                f"节奏：吧间 {d_min:g}~{d_max:g}s，账号间 {ad_min:g}~{ad_max:g}s\n"
+                f"预计耗时约 {eta_min} 分钟"
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("启动", icon=PLAY_ARROW_ROUNDED, on_click=_launch),
+            ],
+        )
+        self.page.open(dialog)
+
+    async def _do_sign_matrix_run(self):
+        """矩阵执行体（确认弹窗后进入；进入时重验锁与待签，防弹窗期间状态漂移）"""
+        if self._is_signing: return
+        if sign_flow_lock.locked():
+            self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
+            return
+        rollup = await self.db.get_sign_rollup_by_account()
+        pending_total = sum(a["pending"] for a in rollup["accounts"])
+        if not self._accounts or pending_total == 0:
+            self._show_snackbar("矩阵中没有需要签到的贴吧", "info")
+            return
         
         self._is_signing = True
         self._stop_requested = False
+        self._stop_event = asyncio.Event()
         self.progress_bar.visible = True
         self.progress_bar.value = 0
-        
+
         # UI 切换为停止状态
         self.sign_btn_icon.name = STOP_CIRCLE_ROUNDED
         self.sign_btn_text.value = "停止签到流"
@@ -690,9 +812,12 @@ class SignPage:
         current_task_idx = 0
 
         try:
-            # 与定时守护签到互斥
+            # 与定时守护签到互斥；ignore_skip：手动补扫=明确意图，无视拟人化跳过骰子
             async with sign_flow_lock:
-                async for result in sign_all_accounts(self.db, d_min, d_max, ad_min, ad_max):
+                async for result in sign_all_accounts(
+                    self.db, d_min, d_max, ad_min, ad_max,
+                    ignore_skip=True, stop_event=self._stop_event,
+                ):
                     if self._stop_requested:
                         self._show_snackbar("矩阵签到流已由用户手动中止", "warning")
                         break
@@ -866,6 +991,30 @@ class SignPage:
             actions=[
                 ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
                 ft.FilledButton("确认取消", icon=HEART_BROKEN, style=ft.ButtonStyle(bgcolor="error", color="white"), on_click=do_unfollow),
+            ]
+        )
+        self.page.open(dialog)
+
+    async def _on_unban_forum(self, account_id: int, fname: str):
+        """解除单吧熔断：恢复每日签到与发帖调度资格（带确认）"""
+        async def do_unban(e):
+            try:
+                self.page.close(dialog)
+                ok = await self.db.unban_forum(account_id, fname)
+                if ok:
+                    self._show_snackbar(f"已解除 '{fname}' 熔断，恢复签到与发帖资格", "success")
+                    await self.load_data()
+                else:
+                    self._show_snackbar(f"'{fname}' 未处于熔断状态", "info")
+            except Exception as ex:
+                self._show_snackbar(f"解除熔断失败: {str(ex)}", "error")
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(GPP_GOOD_ROUNDED, color="secondary"), ft.Text("解除熔断？")]),
+            content=ft.Text(f"确认解除 '{fname}' 的吧务封禁熔断？解除后该吧恢复每日签到与发帖调度。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _: self.page.close(dialog)),
+                ft.FilledButton("解除熔断", style=ft.ButtonStyle(bgcolor="secondary", color="white"), on_click=do_unban),
             ]
         )
         self.page.open(dialog)

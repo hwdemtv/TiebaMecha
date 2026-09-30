@@ -437,3 +437,71 @@ class TestAccountChipBusyGuard:
             await chip._do_switch(target)
 
         mock_sw.assert_not_called()
+
+
+# ========== 整改批次三：原因徽标 / 熔断解除 / 矩阵确认 ==========
+
+
+@pytest.mark.asyncio
+class TestBatch3Page:
+    async def test_pending_reason_classification(self, sign_page, db):
+        """整改#13: 未签原因四态判定（跳过/失败/熔断/待签）"""
+        from datetime import datetime
+        from tieba_mecha.core.sign import SIGN_SKIP_MESSAGE
+
+        acc = await _add_account_with_forum(db, "acc_badge", [
+            (31, "skip_forum", None), (32, "fail_forum", "failure"),
+        ])
+        forums = {f.fname: f for f in await db.get_forums(acc.id)}
+        await db.add_sign_log(
+            forum_id=forums["skip_forum"].id, fname="skip_forum",
+            success=False, message=SIGN_SKIP_MESSAGE,
+        )
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_logs = {l.forum_id: l for l in await db.get_sign_logs(limit=100, since=today_start)}
+
+        assert sign_page._pending_reason(forums["skip_forum"], today_logs)[0] == "今日跳过"
+        assert sign_page._pending_reason(forums["fail_forum"], today_logs)[0] == "失败"
+
+        await db.mark_forum_banned(acc.id, "fail_forum", reason="pre-banned")
+        forums = {f.fname: f for f in await db.get_forums(acc.id)}
+        assert sign_page._pending_reason(forums["fail_forum"], today_logs)[0] == "已熔断"
+
+    async def test_banned_row_unban_instead_of_sign(self, sign_page, db):
+        """整改#17: 熔断行显示徽标、给解除入口、不给手签按钮"""
+        acc = await _add_account_with_forum(db, "acc_ban", [(33, "ban_forum", None)])
+        await db.mark_forum_banned(acc.id, "ban_forum", reason="pre-banned")
+        await sign_page.load_data()
+
+        items = sign_page._build_single_mode_items()
+        assert len(items) == 1
+        row = items[0].content
+        tooltips = [c.tooltip for c in row.controls if hasattr(c, "tooltip") and c.tooltip]
+        assert any("解除熔断" in t for t in tooltips), "熔断行应有解除熔断入口"
+        buttons = [c.text for c in row.controls if hasattr(c, "text") and c.text]
+        assert "签到" not in buttons, "熔断行不得再提供手签（重撞 3250004）"
+
+    async def test_matrix_entry_requires_confirm_dialog(self, sign_page, db):
+        """整改#18: 矩阵启动必经确认弹窗，确认前不进入执行态"""
+        await _add_account_with_forum(db, "acc_dialog", [(34, "dlg_forum", None)])
+        await sign_page.load_data()
+        sign_page._set_mode("matrix")
+
+        with patch("tieba_mecha.web.pages.sign.sign_all_accounts") as mock_flow:
+            async def empty_gen(*a, **k):
+                if False: yield {}
+
+            mock_flow.return_value = empty_gen()
+            await sign_page._do_sign_matrix()
+
+        sign_page.page.open.assert_called(), "矩阵启动应先弹确认框"
+        assert sign_page._is_signing is False, "确认前不得进入执行态"
+        mock_flow.assert_not_called()
+
+    async def test_scope_text_reflects_pending(self, sign_page, db):
+        """整改#19: 大按钮旁常显本次将签范围"""
+        await _add_account_with_forum(db, "acc_scope", [(35, "scope_forum", "success"), (36, "scope_forum2", None)])
+        await sign_page.load_data()
+
+        assert "本次将签" in (sign_page.scope_text.value or "")
+        assert "1 吧" in (sign_page.scope_text.value or "")
