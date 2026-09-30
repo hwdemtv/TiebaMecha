@@ -146,20 +146,29 @@ class TestHarvestViewControls:
         assert bp._material_view == "schedule"
 
     def test_update_view_buttons_text_and_state(self, bp):
-        # 计数进按钮文本；激活态 bgcolor/color 简单属性切换
-        # （style 对象替换在 flet 0.23.2 patch 不可靠，已弃用；桩 ButtonStyle 是 dict，不再断言它）
+        # 计数+✓前缀进按钮文本；激活态 opacity 明暗切换
+        # （0.23.2 按钮 bgcolor/color 构造参数不存在会 build 即炸——本测试同时咬住"不许再用"）
         bp._update_view_buttons(pending=3, failed=1, harvested=5)
-        assert bp._view_btn_schedule.text == "⏳ 排期池(4)"
+        assert bp._view_btn_schedule.text == "✓ ⏳ 排期池(4)"
+        assert bp._view_btn_schedule.opacity == 1.0
         assert bp._view_btn_harvest.text == "🌾 采集待审(5)"
-        assert bp._view_btn_schedule.bgcolor == "primary"
-        assert bp._view_btn_schedule.color == "white"
-        assert bp._view_btn_harvest.bgcolor is None
+        assert bp._view_btn_harvest.opacity == 0.5
 
         bp._material_view = "harvest"
         bp._update_view_buttons(pending=3, failed=1, harvested=5)
-        assert bp._view_btn_harvest.bgcolor == "primary"
-        assert bp._view_btn_harvest.color == "white"
-        assert bp._view_btn_schedule.bgcolor is None
+        assert bp._view_btn_harvest.text == "✓ 🌾 采集待审(5)"
+        assert bp._view_btn_harvest.opacity == 1.0
+        assert bp._view_btn_schedule.opacity == 0.5
+
+    def test_view_buttons_build_kwargs_valid(self):
+        """构造参数必须是 flet 0.23.2 按钮真实存在的 kwarg（bgcolor 事故回归）"""
+        import inspect
+        import flet as ft
+
+        valid = set(inspect.signature(ft.FilledButton.__init__).parameters)
+        valid |= set(inspect.signature(ft.OutlinedButton.__init__).parameters)
+        for kw in ("bgcolor", "color"):
+            assert kw not in valid, f"若 {kw} 已成为合法参数可解除本断言，但当前传入即 build 炸"
 
 
 class TestSettingsHarvestFields:

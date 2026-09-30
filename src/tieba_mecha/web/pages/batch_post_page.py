@@ -1147,23 +1147,19 @@ class BatchPostPage:
         await self._refresh_material_table()
 
     def _update_view_buttons(self, pending: int, failed: int, harvested: int):
-        """视图按钮的计数与激活态同步——激活态用 bgcolor/color 简单属性赋值
-        （style 对象整体替换的 patch 在 flet 0.23.2 不可靠，实测两按钮同亮）"""
+        """视图按钮的计数与激活态同步——当前视图 ✓前缀+全亮，另一按钮半透明。
+        （0.23.2 按钮 bgcolor/color 构造参数不存在；style 对象替换 patch 不可靠；text/opacity 简单属性可靠）"""
         if not hasattr(self, "_view_btn_schedule"):
             return
-        self._view_btn_schedule.text = f"⏳ 排期池({pending + failed})"
-        self._view_btn_harvest.text = f"🌾 采集待审({harvested})"
         schedule_active = getattr(self, "_material_view", "schedule") == "schedule"
-        if schedule_active:
-            self._view_btn_schedule.bgcolor = "primary"
-            self._view_btn_schedule.color = "white"
-            self._view_btn_harvest.bgcolor = None
-            self._view_btn_harvest.color = "onSurfaceVariant"
-        else:
-            self._view_btn_schedule.bgcolor = None
-            self._view_btn_schedule.color = "onSurfaceVariant"
-            self._view_btn_harvest.bgcolor = "primary"
-            self._view_btn_harvest.color = "white"
+        self._view_btn_schedule.text = (
+            f"✓ ⏳ 排期池({pending + failed})" if schedule_active else f"⏳ 排期池({pending + failed})"
+        )
+        self._view_btn_schedule.opacity = 1.0 if schedule_active else 0.5
+        self._view_btn_harvest.text = (
+            f"🌾 采集待审({harvested})" if schedule_active else f"✓ 🌾 采集待审({harvested})"
+        )
+        self._view_btn_harvest.opacity = 0.5 if schedule_active else 1.0
         try:
             self._view_btn_schedule.update()
             self._view_btn_harvest.update()
@@ -2122,15 +2118,16 @@ class BatchPostPage:
         self._table_row = ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)
 
         # 物料池视图切换：排期池(pending/failed) ↔ 采集待审(harvested)——并排双按钮
-        # （激活态走 bgcolor/color 简单属性，不用 style 对象替换——后者 patch 不可靠）
+        # （激活态用 ✓前缀+opacity 明暗表达：0.23.2 按钮 bgcolor/color 构造参数不存在（在 style 里），
+        #  而 style 对象替换 patch 不可靠、text/opacity 简单属性可靠）
         self._material_view = "schedule"
         self._view_btn_schedule = ft.FilledButton(
-            "⏳ 排期池", bgcolor="primary", color="white",
+            "✓ ⏳ 排期池", opacity=1.0,
             on_click=lambda e: self.page.run_task(self._on_material_view_click, "schedule"),
-            tooltip="待发/失败物料的排期池（原物料列表）",
+            tooltip="当前视图：待发/失败物料的排期池（原物料列表）",
         )
         self._view_btn_harvest = ft.OutlinedButton(
-            "🌾 采集待审", color="onSurfaceVariant",
+            "🌾 采集待审", opacity=0.5,
             on_click=lambda e: self.page.run_task(self._on_material_view_click, "harvest"),
             tooltip="养号采集的热门资源物料（转存替换/审核后才进排期池）",
         )
