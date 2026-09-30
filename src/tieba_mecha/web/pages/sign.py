@@ -292,13 +292,16 @@ class SignPage:
             prefix_icon=ACCESS_TIME_ROUNDED,
             hint_text="HH:MM",
         )
-        self.daemon_save_btn = ft.FilledButton(
+        # 配置类动作用描边黄（层级：实心=执行主动作 / 描边=次级；黄色实心会压过主按钮且与"待签/跳过"警示黄撞语义）
+        self.daemon_save_btn = ft.OutlinedButton(
             "保存配置并生效",
             icon=BOLT,
             on_click=self._save_daemon_config,
             style=ft.ButtonStyle(
-                bgcolor=COLORS.SECONDARY,
+                color=COLORS.SECONDARY,
+                side=ft.BorderSide(1, COLORS.SECONDARY),
                 shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
             ),
         )
 
