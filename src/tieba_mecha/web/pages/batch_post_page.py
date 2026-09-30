@@ -68,7 +68,7 @@ class BatchPostPage:
         self._selected_account_ids = set()
         self._temp_local_fnames = []    # 本地自留区锁定的吧名
         self._temp_global_fnames = []   # 全域轰炸组锁定的吧名
-        self._local_safe_only = True    # 本地自留区弹窗默认只看安全吧
+        self._local_selected_only = True    # 本地自留区弹窗默认只看已选（所见列表=勾选集，计数与眼见一致）
 
         # 账号选择增强状态
         self._account_search_text = ""
@@ -1359,7 +1359,10 @@ class BatchPostPage:
             text_size=12,
             expand=True
         )
-        local_safe_only_cb = ft.Checkbox(label="只看安全", value=self._local_safe_only, scale=0.8)
+        local_selected_only_cb = ft.Checkbox(
+            label="只看已选", value=self._local_selected_only, scale=0.8,
+            tooltip="仅显示当前已勾选的目标；关闭后列出全部已关注吧"
+        )
         local_select_all_cb = ft.Checkbox(label="全选安全", value=False, scale=0.8, fill_color="green")
         local_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
         local_count_text = ft.Text("", size=12, color="primary", weight=ft.FontWeight.BOLD)
@@ -1378,12 +1381,28 @@ class BatchPostPage:
             except Exception: pass
         update_local_count()
         
+        def _local_filter_empty_placeholder():
+            return ft.Container(
+                content=ft.Text("当前过滤条件下没有匹配的贴吧", color="onSurfaceVariant", text_align="center", size=12),
+                alignment=ft.alignment.center, padding=ft.padding.only(top=40)
+            )
+
         def on_local_item_check(e):
             fn = e.control.data
-            if e.control.value: local_selected.add(fn)
-            else: local_selected.discard(fn)
+            if e.control.value:
+                local_selected.add(fn)
+            else:
+                local_selected.discard(fn)
+                # "只看已选"过滤生效时，取消勾选的条目即时移出列表（整表重绘会重置滚动位置）
+                if self._local_selected_only:
+                    if e.control in local_container.controls:
+                        local_container.controls.remove(e.control)
+                    if not local_container.controls:
+                        local_container.controls.append(_local_filter_empty_placeholder())
+                    try: local_container.update()
+                    except Exception: pass
             update_local_count()
-        
+
         def render_local_list(keyword=""):
             local_container.controls.clear()
             if not local_forums:
@@ -1397,7 +1416,7 @@ class BatchPostPage:
                 for f in local_forums:
                     fn = f['fname']
                     is_safe = f['is_post_target']
-                    if self._local_safe_only and not is_safe: continue
+                    if self._local_selected_only and fn not in local_selected: continue
                     if keyword and keyword.lower() not in fn.lower(): continue
                     risk = risk_map.get(fn)
                     is_risky = _is_risky(risk)
@@ -1444,12 +1463,7 @@ class BatchPostPage:
                         )
                     )
                 if not local_container.controls:
-                    local_container.controls.append(
-                        ft.Container(
-                            content=ft.Text("当前过滤条件下没有匹配的贴吧", color="onSurfaceVariant", text_align="center", size=12),
-                            alignment=ft.alignment.center, padding=ft.padding.only(top=40)
-                        )
-                    )
+                    local_container.controls.append(_local_filter_empty_placeholder())
             try: local_container.update()
             except Exception: pass
         
@@ -1464,24 +1478,28 @@ class BatchPostPage:
                     if cb.disabled: continue  # 封禁/高风险禁选项不参与全选
                     fn = cb.data
                     if select_all:
-                        # 全选时仅勾选安全贴吧，跳过不安全的
-                        is_safe = fn in safe_fnames
-                        cb.value = is_safe
-                        if is_safe: local_selected.add(fn)
+                        # 全选只负责把可见的安全项勾上；非安全项保持原状（勾选集与 UI 不脱节）
+                        if fn not in safe_fnames: continue
+                        cb.value = True
+                        local_selected.add(fn)
                     else:
                         cb.value = False
                         local_selected.discard(fn)
             update_local_count()
+            if self._local_selected_only and not select_all:
+                # "只看已选"下取消全选即清空可见集，整表重绘出占位提示
+                render_local_list(local_search_field.value)
+                return
             try: local_container.update()
             except Exception: pass
-        
+
         local_select_all_cb.on_change = on_local_select_all
 
-        def on_local_safe_only_change(e):
-            self._local_safe_only = e.control.value
+        def on_local_selected_only_change(e):
+            self._local_selected_only = e.control.value
             render_local_list(local_search_field.value)
 
-        local_safe_only_cb.on_change = on_local_safe_only_change
+        local_selected_only_cb.on_change = on_local_selected_only_change
 
         def on_local_clear(_):
             local_selected.clear()
@@ -1734,7 +1752,7 @@ class BatchPostPage:
                             ft.Text("列出全部已关注贴吧；🛡️安全吧默认勾选，非安全吧勾选后将以关注号身份投放", size=11, color="onSurfaceVariant"),
                             ft.Row([
                                 local_search_field,
-                                local_safe_only_cb,
+                                local_selected_only_cb,
                                 local_select_all_cb,
                                 ft.TextButton(
                                     "取关选中",

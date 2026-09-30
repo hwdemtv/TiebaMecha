@@ -637,3 +637,39 @@ async def test_reset_running_batch_tasks_recovers_stuck(db):
     assert recovered >= 1
     loaded = await db.get_batch_task(task.id)
     assert loaded.status == "pending"
+
+
+# ========================================================================
+# 火力弹窗"只看已选"过滤器（替代原"只看安全"）
+# ========================================================================
+
+
+class TestLocalSelectedOnlyFilter:
+    """本地自留区弹窗过滤器口径：只看已选（所见列表=勾选集）。"""
+
+    def _source(self):
+        import inspect
+
+        from tieba_mecha.web.pages import batch_post_page
+
+        return inspect.getsource(batch_post_page)
+
+    def test_safe_only_filter_fully_replaced(self):
+        source = self._source()
+        assert "只看安全" not in source
+        assert "_local_safe_only" not in source
+        assert "local_safe_only_cb" not in source
+
+    def test_selected_only_filter_in_place(self):
+        source = self._source()
+        # 默认开启：打开弹窗所见即勾选集，已选计数与列表可见数一致
+        assert "self._local_selected_only = True" in source
+        # 过滤条件按勾选集判定，而非 is_post_target
+        assert "if self._local_selected_only and fn not in local_selected: continue" in source
+        # 取消勾选时即时移出列表（避免整表重绘重置滚动位置）
+        assert "local_container.controls.remove(e.control)" in source
+
+    def test_select_all_never_desyncs_unsafe_items(self):
+        """全选安全不得改动可见非安全项的 UI 勾选状态（否则与勾选集脱节）。"""
+        source = self._source()
+        assert "if fn not in safe_fnames: continue" in source
