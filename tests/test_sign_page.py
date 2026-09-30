@@ -173,7 +173,6 @@ class TestSignPageLoadData:
         assert sign_page.daemon_time.value == "09:30"
         assert sign_page.delay_min_input.value == "8"
         assert sign_page.delay_max_input.value == "20"
-        assert sign_page.daemon_mode_radio.value == "matrix"
 
     async def test_auto_start_sign_triggers_run_task(self, sign_page, db):
         sign_page.page.session.set("auto_start_sign", True)
@@ -381,19 +380,19 @@ class TestBatch1PageGuards:
                 mock_sign.assert_not_called()
         assert sign_page._is_signing is False
 
-    async def test_daemon_mode_saved_from_radio_not_page_mode(self, sign_page, db):
-        """整改#1: schedule.mode 取守护面板单选值（合并后这是唯一模式控制点）"""
+    async def test_daemon_save_no_mode_field(self, sign_page, db):
+        """去模式化: 保存的 schedule 不再含 mode（守护恒为参与账号矩阵化定时）"""
         import json
 
         sign_page.daemon_switch.value = True
         sign_page.daemon_time.value = "08:00"
-        sign_page.daemon_mode_radio.value = "matrix"
 
         with patch("tieba_mecha.core.daemon.daemon_instance.reload", AsyncMock()):
             await sign_page._save_daemon_config(None)
 
         sched = json.loads(await db.get_setting("schedule", "{}"))
-        assert sched["mode"] == "matrix", "守护模式必须取单选值"
+        assert sched["enabled"] is True
+        assert "mode" not in sched, "守护已无模式概念，不得再写 mode"
 
     async def test_delay_inputs_sanitized_on_save(self, sign_page, db):
         """整改#9: 保存时非法延迟被钳制后落库"""
@@ -448,7 +447,7 @@ class TestBatch3Page:
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         today_logs = {l.forum_id: l for l in await db.get_sign_logs(limit=100, since=today_start)}
 
-        assert sign_page._pending_reason(forums["skip_forum"], today_logs)[0] == "今日跳过"
+        assert sign_page._pending_reason(forums["skip_forum"], today_logs)[0] == "今日拟人跳过"
         assert sign_page._pending_reason(forums["fail_forum"], today_logs)[0] == "失败"
 
         await db.mark_forum_banned(acc.id, "fail_forum", reason="pre-banned")

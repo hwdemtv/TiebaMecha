@@ -67,40 +67,22 @@ class TestDaemonIntegration:
         assert str(job.trigger.fields[5]) == "10" # Hour
         assert str(job.trigger.fields[6]) == "45" # Minute
 
-    async def test_do_sign_task_execution_flow(self, db):
-        """Test the execution flow of the sign task (matrix vs single)."""
-        # Set up settings
-        await db.set_setting("schedule", json.dumps({"mode": "matrix"}))
-        await db.set_setting("sign_stagger_minutes", "0")  # 关闭错峰，验证串行全扫旧路径
+    async def test_do_sign_task_serial_flow_invoked(self, db):
+        """去模式化: 错峰关闭且有参与账号时，守护触发串行全扫"""
+        from tieba_mecha.core.account import add_account
 
-        # Mock the actual sign functions
-        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-             patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_matrix, \
-             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
-             patch("asyncio.sleep", new_callable=AsyncMock):
+        await db.set_setting("schedule", json.dumps({"sign_time": "08:00"}))
+        await db.set_setting("sign_stagger_minutes", "0")
+        await add_account(db=db, name="flow_acc", bduss="a" * 192, stoken="b" * 64)
 
-            # Setup mock generators
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db),              patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_flow,              patch("asyncio.sleep", new_callable=AsyncMock):
+
             async def empty_gen(*args, **kwargs):
                 if False: yield {}
 
-            mock_matrix.return_value = empty_gen()
-            mock_single.return_value = empty_gen()
-
-            # Execute task
+            mock_flow.return_value = empty_gen()
             await do_sign_task()
-
-            # Should have called matrix
-            mock_matrix.assert_called_once()
-            mock_single.assert_not_called()
-
-            # Switch to single mode
-            await db.set_setting("schedule", json.dumps({"mode": "single"}))
-            mock_matrix.reset_mock()
-            mock_single.reset_mock()
-
-            await do_sign_task()
-            mock_matrix.assert_not_called()
-            mock_single.assert_called_once()
+            mock_flow.assert_called_once()
 
     async def test_do_sign_task_resets_daily_state(self, db):
         """回归: 守护签到前必须重置跨天状态, 否则纯后台使用时连续天数/成功统计永久冻结。
@@ -155,7 +137,7 @@ class TestDaemonIntegration:
 
         async with sign_flow_lock:
             with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-                 patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+                 patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_single, \
                  patch("asyncio.sleep", new_callable=AsyncMock):
                 await do_sign_task()
                 mock_single.assert_not_called()
@@ -168,7 +150,10 @@ class TestDaemonIntegration:
         from tieba_mecha.core.sign import sign_flow_lock
         from tieba_mecha.core.daemon import daemon_instance
 
-        await db.set_setting("schedule", json.dumps({"mode": "single"}))
+        from tieba_mecha.core.account import add_account
+
+        await db.set_setting("schedule", json.dumps({"sign_time": "08:00"}))
+        await add_account(db=db, name="retry_acc", bduss="a" * 192, stoken="b" * 64)
         job_id = f"sign_retry_{datetime.now().date().isoformat()}"
         # 防御：清掉可能残留的同日重试 job（单例调度器跨用例共享）
         if daemon_instance.scheduler.get_job(job_id):
@@ -176,7 +161,7 @@ class TestDaemonIntegration:
 
         async with sign_flow_lock:
             with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-                 patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+                 patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_single, \
                  patch("asyncio.sleep", new_callable=AsyncMock):
                 await do_sign_task(attempt=1)
                 mock_single.assert_not_called()
@@ -196,7 +181,7 @@ class TestDaemonIntegration:
         await db.set_setting("schedule", json.dumps({"mode": "single"}))
 
         with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+             patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_single, \
              patch("asyncio.sleep", new_callable=AsyncMock):
 
             async def empty_gen(*args, **kwargs):
@@ -233,6 +218,42 @@ class TestDaemonIntegration:
         others = [stagger_offset_seconds(i, d1, 90) for i in (1, 2, 3, 4)]
         assert all(0 <= o < 90 * 60 for o in [o1a] + others)
         assert len(set(others)) == 4, "不同账号当日偏移应互不相同"
+
+    async def test_get_scheduled_sign_accounts_filters(self, db):
+        """参与集合: 仅矩阵可用且 is_sign_scheduled 的账号进入守护排程"""
+        from tieba_mecha.core.account import add_account
+
+        acc1 = await add_account(db=db, name="sch_a", bduss="a" * 192, stoken="b" * 64)
+        acc2 = await add_account(db=db, name="sch_b", bduss="c" * 192, stoken="d" * 64)
+        acc3 = await add_account(db=db, name="sch_c", bduss="e" * 192, stoken="f" * 64)
+        await db.update_account(acc2.id, is_sign_scheduled=False)
+        await db.update_account(acc3.id, status="suspended")
+
+        ids = [a.id for a in await db.get_scheduled_sign_accounts()]
+        assert acc1.id in ids
+        assert acc2.id not in ids, "退出参与的账号不得进入排程"
+        assert acc3.id not in ids, "挂起账号不得进入排程"
+
+    async def test_serial_path_respects_scheduled_subset(self, db):
+        """去模式化: 错峰关闭的串行全扫只签参与定时的账号"""
+        from tieba_mecha.core.account import add_account
+
+        acc1 = await add_account(db=db, name="ser_a", bduss="a" * 192, stoken="b" * 64)
+        acc2 = await add_account(db=db, name="ser_b", bduss="c" * 192, stoken="d" * 64)
+        await db.update_account(acc2.id, is_sign_scheduled=False)
+        await db.set_setting("schedule", json.dumps({"sign_time": "08:00"}))
+        await db.set_setting("sign_stagger_minutes", "0")
+
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db),              patch("tieba_mecha.core.daemon.sign_all_accounts") as mock_flow,              patch("asyncio.sleep", new_callable=AsyncMock):
+
+            async def empty_gen(*args, **kwargs):
+                if False: yield {}
+
+            mock_flow.return_value = empty_gen()
+            await do_sign_task(jitter=False)
+
+        kwargs = mock_flow.call_args.kwargs
+        assert kwargs.get("account_ids") == [acc1.id], "串行路径应只传参与账号集合"
 
     async def test_stagger_worker_skips_fully_signed_account(self, db):
         """错峰 worker: 账号今日已全签 → 零请求秒退（重启重放安全性的根基）"""
@@ -285,20 +306,17 @@ class TestDaemonIntegration:
         assert forums["stg_b"].is_sign_today is False, "其他账号不得被连带签到"
 
     async def test_do_sign_task_tolerates_corrupted_schedule_json(self, db):
-        """回归: schedule 为损坏 JSON 时按默认模式执行而非整体失败"""
+        """回归: schedule 为损坏 JSON 时守护流程不整体失败（错峰锚点解析回退默认 08:00）"""
+        from tieba_mecha.core.account import add_account
+
         await db.set_setting("schedule", "{not-json")
+        await db.set_setting("sign_stagger_minutes", "90")
+        await add_account(db=db, name="corr_acc", bduss="a" * 192, stoken="b" * 64)
 
-        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
-             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
-             patch("asyncio.sleep", new_callable=AsyncMock):
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db),              patch("asyncio.sleep", new_callable=AsyncMock):
+            await do_sign_task(jitter=False)  # 不应抛异常
 
-            async def empty_gen(*args, **kwargs):
-                if False: yield {}
-
-            mock_single.return_value = empty_gen()
-
-            await do_sign_task()  # 不应抛异常
-            mock_single.assert_called_once()  # 回退到 single 默认模式
+        assert await db.get_setting("last_daemon_sign_date", "") != ""
 
     async def test_do_auto_monitor_task_workflow(self, db):
         """Test auto monitor task triggers rule application."""

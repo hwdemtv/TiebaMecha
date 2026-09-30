@@ -689,6 +689,7 @@ async def sign_all_accounts(
     acc_delay_max: float = 120.0,
     ignore_skip: bool = False,
     stop_event: asyncio.Event | None = None,
+    account_ids: list[int] | None = None,
 ):
     """
     矩阵全扫签到：顺序遍历所有可用账号，逐账号复用 sign_account_forums。
@@ -701,6 +702,7 @@ async def sign_all_accounts(
         acc_delay_max: 账号切换间最大延迟（秒）
         ignore_skip: 手动意图时无视拟人化跳过骰子（守护/自动流保持默认掷骰）
         stop_event: 置位后在下个间隙快速中止（停止按钮 1-2s 生效）
+        account_ids: 限定参与的账号集合（None=全部矩阵可用账号；守护定时传参与集合）
 
     Yields:
         dict: {"account_id", "account_name", "fname", "success", "message",
@@ -710,6 +712,9 @@ async def sign_all_accounts(
 
     # 获取所有矩阵可用账号（跳过 suspended_proxy 状态）
     accounts = await db.get_matrix_accounts()
+    if account_ids is not None:
+        wanted = set(account_ids)
+        accounts = [a for a in accounts if a.id in wanted]
     if not accounts:
         yield {
             "account_id": -1,

@@ -142,6 +142,7 @@ class Database(
                 ("post_weight", "INTEGER DEFAULT 5"),
                 ("suspended_reason", "VARCHAR(200) DEFAULT ''"),
                 ("is_maint_enabled", "BOOLEAN DEFAULT 0"),
+                ("is_sign_scheduled", "BOOLEAN DEFAULT 1"),
                 ("last_maint_at", "DATETIME DEFAULT NULL"),
                 ("last_weight_calc_at", "DATETIME DEFAULT NULL"),
             ]

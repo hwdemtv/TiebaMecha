@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .sign import (
-    sign_all_forums, sign_all_accounts, sign_account_forums, sign_flow_lock,
+    sign_all_accounts, sign_account_forums, sign_flow_lock,
     stagger_offset_seconds, SIGN_STAGGER_SETTING_KEY, SIGN_STAGGER_DEFAULT, SIGN_STAGGER_MAX,
 )
 from .auto_rule import apply_rules_to_threads
@@ -92,7 +92,7 @@ async def _register_staggered_signs(db):
     except (ValueError, TypeError):
         base = datetime.combine(datetime.now().date(), dtime(8, 0))
 
-    accounts = await db.get_matrix_accounts()
+    accounts = await db.get_scheduled_sign_accounts()
     today = datetime.now().date()
     now = datetime.now()
     for account in accounts:
@@ -114,7 +114,7 @@ async def _register_staggered_signs(db):
 
 
 async def do_sign_task(attempt: int = 1, jitter: bool = True):
-    """执行定时签到任务的内部包裹（自适应模式；attempt 为遇锁重试计数）"""
+    """执行定时签到任务的内部包裹（矩阵化定时：按参与账号签到，无模式概念）"""
     # 触发时间抖动：消除每天精确同分钟的定时指纹（选任务内睡而非改注册，
     # 不动 reload 的 cron 注册逻辑，代价仅是重启丢失当次抖动）
     if jitter:
@@ -129,28 +129,30 @@ async def do_sign_task(attempt: int = 1, jitter: bool = True):
     if hasattr(db, "check_and_reset_daily_sign"):
         await db.check_and_reset_daily_sign()
 
-    # 1. 获取执行模式
-    raw_sched = await db.get_setting("schedule", "{}")
+    # 1. 读取错峰窗口：>0 走按账号错峰排程（每账号独立时刻），0 走串行全扫
     try:
-        schedule = json.loads(raw_sched) if raw_sched else {}
-    except (ValueError, TypeError):
-        print(f"[DAEMON] schedule 配置损坏，按默认单账号模式执行")
-        schedule = {}
-    mode = schedule.get("mode", "single")
+        stagger_window = float(await db.get_setting(SIGN_STAGGER_SETTING_KEY, str(SIGN_STAGGER_DEFAULT)))
+    except Exception:
+        stagger_window = SIGN_STAGGER_DEFAULT
+    stagger_window = max(0.0, min(SIGN_STAGGER_MAX, stagger_window))
 
-    # 1.5 矩阵+错峰开启：按 (账号,日期) 种子把各账号排到当日独立时刻，
-    # 打散"全部账号同一窗口上线"的群体特征；窗口 0 = 串行全扫旧行为
-    if mode == "matrix":
+    if stagger_window > 0:
+        print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 错峰窗口 {stagger_window:g} 分钟")
+        await _register_staggered_signs(db)
+        return
+
+    # 2. 串行全扫路径：仅签参与定时签到的账号
+    scheduled = await db.get_scheduled_sign_accounts()
+    if not scheduled:
+        print(f"[{datetime.now()}] [DAEMON] 无参与定时签到的账号，本轮跳过")
         try:
-            stagger_window = float(await db.get_setting(SIGN_STAGGER_SETTING_KEY, str(SIGN_STAGGER_DEFAULT)))
+            await db.set_setting("last_daemon_sign_date", datetime.now().date().isoformat())
         except Exception:
-            stagger_window = SIGN_STAGGER_DEFAULT
-        if max(0.0, min(SIGN_STAGGER_MAX, stagger_window)) > 0:
-            print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: MATRIX (错峰窗口 {stagger_window:g} 分钟)")
-            await _register_staggered_signs(db)
-            return
+            pass
+        return
+    scheduled_ids = [a.id for a in scheduled]
 
-    # 2. 获取行为频率参数
+    # 3. 获取行为频率参数
     try:
         d_min = float(await db.get_setting("sign_delay_min", "5"))
         d_max = float(await db.get_setting("sign_delay_max", "15"))
@@ -159,7 +161,7 @@ async def do_sign_task(attempt: int = 1, jitter: bool = True):
     except Exception:
         d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
-    print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: {mode.upper()} | 吧间延迟: {d_min}-{d_max}s")
+    print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 串行全扫 {len(scheduled)} 个参与账号 | 吧间延迟: {d_min}-{d_max}s")
 
     # 与手动签到互斥：定时触发不排队等待（一轮全扫可能长达数小时）；
     # 遇锁不再当日放弃——挂 40 分钟一次性重试，至多 3 次（守护缺签事故闭环）
@@ -185,20 +187,12 @@ async def do_sign_task(attempt: int = 1, jitter: bool = True):
     fail_count = 0
 
     async with sign_flow_lock:
-        if mode == "matrix":
-            print(f"[{datetime.now()}] [DAEMON] 正在执行全矩阵跨账号扫号...")
-            async for result in sign_all_accounts(db, d_min, d_max, ad_min, ad_max):
-                if result.get("success"):
-                    success_count += 1
-                else:
-                    fail_count += 1
-        else:
-            # 单账号模式
-            async for result in sign_all_forums(db, delay_min=d_min, delay_max=d_max):
-                if result.success:
-                    success_count += 1
-                else:
-                    fail_count += 1
+        print(f"[{datetime.now()}] [DAEMON] 正在执行跨账号扫号（参与账号 {len(scheduled_ids)} 个）...")
+        async for result in sign_all_accounts(db, d_min, d_max, ad_min, ad_max, account_ids=scheduled_ids):
+            if result.get("success"):
+                success_count += 1
+            else:
+                fail_count += 1
 
     # 幂等完成标记：补跑判断依据（当日守护已跑过即不再补，重试成功也会走到这里）
     try:
@@ -759,10 +753,9 @@ class TiebaMechaDaemon:
             except Exception as catchup_err:
                 print(f"[DAEMON] 签到补跑检查失败（不影响常规调度）: {catchup_err}")
 
-            # 错峰重放：矩阵+错峰开启时，reload（含重启后首次）即重排当日时刻表——
-            # 进程内幂等 + 已签账号 worker 秒退，重复调用无实害
-            if schedule.get("mode", "single") == "matrix":
-                await _register_staggered_signs(db)
+            # 错峰重放：错峰开启时 reload（含重启后首次）即重排当日时刻表——
+            # 进程内幂等 + 已签账号 worker 秒退，重复调用无实害；窗口 0 时内部直接返回
+            await _register_staggered_signs(db)
         except Exception as e:
             # 解析失败时不动现有任务，避免定时签到静默失效
             print(f"[DAEMON] 解析配置签到时间出错: {e} (已保留原有任务配置)")

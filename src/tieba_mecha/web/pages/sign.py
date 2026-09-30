@@ -76,8 +76,6 @@ class SignPage:
                 self.daemon_switch.value = sched.get("enabled", False)
                 
                 # 同步守护模式单选（持久值，独立于页面执行模式）
-                if hasattr(self, "daemon_mode_radio"):
-                    self.daemon_mode_radio.value = sched.get("mode", "single")
                 
                 # 智能格式化加载行为频率参数 (抹除不必要的 .0)
                 async def _get_fmt_val(key, default):
@@ -277,17 +275,6 @@ class SignPage:
 
         # 定时守护配置（压缩为两行 + 保存键）
         self.daemon_switch = ft.Switch(value=False)
-        self.daemon_mode_radio = ft.RadioGroup(
-            value="single",
-            content=ft.Row(
-                [
-                    ft.Radio(value="single", label="单账号"),
-                    ft.Radio(value="matrix", label="矩阵全扫"),
-                ],
-                spacing=10,
-                tight=True,
-            ),
-        )
         self.daemon_time = ft.TextField(
             label="触发时间",
             value="08:00",
@@ -337,7 +324,6 @@ class SignPage:
                     self.daemon_switch,
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([self.daemon_time, self.stagger_input], spacing=8),
-                self.daemon_mode_radio,
                 self.daemon_save_btn,
                 ft.Text("保存范围：节奏参数 + 定时守护", size=9, color="onSurfaceVariant"),
             ], spacing=12),
@@ -386,7 +372,7 @@ class SignPage:
             return "已熔断", COLORS.RED_ACCENT_400
         log = (today_logs or {}).get(forum.id)
         if log is not None and log.message == SIGN_SKIP_MESSAGE:
-            return "今日跳过", COLORS.AMBER
+            return "今日拟人跳过", COLORS.AMBER
         if forum.last_sign_status == "failure":
             msg = (log.message if log else "") or ""
             if msg.startswith("被风控限流"):
@@ -798,7 +784,6 @@ class SignPage:
         schedule = {
             "enabled": self.daemon_switch.value,
             "sign_time": time_str,
-            "mode": self.daemon_mode_radio.value,
         }
         await self.db.set_setting("schedule", json.dumps(schedule))
 
@@ -826,11 +811,10 @@ class SignPage:
             await daemon_instance.reload(self.db)
 
             # 保存清单显式化：让用户看见这次保存动了哪些东西
-            mode_zh = "矩阵全扫" if self.daemon_mode_radio.value == "matrix" else "单账号模式"
             self._show_snackbar(
-                f"✔️ 已保存：守护{'启用' if self.daemon_switch.value else '停用'} · 触发 {time_str} · {mode_zh}"
+                f"✔️ 已保存：守护{'启用' if self.daemon_switch.value else '停用'} · 触发 {time_str}"
                 f" · 吧间延迟 {d_min:g}~{d_max:g}s · 账号间延迟 {ad_min:g}~{ad_max:g}s"
-                f" · 错峰窗口 {stagger:g} 分",
+                f" · 错峰窗口 {stagger:g} 分（定时账号在账号页勾选）",
                 "success",
             )
         except Exception as err:

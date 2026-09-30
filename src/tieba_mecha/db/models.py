@@ -32,6 +32,7 @@ class Account(Base):
     post_weight: Mapped[int] = mapped_column(Integer, default=5, comment="发帖权重 1–10，用于加权随机抽样")
     suspended_reason: Mapped[str] = mapped_column(String(200), default="", comment="挂起原因（代理失效自动填充）")
     is_maint_enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启拟人化自动养号")
+    is_sign_scheduled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否参与定时签到（守护错峰按参与账号排程）")
     last_maint_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次养号维护时间")
     last_weight_calc_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后权重计算时间")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")

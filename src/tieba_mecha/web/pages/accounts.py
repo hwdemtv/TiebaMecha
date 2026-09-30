@@ -1624,6 +1624,22 @@ class AccountsPage:
                             spacing=4,
                             expand=True,
                         ),
+                        # 定时签到参与开关（守护错峰按参与账号排程）
+                        ft.Column(
+                            controls=[
+                                ft.Switch(
+                                    label="定时",
+                                    label_style=ft.TextStyle(size=11, color="primary" if getattr(acc, 'is_sign_scheduled', True) else "onSurfaceVariant"),
+                                    value=getattr(acc, 'is_sign_scheduled', True),
+                                    on_change=lambda e, aid=acc.id: self.page.run_task(self._on_sign_scheduled_toggle, aid, e.control.value),
+                                    scale=0.7,
+                                    tooltip="参与每日定时签到（守护按参与账号错峰排程）；关闭后守护不再自动签此号，手动签到不受影响",
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=0,
+                        ),
                         # 养号开关 (BioWarming)
                         ft.Column(
                             controls=[
@@ -2264,6 +2280,19 @@ class AccountsPage:
                 acc.is_maint_enabled = value
                 break
         self._show_snackbar(f"账号养号维护已{'开启' if value else '关闭'}", "success")
+        self.refresh_ui()
+
+    async def _on_sign_scheduled_toggle(self, account_id: int, value: bool):
+        """开启或关闭账号的定时签到参与（守护错峰按参与账号排程）"""
+        await self.db.update_account(account_id, is_sign_scheduled=value)
+        for acc in self._accounts:
+            if acc.id == account_id:
+                acc.is_sign_scheduled = value
+                break
+        self._show_snackbar(
+            f"该账号已{'参与' if value else '退出'}定时签到（次日生效的排程按参与集合重算）",
+            "success",
+        )
         self.refresh_ui()
 
     def _on_item_select(self, e):

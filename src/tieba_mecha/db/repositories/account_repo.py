@@ -155,7 +155,7 @@ class AccountRepository:
         "name", "bduss", "stoken", "user_id", "user_name",
         "proxy_id", "cuid", "user_agent", "post_weight",
         "is_active", "status", "last_verified", "suspended_reason",
-        "is_maint_enabled", "last_maint_at",
+        "is_maint_enabled", "last_maint_at", "is_sign_scheduled",
     })
 
     async def update_account_status(self, account_id: int, status: str) -> None:
@@ -200,6 +200,17 @@ class AccountRepository:
                 select(Account).where(Account.proxy_id == proxy_id)
             )
             return list(result.scalars().all())
+    async def get_scheduled_sign_accounts(self) -> list[Account]:
+        """获取参与定时签到的矩阵可用账号（守护错峰排程的参与集合；新账号默认参与）"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Account).where(
+                    Account.status.notin_(["suspended", "suspended_proxy", "banned", "expired"]),
+                    Account.is_sign_scheduled == True,
+                ).order_by(Account.post_weight.desc())
+            )
+            return list(result.scalars().all())
+
     async def get_maint_accounts(self) -> list[Account]:
         """获取需要执行 BioWarming 养号任务的账号（终态账号排除：封禁号继续养号等于给风控递证据）"""
         async with self.async_session() as session:

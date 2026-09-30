@@ -51,6 +51,9 @@ async def db(temp_db_path: Path) -> AsyncGenerator:
     # 拟人化跳过率默认 0.08 会让签到流测试概率性翻车（骰子命中时行为改变），
     # 测试环境固定为 0；跳过行为本身由 TestHumanizedSkip 显式设置概率覆盖
     await database.set_setting("sign_skip_probability", "0")
+    # 守护错峰默认 90 分钟会让守护路径测试走排程分支（甚至 spawn 实时 worker），
+    # 测试环境固定为 0（串行旧路径）；错峰行为由 daemon 套路的错峰用例显式设置窗口覆盖
+    await database.set_setting("sign_stagger_minutes", "0")
     yield database
     await database.close()
 
