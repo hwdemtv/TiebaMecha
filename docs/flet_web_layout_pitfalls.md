@@ -45,6 +45,11 @@
 | 切换/提交完成后整页变暗、所有点击失效，F5 才恢复 | 对话框 close 与页面重载（build+update）竞态，barrier 残留；自动化环境的事件重放会放大 | 处理器入口先同步 close；宿主页面改"原位 load_data 重载"，不做整页重建（见 五-3） |
 | 某页面一进就白屏，服务端 Traceback: `ModuleNotFoundError: ...web.web` | 相对导入多写一层：`pages/posts/x.py` 深一层包，`...web.components` 展开成 `tieba_mecha.web.web.components` | 按包层级数点数：`pages/x.py` 用 `..components`，`pages/posts/x.py` 用 `...components` |
 | 芯片/头部已显示切换成功，页面里"默认当前账号"的控件还停在旧账号 | 下拉填充是"保留用户已选"策略，切号后旧值仍是合法 id，回落逻辑不触发 | 切号回调里先把该控件 `value=None` 再 load_data，让回落逻辑选中新活跃账号（案例：帖子管理发布账号下拉） |
+| 页签内容下半截空白，滚动也不出现 | 页签只绘制前 ~450px（页面首屏 ~550px），之后占位不绘制（见 六-1） | 页签内容压平 ≤~400px，超了拆页签 |
+| 页签第一个输入框/下拉的浮动标签上半截被裁 | 页签内容区顶边静态裁剪首控件标签（见 六-2） | 滚动列内部首元素加 10px 透明留白 |
+| 明明设置了 visible=False 的表格/控件仍显示（或其表头漏出） | DataTable 的 visible 在 ListView/Row 容器内不可靠（见 六-3） | 不显示的控件直接摘出控件树；最优解是静态单表+rows 填充 |
+| 动态替换 controls / style 后客户端不更新（表头残留、按钮激活态全同、数据发出无挂载点） | flet 0.23.2 对 controls 列表替换与 style 对象整体替换的 patch 不可靠，update 打到容器也没用（见 六-4） | 切换路径只做"静态结构+数据(rows/text)填充"，激活态用 ✓前缀+opacity |
+| 页面打开即报 `XXX.__init__() got an unexpected keyword argument` | 构造 kwarg 在该 flet 版本不存在（如 0.23.2 按钮 bgcolor/color；桩 flet 吃任何 kwarg 测不出来，见 六-5） | 先 `inspect.signature(真实类.__init__)` 核对；测试补签名对照断言 |
 
 ## 三、排查方法论（这次实测有效的流程）
 
@@ -152,3 +157,70 @@
 - **每次改码必须重启 flet 服务**（无热重载），且浏览器会话失效需重新
   走登录页（"暂不设置，直接进入"通道，不会在库里留密码）。
 - **调试结束记得删光打点**：残留的 ChipDebug 类 print 会污染下次排查。
+
+## 六、flet 0.23.2 渲染缺陷家族（2026-09-30 五连坑，物料池视图切换实战）
+
+> 一天之内连踩五坑（53ac147→b8fa3c3→4be4b4f→d88168e→335ab7b 五连部署），
+> 全部特征一致：**服务端 wire JSON 完整、journal 零报错、客户端静默错渲染**。
+> 每一坑的"直觉修法"都被下一坑证伪，最终收敛出统一生存法则（见本节末尾）。
+
+### 1. 页签 ~450px 绘制截断（1a866dd 修复）
+
+点击切换的页签只绘制内容**前 ~450px**（页面首屏首批波次 ~550px），之后部分
+占位不绘制，**滚动也不出现**；ListView 同病。服务端数据完整无异常。
+受害：养号页签尾部执行日志栏（隐形近一周无人察觉）、任务守护第 7 卡（仍待修）。
+**修复**：页签内容压平 ≤~400px（左右成对行布局），超了拆页签（执行日志独立成页签）。
+
+### 2. 首控件浮动标签被顶边裁剪（a887598 修复）
+
+页签内容列的**第一个控件若带浮动标签**（TextField/Dropdown 的 label），
+标签上半截被内容区顶边静默裁掉——静态裁剪，滚动无效；首控件是 Text/Divider 无恙。
+**容器 padding 挡不住**，必须在滚动列**内部**加首元素 10px 透明留白。
+
+### 3. DataTable 的 visible=False 不隐藏（b8fa3c3 修复）
+
+ListView>Row(ADAPTIVE) 容器内，DataTable 构造 `visible=False` 照样渲染
+（用户报"物料列表多了一行字"=另一张表的表头漏出）。常规 Row/按钮的 visible
+切换正常，**唯 DataTable 中招**。修复演进：摘除制（见 4）→ 终极静态单表（见 4）。
+
+### 4. controls 列表替换与 style 对象替换的 patch 均不可靠（4be4b4f/d88168e 定论）
+
+- 摘除制（宿主 Row.controls 在 [表A]/[表B] 间切换）即使 update 打到容器本身，
+  客户端仍出现"切回后排期池表头残留 + 新数据发出无挂载点（213 条丢失）"。
+- 按钮激活态用 `style = ft.ButtonStyle(...)` 整体替换，update 后两个按钮同亮——
+  样式根本没推送。
+- **定论：这两类变更的客户端 patch 不可靠，与是否正确 update 无关。**
+- **终极方案=静态单表**：一张 DataTable，列取两个视图的并集（互斥列填"-"），
+  视图切换只做 `table.rows = [...]` 数据填充——rows 更新（翻页/搜索）久经考验零事故。
+
+### 5. 按钮 bgcolor/color 构造参数不存在——build 即炸（335ab7b 修复）
+
+flet 0.23.2 的 FilledButton/OutlinedButton **均无 bgcolor/color 构造 kwarg**
+（在 style 里），传入即 `__init__() got an unexpected keyword argument 'bgcolor'`，
+**整页 build 失败**（用户点开页面报"路由错误"）。
+**测试纪律（关键）**：本项目 UI 冒烟测试跑在桩 flet 上，**桩控件接受任何构造 kwarg**，
+这类"真实 flet 构造炸、桩环境正常"的事故门禁天生拦不住。
+必须加对照真实签名的回归断言：
+
+```python
+import inspect, flet as ft
+valid = set(inspect.signature(ft.FilledButton.__init__).parameters)
+valid |= set(inspect.signature(ft.OutlinedButton.__init__).parameters)
+for kw in ("bgcolor", "color"):
+    assert kw not in valid  # 若未来版本合法可解除，但当前传入即炸
+```
+
+### 生存法则（本项目 flet web 动态 UI 纪律）
+
+1. **动态 UI 一律降级为"静态结构 + 数据填充"**：表格列/容器树/页面骨架在
+   build 时定死，运行期只改 rows/text/value 等数据。切换路径上不许出现
+   任何控件树变更（加/删/换 controls）。
+2. **可靠属性白名单**（实测 patch 可靠）：`text`、`rows`、`value`、`opacity`、
+   `disabled`、`visible`（非 DataTable）。**黑名单**：`style` 整体替换、
+   `controls` 列表替换、DataTable 的 `visible`。
+3. **按钮激活态**：✓前缀 + opacity 明暗（1.0 / 0.5），不用 style、不用 bgcolor。
+4. **新增构造 kwarg 前必查 `inspect.signature(真实类.__init__)`**，
+   并补签名对照断言进测试——桩 flet 吃任何 kwarg。
+5. 页签内容 ≤~400px、首控件前 10px 留白（见 六-1/六-2）。
+6. UI 改动三重验证不变：build 冒烟 + 服务端日志标记 + journal 无异常，
+   最终以用户真机 F5 后目验为准。
