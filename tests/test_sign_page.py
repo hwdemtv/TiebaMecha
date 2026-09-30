@@ -93,6 +93,43 @@ class TestSignPageBuild:
         assert hasattr(sp, "matrix_btn")
         assert sp.matrix_settings.visible is True, "账号间延迟组应常显（与守护共用）"
 
+    def test_console_semantics_structure(self, mock_page, db):
+        """控制台语义: 状态灯/手动执行标题/保存范围caption/守护标题去黄/保存去黄"""
+        import flet as ft
+
+        sp = SignPage(mock_page, db)
+        root = sp.build()
+
+        assert sp._run_text.value == "就绪"
+        panel_texts = []
+
+        def _walk(c):
+            if hasattr(c, "value") and isinstance(c.value, str):
+                panel_texts.append(c.value)
+            for attr in ("controls", "content"):
+                sub = getattr(c, attr, None)
+                if isinstance(sub, list):
+                    for x in sub:
+                        _walk(x)
+                elif sub is not None:
+                    _walk(sub)
+
+        _walk(root)
+        assert "手动执行" in panel_texts
+        assert "保存范围：节奏参数 + 定时守护" in panel_texts
+        assert "定时守护" in panel_texts
+        assert isinstance(sp.daemon_save_btn, ft.OutlinedButton), "保存按钮应为描边（去黄实心）"
+        assert getattr(sp.daemon_save_btn.style, "bgcolor", None) is None
+
+    def test_run_state_helper(self, mock_page, db):
+        sp = SignPage(mock_page, db)
+        sp.build()
+        sp._set_run_state("正在签到 · 1/2", "primary")
+        assert sp._run_text.value == "正在签到 · 1/2"
+        assert sp._run_dot.bgcolor == "primary"
+        sp._set_run_state("就绪", "onSurfaceVariant")
+        assert sp._run_text.value == "就绪"
+
 
 # ========== load_data ==========
 
@@ -294,6 +331,7 @@ class TestDoSignSingle:
         assert sign_page._is_signing is False
         assert sign_page.progress_bar.visible is False
         assert sign_page.sign_btn.text.startswith("启动签到流")
+        assert sign_page._run_text.value == "本轮完成 · 1/1", "完成后状态灯应显示本轮完成"
         sign_page.page.pubsub.send_all_on_topic.assert_called()
 
         topic, payload = sign_page.page.pubsub.send_all_on_topic.call_args_list[-1][0]

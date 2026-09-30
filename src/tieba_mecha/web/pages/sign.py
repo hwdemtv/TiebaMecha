@@ -128,7 +128,7 @@ class SignPage:
             if hasattr(self, "matrix_btn"):
                 accs = (getattr(self, "_matrix_rollup", None) or {}).get("accounts", [])
                 n_acc = len([a for a in accs if a["pending"] > 0])
-                self.matrix_btn.text = f"矩阵全扫 · {n_acc} 账号 / {sum(a['pending'] for a in accs)} 吧待签"
+                self.matrix_btn.text = f"矩阵全扫 · {n_acc} 账号 · {sum(a['pending'] for a in accs)} 吧待签"
 
             self.page.update()
 
@@ -292,29 +292,37 @@ class SignPage:
             prefix_icon=ACCESS_TIME_ROUNDED,
             hint_text="HH:MM",
         )
-        # 配置类动作用描边黄（层级：实心=执行主动作 / 描边=次级；黄色实心会压过主按钮且与"待签/跳过"警示黄撞语义）
+        # 配置类动作用默认描边（颜色语义：青绿=操作，黄=需要注意——黄色只留给待签/跳过等警示信息）
         self.daemon_save_btn = ft.OutlinedButton(
             "保存配置并生效",
             icon=BOLT,
             on_click=self._save_daemon_config,
             style=ft.ButtonStyle(
-                color=COLORS.SECONDARY,
-                side=ft.BorderSide(1, COLORS.SECONDARY),
                 shape=ft.RoundedRectangleBorder(radius=8),
                 padding=ft.padding.symmetric(horizontal=14, vertical=12),
             ),
         )
 
-        # 左侧合并控制面板：执行/节奏/守护三段一卡，消除框架开销
+        # 运行状态灯：就绪/正在签到 x/y/本轮完成（循环内联动，finally 收尾）
+        self._run_dot = ft.Container(width=8, height=8, border_radius=4, bgcolor="onSurfaceVariant")
+        self._run_text = ft.Text("就绪", size=11, color="onSurfaceVariant")
+        self._run_state_row = ft.Row(
+            [self._run_dot, self._run_text],
+            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        # 左侧合并控制面板：状态 / 手动执行 / 节奏 / 守护四段一卡
         control_panel = ft.Container(
             content=ft.Column([
+                self._run_state_row,
+                ft.Text("手动执行", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                 self.sign_btn,
                 self.matrix_btn,
                 ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
                 self.matrix_settings,
                 ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
                 ft.Row([
-                    ft.Text("定时守护", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
+                    ft.Text("定时守护", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                     ft.Container(expand=True),
                     ft.Text("启用周期执行", size=11, color="onSurfaceVariant"),
                     self.daemon_switch,
@@ -322,6 +330,7 @@ class SignPage:
                 self.daemon_time,
                 self.daemon_mode_radio,
                 self.daemon_save_btn,
+                ft.Text("保存范围：节奏参数 + 定时守护", size=9, color="onSurfaceVariant"),
             ], spacing=12),
             padding=16,
             bgcolor=with_opacity(0.03, "onSurface"),
@@ -506,6 +515,20 @@ class SignPage:
         self.status_text.value = ""
         self.page.update()
 
+    def _set_run_state(self, text: str, dot_color: str):
+        """控制卡顶部状态灯：就绪 / 正在签到 x/y / 本轮完成 / 已中止"""
+        self._run_dot.bgcolor = dot_color
+        self._run_text.value = text
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    async def _revert_run_state_later(self):
+        """完成/中止态展示数秒后回到就绪（不进 refresh_ui，避免被数据重载立即覆盖）"""
+        await asyncio.sleep(6)
+        self._set_run_state("就绪", "onSurfaceVariant")
+
     def _set_main_running(self, running: bool):
         """主按钮运行态：执行中变红色"停止签到流"，结束恢复带待签范围标签"""
         if running:
@@ -579,6 +602,7 @@ class SignPage:
                     current += 1
                     self.progress_bar.value = min(current / total, 1.0)
                     self.status_text.value = f"正在签到: {result.fname} ({current}/{total})"
+                    self._set_run_state(f"正在签到 · {current}/{total}", "primary")
 
                     # --- 方案 A: 跨页面进度广播 ---
                     self.page.pubsub.send_all_on_topic("sign_progress", {
@@ -595,6 +619,7 @@ class SignPage:
             self._show_snackbar(f"任务异常中止: {str(ex)}", "error")
         finally:
             # finally 保证任务被取消（CancelledError）时也能复位状态，避免按钮永久卡在"停止签到流"
+            was_stopped = self._stop_requested
             self._is_signing = False
             self._stop_requested = False
             self.progress_bar.visible = False
@@ -602,6 +627,11 @@ class SignPage:
 
             # UI 恢复
             self._set_main_running(False)
+            if was_stopped:
+                self._set_run_state("已中止", COLORS.AMBER)
+            else:
+                self._set_run_state(f"本轮完成 · {total}/{total}", COLORS.GREEN_ACCENT_400)
+            self.page.run_task(self._revert_run_state_later)
 
             # 发送结束广播
             self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
@@ -691,6 +721,7 @@ class SignPage:
 
                     self.progress_bar.value = progress
                     self.status_text.value = f"[{current_task_idx}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
+                    self._set_run_state(f"矩阵签到 · {current_task_idx}/{total_est}", "primary")
 
                     # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
                     self.page.pubsub.send_all_on_topic("sign_progress", {
@@ -706,6 +737,7 @@ class SignPage:
         except Exception as ex:
             self._show_snackbar(f"矩阵任务异常中止: {str(ex)}", "error")
         finally:
+            was_stopped = self._stop_requested
             self._is_signing = False
             self._stop_requested = False
             self.progress_bar.visible = False
@@ -713,6 +745,11 @@ class SignPage:
 
             # UI 恢复
             self._set_main_running(False)
+            if was_stopped:
+                self._set_run_state("已中止", COLORS.AMBER)
+            else:
+                self._set_run_state(f"本轮完成 · {total_est}/{total_est}", COLORS.GREEN_ACCENT_400)
+            self.page.run_task(self._revert_run_state_later)
 
             # 发送结束广播
             self.page.pubsub.send_all_on_topic("sign_progress", {"status": "completed"})
