@@ -75,11 +75,9 @@ class SignPage:
                 self.daemon_time.value = sched.get("sign_time", "08:00")
                 self.daemon_switch.value = sched.get("enabled", False)
                 
-                # 同步已保存的执行模式说明
-                saved_mode = sched.get("mode", "single")
-                mode_zh = "矩阵全扫" if saved_mode == "matrix" else "单账号模式"
-                if hasattr(self, 'daemon_mode_info'):
-                    self.daemon_mode_info.value = f"当前生效模式: {mode_zh}"
+                # 同步守护模式单选（持久值，独立于页面执行模式）
+                if hasattr(self, "daemon_mode_radio"):
+                    self.daemon_mode_radio.value = sched.get("mode", "single")
                 
                 # 智能格式化加载行为频率参数 (抹除不必要的 .0)
                 async def _get_fmt_val(key, default):
@@ -188,11 +186,13 @@ class SignPage:
             spacing=6,
         )
 
-        # 头部账号切换芯片（单账号模式签的就是当前账号）
+        # 头部账号切换芯片（单账号模式签的就是当前账号）；
+        # 执行中禁止切号：切号会重建列表/统计，而签到流仍在跑原账号
         from ..components.account_switcher import AccountSwitchChip
         self.account_chip = AccountSwitchChip(
             self.page, self.db,
             on_switched=self.load_data,
+            is_busy=lambda: self._is_signing,
         )
 
         # 主内
@@ -305,6 +305,7 @@ class SignPage:
             ft.Divider(height=5, color="transparent"),
             ft.Text("多账号防关联间隔", size=12, color="error"),
             ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Text("账号间延迟：矩阵模式与守护共用", size=9, color="onSurfaceVariant"),
         ], visible=False)
 
         # 侧边设置面板 (Cyber Style)
@@ -316,6 +317,7 @@ class SignPage:
                     ft.Text("至", size=11, color="onSurfaceVariant"),
                     self.delay_max_input,
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Text("吧间延迟：单账号、矩阵与守护共用", size=9, color="onSurfaceVariant"),
                 self.matrix_settings,
                 ft.Divider(height=20, color="transparent"),
                 self.sync_btn,
@@ -328,31 +330,43 @@ class SignPage:
 
         # 定时守护配置面板
         self.daemon_switch = ft.Switch(label="启用周期执行", value=False, label_position=ft.LabelPosition.RIGHT)
-        self.daemon_mode_info = ft.Text("当前生效模式: 单账号模式", size=10, color="onSurfaceVariant")
+        # 守护模式独立单选：与页面执行模式解耦——保存的即此值，不再隐式快照页面当前模式
+        self.daemon_mode_radio = ft.RadioGroup(
+            value="single",
+            content=ft.Row(
+                [
+                    ft.Radio(value="single", label="单账号"),
+                    ft.Radio(value="matrix", label="矩阵全扫"),
+                ],
+                spacing=10,
+                tight=True,
+            ),
+        )
         self.daemon_time = ft.TextField(
-            label="触发时间", 
-            value="08:00", 
-            text_size=12, 
+            label="触发时间",
+            value="08:00",
+            text_size=12,
             width=260,
             prefix_icon=ACCESS_TIME_ROUNDED,
             hint_text="HH:MM (如 08:30)",
         )
         self.daemon_save_btn = ft.FilledButton(
-            "保存设置并热部署", 
-            icon=BOLT, 
-            on_click=self._save_daemon_config, 
-            width=260, 
+            "保存配置并生效",
+            icon=BOLT,
+            on_click=self._save_daemon_config,
+            width=260,
             style=ft.ButtonStyle(
                 bgcolor=COLORS.SECONDARY,
                 shape=ft.RoundedRectangleBorder(radius=8),
             )
         )
-        
+
         daemon_panel = ft.Container(
             content=ft.Column([
                 ft.Text("守护进程 / DAEMON", size=12, weight=ft.FontWeight.BOLD, color="secondary"),
                 ft.Container(content=self.daemon_switch, padding=ft.padding.only(left=-10)),
-                self.daemon_mode_info,
+                ft.Text("守护执行模式", size=10, color="onSurfaceVariant"),
+                self.daemon_mode_radio,
                 self.daemon_time,
                 ft.Divider(height=5, color="transparent"),
                 self.daemon_save_btn,
@@ -521,18 +535,30 @@ class SignPage:
         return items
 
     async def _do_sync(self, e):
+        # 同步会逐账号翻页拉关注列表，与签到流撞同账号即双流并发——必须互斥
+        if sign_flow_lock.locked():
+            self._show_snackbar("已有签到流在执行中，同步已推迟（避免同账号双流并发）", "warning")
+            return
         # 此时同步逻辑已升级为全自动多账号轮换
         self.sync_btn.disabled = True
         self.status_text.value = "🔍 正在进行全矩阵贴吧深度同步 (多账号轮换)..."
         self.page.update()
-        
+
         try:
-            count = await sync_forums_to_db(self.db)
+            async with sign_flow_lock:
+                count = 0
+                async for r in sync_forums_to_db(self.db):
+                    count += r.get("added", 0)
+                    if "error" in r:
+                        self.status_text.value = f"🔍 同步 {r['account']} 出错: {r['error']}"
+                    else:
+                        self.status_text.value = f"🔍 同步 {r['account']}：新增 {r['added']} | 标记隐藏 {r['stale']}"
+                    self.page.update()
             self._show_snackbar(f"全域同步完成！已扫描矩阵所有账号并载入 {count} 个新目标", "success")
             await self.load_data()
         except Exception as ex:
             self._show_snackbar(f"同步异常: {str(ex)}", "error")
-        
+
         self.sync_btn.disabled = False
         self.status_text.value = ""
         self.page.update()
@@ -555,8 +581,12 @@ class SignPage:
         if sign_flow_lock.locked():
             self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
             return
-        if self._stats['total'] == 0 or (self._stats['total'] - self._stats['success']) == 0:
-            self._show_snackbar("没有需要签到的贴吧", "info")
+        # 点击时实时取待签队列：load_data 快照在守护跑完后口径会漂移
+        account = await self.db.get_active_account()
+        forums = await self.db.get_forums(account.id, include_banned=False) if account else []
+        pending = [f for f in forums if not f.is_sign_today]
+        if not pending:
+            self._show_snackbar("当前账号今日已无待签贴吧", "info")
             return
 
         self._is_signing = True
@@ -569,15 +599,11 @@ class SignPage:
         self.sign_btn_text.value = "停止签到流"
         self.page.update()
 
-        # 修复：分母应为队列中所有贴吧的总数，因为 sign_all_forums 会遍历所有贴吧
-        total = max(self._stats['total'], 1)
-        current = 0
-        try:
-            d_min = float(self.delay_min_input.value)
-            d_max = float(self.delay_max_input.value)
-        except (ValueError, TypeError):
-            d_min, d_max = 5.0, 15.0
+        d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
 
+        # 分母与核心流队列同口径：点击时的待签数（核心流剔除今日已签后按天洗牌）
+        total = max(len(pending), 1)
+        current = 0
         try:
             # 与定时守护签到互斥
             async with sign_flow_lock:
@@ -624,8 +650,10 @@ class SignPage:
         if sign_flow_lock.locked():
             self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
             return
-        # 与签到队列口径一致：全部熔断/无可签贴吧时直接提示
-        if not self._accounts or not any(not f.is_banned for _, f in self._matrix_tasks):
+        # 与签到队列口径一致：点击时实时统计全矩阵待签（rollup 单一口径）
+        rollup = await self.db.get_sign_rollup_by_account()
+        pending_total = sum(a["pending"] for a in rollup["accounts"])
+        if not self._accounts or pending_total == 0:
             self._show_snackbar("矩阵中没有需要签到的贴吧", "info")
             return
         
@@ -639,17 +667,11 @@ class SignPage:
         self.sign_btn_text.value = "停止签到流"
         self.page.update()
 
-        try:
-            d_min = float(self.delay_min_input.value)
-            d_max = float(self.delay_max_input.value)
-            ad_min = float(self.acc_delay_min_input.value)
-            ad_max = float(self.acc_delay_max_input.value)
-        except (ValueError, TypeError):
-            d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
+        d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
+        ad_min, ad_max = self._validated_delay(self.acc_delay_min_input.value, self.acc_delay_max_input.value, (30.0, 120.0))
 
-        # 矩阵模式：以 _matrix_tasks 作为预估总数，实际进度按 yield 结果计数
-        # (已熔断贴吧不在签到队列中，需从分母中剔除以保证进度能走满)
-        total_est = max(len([1 for _, f in self._matrix_tasks if not f.is_banned]), 1)
+        # 矩阵模式：分母 = 点击时实时全矩阵待签数（与核心流剔除口径一致，进度能走满）
+        total_est = max(pending_total, 1)
         current_task_idx = 0
 
         try:
@@ -694,8 +716,14 @@ class SignPage:
             await self.load_data()
 
     async def _do_sign_one(self, fname):
+        # 非阻塞检查：全扫流持锁可达一小时，阻塞等锁会卡死按钮；
+        # 而放行并发正是 sign_flow_lock 要防的同账号频率叠加
+        if sign_flow_lock.locked():
+            self._show_snackbar("已有签到流在执行中，稍后再试单吧手签", "warning")
+            return
         self._show_snackbar(f"正在手动签到: {fname}", "info")
-        result = await sign_forum(self.db, fname)
+        async with sign_flow_lock:
+            result = await sign_forum(self.db, fname)
         if result.success:
             self._show_snackbar(f"{fname} 签到成功", "success")
             await self.load_data()
@@ -721,29 +749,55 @@ class SignPage:
         schedule = {
             "enabled": self.daemon_switch.value,
             "sign_time": time_str,
-            "mode": self._mode
+            "mode": self.daemon_mode_radio.value,
         }
         await self.db.set_setting("schedule", json.dumps(schedule))
-        
-        # 保存行为频率参数
+
+        # 保存行为频率参数（校验钳制后落库；单账号/矩阵/守护三处共用）
+        d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
+        ad_min, ad_max = self._validated_delay(self.acc_delay_min_input.value, self.acc_delay_max_input.value, (30.0, 120.0))
+        self.delay_min_input.value, self.delay_max_input.value = f"{d_min:g}", f"{d_max:g}"
+        self.acc_delay_min_input.value, self.acc_delay_max_input.value = f"{ad_min:g}", f"{ad_max:g}"
         await self.db.set_setting("sign_delay_min", self.delay_min_input.value)
         await self.db.set_setting("sign_delay_max", self.delay_max_input.value)
         await self.db.set_setting("sign_acc_delay_min", self.acc_delay_min_input.value)
         await self.db.set_setting("sign_acc_delay_max", self.acc_delay_max_input.value)
-        
+
         try:
             from tieba_mecha.core.daemon import daemon_instance
             await daemon_instance.reload(self.db)
-            
-            # 更新已保存的模式说明
-            mode_zh = "矩阵全扫" if self._mode == "matrix" else "单账号模式"
-            self.daemon_mode_info.value = f"当前生效模式: {mode_zh}"
-            
-            self._show_snackbar("✔️ 守护进程配置已保存，定时重载完毕！", "success")
+
+            # 保存清单显式化：让用户看见这次保存动了哪些东西
+            mode_zh = "矩阵全扫" if self.daemon_mode_radio.value == "matrix" else "单账号模式"
+            self._show_snackbar(
+                f"✔️ 已保存：守护{'启用' if self.daemon_switch.value else '停用'} · 触发 {time_str} · {mode_zh}"
+                f" · 吧间延迟 {d_min:g}~{d_max:g}s · 账号间延迟 {ad_min:g}~{ad_max:g}s",
+                "success",
+            )
         except Exception as err:
             self._show_snackbar(f"❌ 守护进程重载失败: {err}", "error")
-            
+
         self.page.update()
+
+    def _validated_delay(self, raw_min: str, raw_max: str, default: tuple) -> tuple:
+        """解析延迟区间：逐边解析（单边坏只回退该边）；下限 2s 钳制；倒挂自动交换。
+        防手滑产生零/负延迟连发或倒挂区间。"""
+        def _one(raw, fallback):
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return fallback
+
+        lo = _one(raw_min, default[0])
+        hi = _one(raw_max, default[1])
+        clamped_lo = max(lo, 2.0)
+        clamped_hi = max(hi, 2.0)
+        if clamped_lo != lo or clamped_hi != hi:
+            self._show_snackbar("延迟低于 2s 已自动钳制为 2s（防连发触发风控）", "warning")
+        if clamped_lo > clamped_hi:
+            clamped_lo, clamped_hi = clamped_hi, clamped_lo
+            self._show_snackbar(f"延迟区间倒挂已自动交换为 {clamped_lo:g}~{clamped_hi:g}s", "warning")
+        return clamped_lo, clamped_hi
 
     def _navigate(self, page_name: str):
         if self.on_navigate: self.on_navigate(page_name)

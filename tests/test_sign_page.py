@@ -130,7 +130,7 @@ class TestSignPageLoadData:
         assert sign_page.daemon_time.value == "09:30"
         assert sign_page.delay_min_input.value == "8"
         assert sign_page.delay_max_input.value == "20"
-        assert sign_page.daemon_mode_info.value == "当前生效模式: 矩阵全扫"
+        assert sign_page.daemon_mode_radio.value == "matrix"
 
     async def test_auto_start_sign_triggers_run_task(self, sign_page, db):
         sign_page.page.session.set("auto_start_sign", True)
@@ -354,3 +354,76 @@ class TestDoSignSingle:
 
         assert sign_page._is_signing is False, "异常后必须复位执行状态"
         assert sign_page.sign_btn_text.value == "启动签到流"
+
+
+# ========== 整改批次一：页面守卫 ==========
+
+
+@pytest.mark.asyncio
+class TestBatch1PageGuards:
+    async def test_validated_delay_swaps_and_clamps(self, sign_page):
+        lo, hi = sign_page._validated_delay("15", "8", (5.0, 15.0))
+        assert (lo, hi) == (8.0, 15.0), "倒挂区间应自动交换"
+
+        lo, hi = sign_page._validated_delay("-3", "5", (5.0, 15.0))
+        assert lo == 2.0, "负值下限应钳制为 2s"
+
+        lo, hi = sign_page._validated_delay("abc", "5", (5.0, 15.0))
+        assert (lo, hi) == (5.0, 5.0), "非数字仅该边回退默认，另一边保留输入"
+
+    async def test_sign_one_rejected_when_lock_held(self, sign_page, db):
+        """整改#4: 签到流持锁时单吧手签直接拒绝，不得并发请求"""
+        from tieba_mecha.core.sign import sign_flow_lock
+
+        await _add_account_with_forum(db, "acc_lock", [(21, "lock_forum", None)])
+        async with sign_flow_lock:
+            with patch("tieba_mecha.web.pages.sign.sign_forum", new_callable=AsyncMock) as mock_sign:
+                await sign_page._do_sign_one("lock_forum")
+                mock_sign.assert_not_called()
+        assert sign_page._is_signing is False
+
+    async def test_daemon_mode_saved_from_radio_not_page_mode(self, sign_page, db):
+        """整改#1: schedule.mode 取守护面板单选值，与页面执行模式解耦"""
+        import json
+
+        sign_page.daemon_switch.value = True
+        sign_page.daemon_time.value = "08:00"
+        sign_page.daemon_mode_radio.value = "matrix"
+        sign_page._mode = "single"  # 页面在单账号模式点保存
+
+        with patch("tieba_mecha.core.daemon.daemon_instance.reload", AsyncMock()):
+            await sign_page._save_daemon_config(None)
+
+        sched = json.loads(await db.get_setting("schedule", "{}"))
+        assert sched["mode"] == "matrix", "守护模式必须取单选值而非页面模式快照"
+
+    async def test_delay_inputs_sanitized_on_save(self, sign_page, db):
+        """整改#9: 保存时非法延迟被钳制后落库"""
+        sign_page.daemon_switch.value = False
+        sign_page.daemon_time.value = "08:00"
+        sign_page.delay_min_input.value = "0"
+        sign_page.delay_max_input.value = "abc"
+
+        with patch("tieba_mecha.core.daemon.daemon_instance.reload", AsyncMock()):
+            await sign_page._save_daemon_config(None)
+
+        assert await db.get_setting("sign_delay_min") == "2"
+        assert await db.get_setting("sign_delay_max") == "15"
+
+
+@pytest.mark.asyncio
+class TestAccountChipBusyGuard:
+    async def test_switch_blocked_when_busy(self, mock_page, db):
+        """整改#10: 宿主页执行签到流时芯片切号被拒"""
+        from tieba_mecha.web.components.account_switcher import AccountSwitchChip
+
+        chip = AccountSwitchChip(mock_page, db, is_busy=lambda: True)
+        target = MagicMock()
+        target.id = 999
+        chip._active = MagicMock()
+        chip._active.id = 1
+
+        with patch("tieba_mecha.web.components.account_switcher.switch_account", new_callable=AsyncMock) as mock_sw:
+            await chip._do_switch(target)
+
+        mock_sw.assert_not_called()

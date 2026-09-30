@@ -55,11 +55,15 @@ class AccountSwitchChip(ft.Container):
         page: ft.Page,
         db: "Optional[Database]",
         on_switched: Optional[Callable[[], None]] = None,
+        is_busy: Optional[Callable[[], bool]] = None,
     ):
         super().__init__()
         self._page = page
         self.db = db
         self._on_switched = on_switched
+        # 宿主页执行长任务（如签到流）时置 True：切号会重建页面数据，
+        # 而执行流仍基于原账号，两口径脱节
+        self.is_busy = is_busy
         self._accounts: list = []
         self._active = None
         self._switching = False
@@ -212,6 +216,9 @@ class AccountSwitchChip(ft.Container):
         if self._switching or not self.db:
             return
         if self._active is not None and acc.id == self._active.id:
+            return
+        if self.is_busy and self.is_busy():
+            show_toast(self._page, "签到流执行中，暂不能切换账号", "warning")
             return
         self._switching = True
         try:
