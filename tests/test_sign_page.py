@@ -168,7 +168,7 @@ class TestToggleMode:
     def test_matrix_mode_stats(self, sign_page, db):
         sign_page._mode = "matrix"
         sign_page.refresh_ui()
-        # 由 load_data 填充的 _matrix_tasks 驱动; 此处仅验证口径切换不崩溃
+        # 由 load_data 填充的 rollup 驱动; 此处仅验证口径切换不崩溃
         assert isinstance(sign_page.total_stat.value, str)
 
 
