@@ -96,7 +96,7 @@ class TestSignPageBuild:
         assert sp.matrix_settings.visible is True, "账号间延迟组应常显（与守护共用）"
 
     def test_console_semantics_structure(self, mock_page, db):
-        """控制台语义: 状态灯/手动执行标题/范围caption/守护标题去黄/保存去黄"""
+        """控制台语义: 状态灯/手动签到标题/范围caption/标题去黄/保存去黄"""
         import flet as ft
 
         sp = SignPage(mock_page, db)
@@ -117,9 +117,9 @@ class TestSignPageBuild:
                     _walk(sub)
 
         _walk(root)
-        assert "手动执行" in panel_texts
-        assert "范围：节奏参数 + 定时守护" in panel_texts
-        assert "定时守护" in panel_texts
+        assert "手动签到" in panel_texts
+        assert "范围：节奏参数 + 定时签到" in panel_texts
+        assert "定时签到" in panel_texts
         assert isinstance(sp.daemon_save_btn, ft.FilledButton), "保存按钮应为实心（用户拍板三钮统一）"
         assert getattr(sp.daemon_save_btn.style, "bgcolor", None) is None
 

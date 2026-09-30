@@ -210,7 +210,7 @@ class SignPage:
         )
         
         # 主控按钮：短标签纯动词，范围降为钮下 caption（refresh_ui/_set_main_running 联动更新）
-        # 手动执行三钮统一撑满面板宽（面板300-左右padding16×2=268），默认按内容收紧会参差不齐
+        # 手动签到三钮统一撑满面板宽（面板300-左右padding16×2=268），默认按内容收紧会参差不齐
         self.sign_btn = ft.FilledButton(
             "启动签到",
             icon=PLAY_ARROW_ROUNDED,
@@ -280,7 +280,7 @@ class SignPage:
             ],
         )
 
-        # 定时守护配置（压缩为两行 + 保存键）
+        # 定时签到配置（压缩为两行 + 保存键）
         self.daemon_switch = ft.Switch(value=False)
         self.daemon_time = ft.TextField(
             label="触发时间",
@@ -315,11 +315,11 @@ class SignPage:
             spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        # 左侧合并控制面板：状态 / 手动执行 / 节奏 / 守护四段一卡
+        # 左侧合并控制面板：状态 / 手动签到 / 节奏 / 定时四段一卡
         control_panel = ft.Container(
             content=ft.Column([
                 self._run_state_row,
-                ft.Text("手动执行", size=12, weight=ft.FontWeight.BOLD, color="primary"),
+                ft.Text("手动签到", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                 # 钮+范围caption紧绑(3px)，与下一元素靠面板12px间距分组
                 ft.Column([self.sign_btn, self.sign_scope_caption], spacing=3),
                 ft.Column([self.matrix_btn, self.matrix_scope_caption], spacing=3),
@@ -327,14 +327,14 @@ class SignPage:
                 self.matrix_settings,
                 ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
                 ft.Row([
-                    ft.Text("定时守护", size=12, weight=ft.FontWeight.BOLD, color="primary"),
+                    ft.Text("定时签到", size=12, weight=ft.FontWeight.BOLD, color="primary"),
                     ft.Container(expand=True),
                     ft.Text("启用周期执行", size=11, color="onSurfaceVariant"),
                     self.daemon_switch,
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([self.daemon_time, self.stagger_input], spacing=8),
                 self.daemon_save_btn,
-                ft.Text("范围：节奏参数 + 定时守护", size=9, color="onSurfaceVariant"),
+                ft.Text("范围：节奏参数 + 定时签到", size=9, color="onSurfaceVariant"),
             ], spacing=12),
             padding=16,
             bgcolor=with_opacity(0.03, "onSurface"),
@@ -567,7 +567,7 @@ class SignPage:
     async def _do_sign_single(self):
         if self._is_signing: return
         if sign_flow_lock.locked():
-            self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
+            self._show_snackbar("已有签到流在执行中 (可能是定时签到任务)，请等待其完成", "warning")
             return
         # 点击时实时取待签队列：load_data 快照在守护跑完后口径会漂移
         account = await self.db.get_active_account()
@@ -593,7 +593,7 @@ class SignPage:
         total = max(len(pending), 1)
         current = 0
         try:
-            # 与定时守护签到互斥；ignore_skip：手动补扫=明确意图，无视拟人化跳过骰子
+            # 与定时签到互斥；ignore_skip：手动补扫=明确意图，无视拟人化跳过骰子
             async with sign_flow_lock:
                 async for result in sign_all_forums(
                     self.db, delay_min=d_min, delay_max=d_max,
@@ -646,7 +646,7 @@ class SignPage:
         """矩阵入口：预检 + 范围/预计时长确认（30-60 分钟级大任务，误触归零）"""
         if self._is_signing: return
         if sign_flow_lock.locked():
-            self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
+            self._show_snackbar("已有签到流在执行中 (可能是定时签到任务)，请等待其完成", "warning")
             return
         # 与签到队列口径一致：点击时实时统计全矩阵待签（rollup 单一口径）
         rollup = await self.db.get_sign_rollup_by_account()
@@ -684,7 +684,7 @@ class SignPage:
         """矩阵执行体（确认弹窗后进入；进入时重验锁与待签，防弹窗期间状态漂移）"""
         if self._is_signing: return
         if sign_flow_lock.locked():
-            self._show_snackbar("已有签到流在执行中 (可能是定时守护任务)，请等待其完成", "warning")
+            self._show_snackbar("已有签到流在执行中 (可能是定时签到任务)，请等待其完成", "warning")
             return
         rollup = await self.db.get_sign_rollup_by_account()
         pending_total = sum(a["pending"] for a in rollup["accounts"])
@@ -710,7 +710,7 @@ class SignPage:
         current_task_idx = 0
 
         try:
-            # 与定时守护签到互斥；ignore_skip：手动补扫=明确意图，无视拟人化跳过骰子
+            # 与定时签到互斥；ignore_skip：手动补扫=明确意图，无视拟人化跳过骰子
             async with sign_flow_lock:
                 async for result in sign_all_accounts(
                     self.db, d_min, d_max, ad_min, ad_max,
