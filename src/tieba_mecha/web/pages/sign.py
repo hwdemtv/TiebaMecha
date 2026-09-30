@@ -244,20 +244,31 @@ class SignPage:
         self.acc_delay_min_input = ft.TextField(value="30", text_size=12, expand=True, suffix_text="秒", hint_text="最小")
         self.acc_delay_max_input = ft.TextField(value="120", text_size=12, expand=True, suffix_text="秒", hint_text="最大")
 
-        # 节奏参数折叠区：专家参数默认收起，摘要行常显当前值
+        # 节奏参数折叠区：专家参数默认收起，摘要行常显当前值。
+        # caption 作组标题放在输入行上方；底部留白防文字贴折叠区下缘被分隔线裁剪
         self.rhythm_summary = ft.Text("", size=10, color="onSurfaceVariant")
         self.matrix_settings = ft.ExpansionTile(
             title=ft.Text("节奏参数", size=12, weight=ft.FontWeight.BOLD, color="primary"),
             subtitle=self.rhythm_summary,
             controls=[
-                ft.Row([
-                    self.delay_min_input,
-                    ft.Text("至", size=12, color="onSurfaceVariant"),
-                    self.delay_max_input,
-                ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Text("吧间延迟：单账号、矩阵与守护共用", size=9, color="onSurfaceVariant"),
-                ft.Row([self.acc_delay_min_input, ft.Text("~", size=12), self.acc_delay_max_input], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Text("账号间延迟：矩阵与守护共用", size=9, color="onSurfaceVariant"),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("吧间延迟 · 单账号/矩阵/守护共用", size=10, color="onSurfaceVariant"),
+                        ft.Row([
+                            self.delay_min_input,
+                            ft.Text("至", size=12, color="onSurfaceVariant"),
+                            self.delay_max_input,
+                        ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        ft.Container(height=8),
+                        ft.Text("账号间延迟 · 矩阵/守护共用", size=10, color="onSurfaceVariant"),
+                        ft.Row([
+                            self.acc_delay_min_input,
+                            ft.Text("~", size=12),
+                            self.acc_delay_max_input,
+                        ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ], spacing=6),
+                    padding=ft.padding.only(left=4, right=4, top=2, bottom=12),
+                )
             ],
         )
 
