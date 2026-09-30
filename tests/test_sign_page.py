@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import flet as ft
+
 from tieba_mecha.web.pages.sign import SignPage
 from tieba_mecha.web.utils import with_opacity
 
@@ -94,7 +96,7 @@ class TestSignPageBuild:
         assert sp.matrix_settings.visible is True, "账号间延迟组应常显（与守护共用）"
 
     def test_console_semantics_structure(self, mock_page, db):
-        """控制台语义: 状态灯/手动执行标题/保存范围caption/守护标题去黄/保存去黄"""
+        """控制台语义: 状态灯/手动执行标题/范围caption/守护标题去黄/保存去黄"""
         import flet as ft
 
         sp = SignPage(mock_page, db)
@@ -116,10 +118,18 @@ class TestSignPageBuild:
 
         _walk(root)
         assert "手动执行" in panel_texts
-        assert "保存范围：节奏参数 + 定时守护" in panel_texts
+        assert "范围：节奏参数 + 定时守护" in panel_texts
         assert "定时守护" in panel_texts
-        assert isinstance(sp.daemon_save_btn, ft.OutlinedButton), "保存按钮应为描边（去黄实心）"
+        assert isinstance(sp.daemon_save_btn, ft.FilledButton), "保存按钮应为实心（用户拍板三钮统一）"
         assert getattr(sp.daemon_save_btn.style, "bgcolor", None) is None
+
+    def test_manual_buttons_uniform_width_and_solid(self, mock_page, db):
+        """三钮等宽撑满面板 + 全部实心 FilledButton（用户拍板与启动签到一致）"""
+        sp = SignPage(mock_page, db)
+        sp.build()
+        for btn in (sp.sign_btn, sp.matrix_btn, sp.daemon_save_btn):
+            assert btn.width == 268, f"{btn.text} 应统一撑满面板宽268（300-2×16）"
+            assert isinstance(btn, ft.FilledButton), f"{btn.text} 应为实心 FilledButton"
 
     def test_run_state_helper(self, mock_page, db):
         sp = SignPage(mock_page, db)
@@ -129,6 +139,15 @@ class TestSignPageBuild:
         assert sp._run_dot.bgcolor == "primary"
         sp._set_run_state("就绪", "onSurfaceVariant")
         assert sp._run_text.value == "就绪"
+
+    def test_main_running_label_flips_to_stop(self, mock_page, db):
+        """运行态主钮=停止签到（与启动签到对称的短标签），结束恢复"""
+        sp = SignPage(mock_page, db)
+        sp.build()
+        sp._set_main_running(True)
+        assert sp.sign_btn.text == "停止签到"
+        sp._set_main_running(False)
+        assert sp.sign_btn.text == "启动签到"
 
 
 # ========== load_data ==========
@@ -188,15 +207,15 @@ class TestSignPageLoadData:
 @pytest.mark.asyncio
 class TestMergedMatrixLaunch:
     async def test_matrix_button_label_from_rollup(self, sign_page, db):
-        """矩阵范围常显在次级按钮标签上（取代整页账号队列）"""
+        """矩阵范围常显在次级按钮下方 caption（取代整页账号队列）"""
         await _add_account_with_forum(db, "acc1", [(1, "alpha", "success"), (2, "beta", None)])
         acc2 = await _add_account_with_forum(db, "acc2", [(3, "gamma", None)])
         await db.update_account(acc2.id, status="suspended")  # 挂起号不计入范围
 
         await sign_page.load_data()
 
-        assert "1 账号" in sign_page.matrix_btn.text
-        assert "1 吧待签" in sign_page.matrix_btn.text
+        assert sign_page.matrix_btn.text == "矩阵全扫", "按钮标签应为纯动词，范围在 caption"
+        assert sign_page.matrix_scope_caption.value == "1 账号 · 1 吧待签"
 
     async def test_matrix_button_opens_confirm_dialog(self, sign_page, db):
         """点矩阵按钮 → 确认弹窗（范围+预计时长），确认前不进入执行态"""
@@ -329,7 +348,7 @@ class TestDoSignSingle:
 
         assert sign_page._is_signing is False
         assert sign_page.progress_bar.visible is False
-        assert sign_page.sign_btn.text.startswith("启动签到流")
+        assert sign_page.sign_btn.text == "启动签到"
         assert sign_page._run_text.value == "本轮完成 · 1/1", "完成后状态灯应显示本轮完成"
         sign_page.page.pubsub.send_all_on_topic.assert_called()
 
@@ -351,7 +370,7 @@ class TestDoSignSingle:
             await sign_page._do_sign_single()
 
         assert sign_page._is_signing is False, "异常后必须复位执行状态"
-        assert sign_page.sign_btn.text.startswith("启动签到流")
+        assert sign_page.sign_btn.text == "启动签到"
 
 
 # ========== 整改批次一：页面守卫 ==========
@@ -502,12 +521,13 @@ class TestBatch3Page:
         mock_flow.assert_not_called()
 
     async def test_main_button_label_carries_scope(self, sign_page, db):
-        """左侧面板简化: 待签范围并入主按钮标签，节奏摘要行常显当前参数"""
+        """按钮=纯动词短标签，范围降为钮下 caption，节奏摘要行常显当前参数"""
         await _add_account_with_forum(db, "acc_scope", [(35, "scope_forum", "success"), (36, "scope_forum2", None)])
         await sign_page.load_data()
         sign_page.delay_min_input.value = "8"
         sign_page.delay_max_input.value = "15"
         sign_page.refresh_ui()
 
-        assert sign_page.sign_btn.text == "启动签到流 · 当前账号 1 吧"
+        assert sign_page.sign_btn.text == "启动签到"
+        assert sign_page.sign_scope_caption.value == "当前账号 · 待签 1 吧"
         assert "吧间 8~15s" in sign_page.rhythm_summary.value

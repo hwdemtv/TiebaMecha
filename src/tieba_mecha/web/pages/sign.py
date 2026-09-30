@@ -119,17 +119,19 @@ class SignPage:
             self.failure_stat.value = str(self._stats['failure'])
             self.pending_stat.value = str(self._stats.get('pending', 0))
             if hasattr(self, "sign_btn") and not self._is_signing:
-                self.sign_btn.text = f"启动签到流 · 当前账号 {self._stats.get('pending', 0)} 吧"
+                self.sign_btn.text = "启动签到"
+            if hasattr(self, "sign_scope_caption"):
+                self.sign_scope_caption.value = f"当前账号 · 待签 {self._stats.get('pending', 0)} 吧"
             if hasattr(self, "rhythm_summary"):
                 self.rhythm_summary.value = (
                     f"吧间 {self.delay_min_input.value}~{self.delay_max_input.value}s"
                     f" · 账号间 {self.acc_delay_min_input.value}~{self.acc_delay_max_input.value}s"
                 )
-            # 矩阵范围常显在次级按钮上，取代整页账号队列
-            if hasattr(self, "matrix_btn"):
+            # 矩阵范围常显在次级按钮下方 caption，取代整页账号队列
+            if hasattr(self, "matrix_scope_caption"):
                 accs = (getattr(self, "_matrix_rollup", None) or {}).get("accounts", [])
                 n_acc = len([a for a in accs if a["pending"] > 0])
-                self.matrix_btn.text = f"矩阵全扫 · {n_acc} 账号 · {sum(a['pending'] for a in accs)} 吧待签"
+                self.matrix_scope_caption.value = f"{n_acc} 账号 · {sum(a['pending'] for a in accs)} 吧待签"
 
             self.page.update()
 
@@ -207,20 +209,24 @@ class SignPage:
             on_click=lambda e: self.page.run_task(self._do_sync, e),
         )
         
-        # 主控按钮：范围并入标签，执行中切换为"停止签到流"（红色）
+        # 主控按钮：短标签纯动词，范围降为钮下 caption（refresh_ui/_set_main_running 联动更新）
+        # 手动执行三钮统一撑满面板宽（面板300-左右padding16×2=268），默认按内容收紧会参差不齐
         self.sign_btn = ft.FilledButton(
-            "启动签到流",
+            "启动签到",
             icon=PLAY_ARROW_ROUNDED,
+            width=268,
             on_click=lambda e: self.page.run_task(self._do_sign, e),
             style=ft.ButtonStyle(
                 shape=ft.RoundedRectangleBorder(radius=8),
                 padding=ft.padding.symmetric(horizontal=14, vertical=12),
             ),
         )
-        # 矩阵全扫次级入口：范围常显在按钮标签上，点击走确认弹窗（取代整页矩阵模式）
-        self.matrix_btn = ft.OutlinedButton(
+        self.sign_scope_caption = ft.Text("", size=9, color="onSurfaceVariant")
+        # 矩阵全扫入口：范围常显钮下 caption，点击走确认弹窗（取代整页矩阵模式）
+        self.matrix_btn = ft.FilledButton(
             "矩阵全扫",
             icon=GROUP_WORK,
+            width=268,
             tooltip="所有可用账号依次签到（账号间防关联延迟），点击后确认范围与预计时长",
             on_click=lambda e: self.page.run_task(self._do_sign_matrix, e),
             style=ft.ButtonStyle(
@@ -228,6 +234,7 @@ class SignPage:
                 padding=ft.padding.symmetric(horizontal=14, vertical=12),
             ),
         )
+        self.matrix_scope_caption = ft.Text("", size=9, color="onSurfaceVariant")
 
         # 进度与状态
         self.progress_bar = ft.ProgressBar(value=0, visible=False, color="primary", bar_height=3)
@@ -288,10 +295,11 @@ class SignPage:
             label="错峰窗口", value="90", text_size=12, width=110,
             suffix_text="分", hint_text="0=关闭",
         )
-        # 配置类动作用默认描边（颜色语义：青绿=操作，黄=需要注意——黄色只留给待签/跳过等警示信息）
-        self.daemon_save_btn = ft.OutlinedButton(
-            "保存配置并生效",
+        # 三钮统一实心（2026-10-01 用户拍板，与启动签到一致）；黄仍只留给待签/跳过警示信息
+        self.daemon_save_btn = ft.FilledButton(
+            "保存配置",
             icon=BOLT,
+            width=268,
             on_click=self._save_daemon_config,
             style=ft.ButtonStyle(
                 shape=ft.RoundedRectangleBorder(radius=8),
@@ -312,8 +320,9 @@ class SignPage:
             content=ft.Column([
                 self._run_state_row,
                 ft.Text("手动执行", size=12, weight=ft.FontWeight.BOLD, color="primary"),
-                self.sign_btn,
-                self.matrix_btn,
+                # 钮+范围caption紧绑(3px)，与下一元素靠面板12px间距分组
+                ft.Column([self.sign_btn, self.sign_scope_caption], spacing=3),
+                ft.Column([self.matrix_btn, self.matrix_scope_caption], spacing=3),
                 ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
                 self.matrix_settings,
                 ft.Divider(height=1, color=with_opacity(0.08, "onSurface")),
@@ -325,7 +334,7 @@ class SignPage:
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([self.daemon_time, self.stagger_input], spacing=8),
                 self.daemon_save_btn,
-                ft.Text("保存范围：节奏参数 + 定时守护", size=9, color="onSurfaceVariant"),
+                ft.Text("范围：节奏参数 + 定时守护", size=9, color="onSurfaceVariant"),
             ], spacing=12),
             padding=16,
             bgcolor=with_opacity(0.03, "onSurface"),
@@ -525,9 +534,9 @@ class SignPage:
         self._set_run_state("就绪", "onSurfaceVariant")
 
     def _set_main_running(self, running: bool):
-        """主按钮运行态：执行中变红色"停止签到流"，结束恢复带待签范围标签"""
+        """主按钮运行态：执行中变红色"停止签到"，结束恢复短标签（范围在钮下 caption 常显）"""
         if running:
-            self.sign_btn.text = "停止签到流"
+            self.sign_btn.text = "停止签到"
             self.sign_btn.icon = STOP_CIRCLE_ROUNDED
             self.sign_btn.style = ft.ButtonStyle(
                 bgcolor=COLORS.ERROR,
@@ -535,7 +544,7 @@ class SignPage:
                 padding=ft.padding.symmetric(horizontal=14, vertical=12),
             )
         else:
-            self.sign_btn.text = f"启动签到流 · 当前账号 {self._stats.get('pending', 0)} 吧"
+            self.sign_btn.text = "启动签到"
             self.sign_btn.icon = PLAY_ARROW_ROUNDED
             self.sign_btn.style = ft.ButtonStyle(
                 shape=ft.RoundedRectangleBorder(radius=8),
@@ -613,7 +622,7 @@ class SignPage:
         except Exception as ex:
             self._show_snackbar(f"任务异常中止: {str(ex)}", "error")
         finally:
-            # finally 保证任务被取消（CancelledError）时也能复位状态，避免按钮永久卡在"停止签到流"
+            # finally 保证任务被取消（CancelledError）时也能复位状态，避免按钮永久卡在"停止签到"
             was_stopped = self._stop_requested
             self._is_signing = False
             self._stop_requested = False
