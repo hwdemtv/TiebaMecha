@@ -684,8 +684,9 @@ class BatchPostPage:
                 order_desc=True,  # 新采的排前面，先审新鲜的
             )
             self._materials = mat_items  # 全选/编辑弹窗等按 id 复用
-            self._material_table.visible = False
-            self._harvest_table.visible = True
+            # 视图切换用控件摘除制（visible=False 在 ListView/Row 内对 DataTable 不可靠，
+            # flet 0.23.2 实测表头仍渲染）——不显示的表格直接离开控件树
+            self._table_row.controls = [self._harvest_table]
             harvest_rows = []
             for m in mat_items:
                 try:
@@ -700,15 +701,13 @@ class BatchPostPage:
             self._update_material_pagination()
             self._update_bulk_visibility()
             try:
-                self._harvest_table.update()
-                self._material_table.update()
+                self._table_row.update()
             except Exception:
                 pass
             return
 
         # --- 排期池分页查询（默认视图） ---
-        self._material_table.visible = True
-        self._harvest_table.visible = False
+        self._table_row.controls = [self._material_table]
         self._bulk_reset_btn.visible = True
         self._bulk_bump_btn.visible = True
         self._bulk_ai_btn.visible = True
@@ -1965,7 +1964,7 @@ class BatchPostPage:
                     self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
-                    content=ft.ListView([ft.Row([self._material_table, self._harvest_table], scroll=ft.ScrollMode.ADAPTIVE)], expand=True),
+                    content=ft.ListView([self._table_row], expand=True),
                     expand=True,
                     border=ft.border.all(1, with_opacity(0.1, "onSurface")),
                     border_radius=12,
@@ -2093,8 +2092,12 @@ class BatchPostPage:
             column_spacing=18,
             show_checkbox_column=True,
             on_select_all=self._on_material_select_all,
-            visible=False,
         )
+
+        # 表格宿主行：排期池/采集两张表共用，视图切换直接替换 controls
+        # （visible=False 在 ListView/Row 内对 DataTable 不可靠，flet 0.23.2 实测表头仍渲染，
+        #  故不显示的表格必须摘出控件树）
+        self._table_row = ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)
 
         # 物料池视图切换：排期池(pending/failed) ↔ 采集待审(harvested)
         self._material_view_dd = ft.Dropdown(

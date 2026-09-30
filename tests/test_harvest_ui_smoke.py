@@ -49,11 +49,11 @@ def bp():
 
 class TestHarvestViewControls:
     def test_controls_exist_after_init(self, bp):
-        # 注：全套跑批时 flet 可能被先行模块装桩，桩控件不回读构造 kwarg
-        # （options/controls/visible 参数），断言只走属性赋值与引用本身；
-        # 可见性切换行为由下方刷新测试覆盖。
+        # 注：全套跑批时 flet 可能被先行模块装桩，断言只用桩控件也有的属性（value/visible）
+        # （构造 kwarg 如 visible=False 桩控件不回读，初始隐藏由刷新测试的切换行为覆盖）
         assert bp._material_view_dd.value == "schedule"
-        assert bp._harvest_table is not None and bp._material_table is not None
+        # 表格宿主行存在（桩控件不回读 controls 构造 kwarg，初始内容由排期池刷新测试覆盖）
+        assert bp._table_row is not None
         # 批量按钮引用化：四个引用都在（刷新测试会实际读写这些属性）
         for btn in (bp._bulk_delete_btn, bp._bulk_reset_btn, bp._bulk_bump_btn, bp._bulk_ai_btn):
             assert btn is not None
@@ -67,10 +67,10 @@ class TestHarvestViewControls:
 
         await bp._refresh_material_table()
 
-        assert bp._harvest_table.visible is True
-        assert bp._material_table.visible is False
         assert len(bp._harvest_table.rows) == 1
         assert "🌾采集(2)" in bp._stats_text.value
+        # 采集视图：宿主行只挂采集表（摘除制）
+        assert bp._table_row.controls == [bp._harvest_table]
         # 采集视图隐藏排期池专属批量按钮
         assert bp._bulk_reset_btn.visible is False
         assert bp._bulk_ai_btn.visible is False
@@ -84,7 +84,8 @@ class TestHarvestViewControls:
         bp._material_view_dd.value = "schedule"
         await bp._refresh_material_table()
         assert bp._bulk_reset_btn.visible is True
-        assert bp._harvest_table.visible is False
+        # 切回排期池：宿主行换回排期池表（先去采集视图再回来，验证摘除可逆）
+        assert bp._table_row.controls == [bp._material_table]
 
     def test_harvest_row_states_pure(self, bp):
         # 行状态判定抽成纯函数（不依赖 flet 控件内部结构，桩环境下同样可测）
