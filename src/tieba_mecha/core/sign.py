@@ -440,17 +440,18 @@ async def sign_all_forums(
 
 async def get_sign_stats(db: Database) -> dict:
     """
-    获取签到统计
+    获取签到统计（闭合账目口径：total = success + failure + pending，熔断单列）
 
     Returns:
-        {total: 总数, success: 成功数, failure: 失败数}
+        {total, success, failure, pending, banned}
     """
     account = await db.get_active_account()
     if not account:
-        return {"total": 0, "success": 0, "failure": 0}
+        return {"total": 0, "success": 0, "failure": 0, "pending": 0, "banned": 0}
 
-    # 统计口径与签到队列一致：排除已熔断的贴吧
+    # 统计口径与签到队列一致：排除已熔断/已隐藏的贴吧
     forums = await db.get_forums(account.id, include_banned=False)
+    all_forums = await db.get_forums(account.id)
     total = len(forums)
     success = sum(1 for f in forums if f.last_sign_status == "success")
     failure = sum(1 for f in forums if f.last_sign_status == "failure")
@@ -459,6 +460,8 @@ async def get_sign_stats(db: Database) -> dict:
         "total": total,
         "success": success,
         "failure": failure,
+        "pending": max(total - success - failure, 0),
+        "banned": len(all_forums) - total,
     }
 
 

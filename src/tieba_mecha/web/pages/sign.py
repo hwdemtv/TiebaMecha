@@ -8,12 +8,12 @@ from typing import List, Optional
 
 from ..components import create_gradient_button, CoreButtonWithLabel, GRADIENT_CYAN
 from ..components.icons import (
-    GROUP_WORK, PERSON, SWAP_HORIZ, ARROW_BACK_IOS_NEW,
+    GROUP_WORK, PERSON, ARROW_BACK_IOS_NEW,
     SYNC_ROUNDED, PLAY_ARROW_ROUNDED, ACCESS_TIME_ROUNDED, BOLT,
     CHECK, VERIFIED_ROUNDED, RADIO_BUTTON_UNCHECKED, HISTORY_ROUNDED,
-    GROUP_WORK_ROUNDED, PUBLIC, VPN_LOCK, CHECK_CIRCLE,
-    PENDING_OUTLINED, ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED,
-    HEART_BROKEN, MORE_VERT_ROUNDED
+    PUBLIC, VPN_LOCK, CHECK_CIRCLE,
+    ERROR, HISTORY_TOGGLE_OFF, STOP_CIRCLE_ROUNDED,
+    HEART_BROKEN, PAUSE_CIRCLE_OUTLINED, PERSON_OFF
 )
 from ..utils import with_opacity
 from ...core.sign import get_follow_forums, sync_forums_to_db, sign_forum, sign_all_forums, get_sign_stats, sign_all_accounts, sign_flow_lock
@@ -28,7 +28,9 @@ class SignPage:
         self.on_navigate = on_navigate
         self._forums = []
         self._accounts = []
-        self._matrix_tasks = [] # [(account, forum)]
+        self._matrix_rollup = None  # get_sign_rollup_by_account 结果（矩阵态单一口径）
+        self._matrix_row_controls = {}  # account_id -> 行控件引用（执行中行内计数联动）
+        self._matrix_live = {}  # account_id -> 执行中实时计数
         self._stats = {"total": 0, "success": 0, "failure": 0}
         self._is_signing = False
         self._stop_requested = False
@@ -52,21 +54,11 @@ class SignPage:
                 self._forums = []
                 self._stats = {"total": 0, "success": 0, "failure": 0}
 
-            # 加载全量账号索引
-            all_accounts = await self.db.get_accounts()
-            acc_map = {acc.id: acc for acc in all_accounts}
-            self._accounts = all_accounts
-            
-            # 加载全量贴吧清单 (作为矩阵任务的基础)
-            all_forums = await self.db.get_forums()
-            self._matrix_tasks = []
-            for f in all_forums:
-                acc = acc_map.get(f.account_id)
-                self._matrix_tasks.append((acc, f))
-            
-            # 加载全矩阵唯一贴吧数
-            all_fnames = await self.db.get_all_unique_fnames()
-            self._matrix_total_count = len(all_fnames)
+            # 加载全量账号索引（矩阵前置检查用）
+            self._accounts = await self.db.get_accounts()
+
+            # 矩阵态数据：账号队列 rollup（视图/统计/分母单一口径；吧级明细走单账号侧）
+            self._matrix_rollup = await self.db.get_sign_rollup_by_account()
             
             try:
                 import json
@@ -113,21 +105,22 @@ class SignPage:
     def refresh_ui(self):
         if hasattr(self, "list_view"):
             self.list_view.controls.clear()
-            
+
             if self._mode == "single":
                 self.list_view.controls.extend(self._build_single_mode_items())
                 self.total_stat.value = str(self._stats['total'])
                 self.success_stat.value = str(self._stats['success'])
                 self.failure_stat.value = str(self._stats['failure'])
-                self.matrix_total_stat.value = str(getattr(self, "_matrix_total_count", 0))
+                self.pending_stat.value = str(self._stats.get('pending', 0))
             else:
-                self.list_view.controls.extend(self._build_matrix_mode_items())
-                # 矩阵模式下，总数反映全矩阵任务总数
-                self.total_stat.value = str(len(self._matrix_tasks))
-                self.success_stat.value = str(len([f for acc, f in self._matrix_tasks if f.last_sign_status == 'success']))
-                self.failure_stat.value = str(len([f for acc, f in self._matrix_tasks if f.last_sign_status == 'failure']))
-                self.matrix_total_stat.value = str(getattr(self, "_matrix_total_count", 0))
-            
+                self.list_view.controls.extend(self._build_account_queue_items())
+                # 矩阵态统计 = 各账号行账目汇总（与队列所见一致，口径自然闭合）
+                accs = (getattr(self, "_matrix_rollup", None) or {}).get("accounts", [])
+                self.total_stat.value = str(sum(a["total"] for a in accs))
+                self.success_stat.value = str(sum(a["signed"] for a in accs))
+                self.failure_stat.value = str(sum(a["failed_today"] for a in accs))
+                self.pending_stat.value = str(sum(a["pending"] for a in accs))
+
             self.page.update()
 
     def _set_mode(self, mode: str):
@@ -160,11 +153,11 @@ class SignPage:
         self._set_mode("matrix" if self._mode == "single" else "single")
 
     def build(self) -> ft.Control:
-        # 统计文本组件
+        # 统计文本组件（闭合账目：总数 = 成功 + 失败 + 待签，熔断在行内展示）
         self.total_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="primary")
         self.success_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=COLORS.GREEN_ACCENT_400)
         self.failure_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=COLORS.RED_ACCENT_400)
-        self.matrix_total_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="primary")
+        self.pending_stat = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="onSurfaceVariant")
         
         self.mode_text = ft.Text("单账号模式", size=14, weight=ft.FontWeight.BOLD, color="primary")
         self.mode_icon = ft.Icon(PERSON, color="primary", size=18)
@@ -240,8 +233,8 @@ class SignPage:
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
                     ft.VerticalDivider(width=20, color=with_opacity(0.1, "onSurface")),
                     ft.Column([
-                        ft.Text("全矩阵", size=9, weight=ft.FontWeight.BOLD, color="primary"),
-                        self.matrix_total_stat,
+                        ft.Text("待签", size=9, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"),
+                        self.pending_stat,
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
                 ], spacing=10),
             ],
@@ -473,65 +466,81 @@ class SignPage:
             items.append(card)
         return items
 
-    def _build_matrix_mode_items(self):
-        items = []
-        for acc, f in self._matrix_tasks:
-            is_signed = f.last_sign_status == "success"
-            
-            # 账号与代理状态
-            if not acc:
-                acc_name = "未知/已遗失"
-                status_color = "error"
-                acc_status = "ORPHANED"
-                proxy_info = "无"
-                proxy_color = COLORS.RED_ACCENT_400
-            else:
-                acc_name = f"{acc.name} [{acc.user_name}]" if acc.name and acc.user_name and acc.user_name != acc.name else (acc.name or acc.user_name)
-                is_acc_ready = acc.status == "active"
-                status_color = "primary" if is_acc_ready else "error"
-                acc_status = acc.status.upper()
-                proxy_info = f"代理:{acc.proxy_id}" if acc.proxy_id else "裸连"
-                proxy_color = COLORS.GREEN if acc.proxy_id else COLORS.AMBER
+    def _build_account_queue_items(self):
+        """矩阵态账号队列：每账号一行账目 + 挂起/孤儿聚合行。
 
-            card = ft.Container(
+        吧级明细不在矩阵态重复展示——切单账号侧（头部芯片）看更全还能操作；
+        执行中当前账号行高亮、行内计数逐吧跳动（见 _do_sign_matrix 联动）。
+        """
+        rollup = getattr(self, "_matrix_rollup", None) or {
+            "accounts": [], "suspended_forums": 0, "orphan_forums": 0
+        }
+        self._matrix_row_controls = {}
+        items = []
+
+        for a in rollup["accounts"]:
+            done = a["pending"] == 0 and a["total"] > 0
+            if a["proxy_status"] == "ok":
+                proxy_label, proxy_color, proxy_icon = "代理", COLORS.GREEN, VPN_LOCK
+            elif a["proxy_status"] == "suspended":
+                proxy_label, proxy_color, proxy_icon = "代理失效", COLORS.RED_ACCENT_400, VPN_LOCK
+            else:
+                proxy_label, proxy_color, proxy_icon = "裸连", COLORS.AMBER, PUBLIC
+
+            counts_text = ft.Text(
+                f"已签 {a['signed']}  待签 {a['pending']}" + (f"  熔断 {a['banned']}" if a["banned"] else ""),
+                size=11, color="onSurfaceVariant",
+            )
+            status_icon = ft.Icon(
+                CHECK_CIRCLE if done else PLAY_ARROW_ROUNDED,
+                color=COLORS.GREEN_ACCENT_400 if done else "primary", size=20,
+            )
+            row = ft.Container(
                 content=ft.Row([
-                    ft.Icon(
-                        GROUP_WORK_ROUNDED if is_signed else RADIO_BUTTON_UNCHECKED,
-                        color=status_color if not is_signed else "green",
-                        size=20
+                    status_icon,
+                    ft.Text(a["name"], size=13, weight=ft.FontWeight.W_600, expand=True),
+                    ft.Container(
+                        content=ft.Row(
+                            [ft.Icon(proxy_icon, size=10, color="white"),
+                             ft.Text(proxy_label, size=9, color="white")],
+                            spacing=2,
+                        ),
+                        bgcolor=proxy_color,
+                        padding=ft.padding.symmetric(horizontal=5, vertical=2),
+                        border_radius=4,
                     ),
-                    ft.Column([
-                        ft.Row([
-                            ft.Text(f.fname, size=14, weight=ft.FontWeight.W_500),
-                            ft.Container(
-                                content=ft.Text(f"负责账号: {acc_name}", size=9, color="white"),
-                                bgcolor=with_opacity(0.4, status_color),
-                                padding=ft.padding.symmetric(horizontal=6, vertical=2),
-                                border_radius=4,
-                            ),
-                        ], spacing=8),
-                        ft.Row([
-                            ft.Text(f"等级: LV.{f.level} | 状态: {acc_status}", size=10, color="error" if status_color == "error" else "onSurfaceVariant"),
-                            ft.Container(
-                                content=ft.Row([
-                                    ft.Icon(PUBLIC if proxy_info == "裸连" else VPN_LOCK, size=9, color="white"),
-                                    ft.Text(proxy_info, size=9, color="white"),
-                                ], spacing=2),
-                                bgcolor=proxy_color,
-                                padding=ft.padding.symmetric(horizontal=4, vertical=1),
-                                border_radius=4
-                            )
-                        ], spacing=10),
-                    ], expand=True, spacing=4),
-                    ft.Icon(CHECK_CIRCLE if is_signed else PENDING_OUTLINED, 
-                           color="green" if is_signed else "onSurfaceVariant", size=18),
-                ]),
-                bgcolor=with_opacity(0.02, "primary") if is_signed else with_opacity(0.01, "onSurface"),
+                    counts_text,
+                ], spacing=10),
+                bgcolor=with_opacity(0.02, "primary") if done else with_opacity(0.01, "onSurface"),
                 padding=10,
                 border_radius=8,
                 border=ft.border.all(1, with_opacity(0.05, "onSurface")),
             )
-            items.append(card)
+            self._matrix_row_controls[a["account_id"]] = {
+                "row": row, "counts": counts_text, "icon": status_icon,
+            }
+            items.append(row)
+
+        if rollup.get("suspended_forums"):
+            items.append(ft.Container(
+                content=ft.Row([
+                    ft.Icon(PAUSE_CIRCLE_OUTLINED, color="error", size=18),
+                    ft.Text("挂起/封禁账号", size=12, color="error", expand=True),
+                    ft.Text(f"{rollup['suspended_forums']} 吧不参与执行", size=10, color="onSurfaceVariant"),
+                ], spacing=10),
+                bgcolor=with_opacity(0.03, "error"),
+                padding=10, border_radius=8,
+            ))
+        if rollup.get("orphan_forums"):
+            items.append(ft.Container(
+                content=ft.Row([
+                    ft.Icon(PERSON_OFF, color="onSurfaceVariant", size=18),
+                    ft.Text("孤儿数据（账号已删除）", size=12, color="onSurfaceVariant", expand=True),
+                    ft.Text(f"{rollup['orphan_forums']} 吧仅存历史", size=10, color="onSurfaceVariant"),
+                ], spacing=10),
+                bgcolor=with_opacity(0.01, "onSurface"),
+                padding=10, border_radius=8,
+            ))
         return items
 
     async def _do_sync(self, e):
@@ -670,6 +679,12 @@ class SignPage:
         d_min, d_max = self._validated_delay(self.delay_min_input.value, self.delay_max_input.value, (5.0, 15.0))
         ad_min, ad_max = self._validated_delay(self.acc_delay_min_input.value, self.acc_delay_max_input.value, (30.0, 120.0))
 
+        # 执行期账号队列行内计数基线（从点击时 rollup 起算）
+        self._matrix_live = {
+            a["account_id"]: {"signed": a["signed"], "pending": a["pending"], "total": a["total"], "banned": a["banned"]}
+            for a in rollup["accounts"]
+        }
+
         # 矩阵模式：分母 = 点击时实时全矩阵待签数（与核心流剔除口径一致，进度能走满）
         total_est = max(pending_total, 1)
         current_task_idx = 0
@@ -687,6 +702,26 @@ class SignPage:
 
                     self.progress_bar.value = progress
                     self.status_text.value = f"[{current_task_idx}] 正在签到: {result.get('fname')} (账号: {result.get('account_name')})"
+
+                    # 账号队列行内联动：当前账号行高亮 + 计数逐吧跳动
+                    aid = result.get("account_id")
+                    live = self._matrix_live.get(aid)
+                    row_ctl = self._matrix_row_controls.get(aid)
+                    if live and row_ctl:
+                        live["pending"] = max(live["pending"] - 1, 0)
+                        if result.get("success"):
+                            live["signed"] += 1
+                        suffix = f"  熔断 {live['banned']}" if live.get("banned") else ""
+                        row_ctl["counts"].value = f"已签 {live['signed']}  待签 {live['pending']}{suffix}"
+                        done = live["pending"] == 0 and live["total"] > 0
+                        row_ctl["icon"].name = CHECK_CIRCLE if done else PLAY_ARROW_ROUNDED
+                        row_ctl["icon"].color = COLORS.GREEN_ACCENT_400 if done else "primary"
+                        for rid, ctl in self._matrix_row_controls.items():
+                            ctl["row"].bgcolor = (
+                                with_opacity(0.06, "primary") if rid == aid and live["pending"] > 0
+                                else (with_opacity(0.02, "primary") if self._matrix_live[rid]["pending"] == 0 and self._matrix_live[rid]["total"] > 0
+                                      else with_opacity(0.01, "onSurface"))
+                            )
 
                     # --- 方案 A: 跨页面进度广播 (矩阵模式) ---
                     self.page.pubsub.send_all_on_topic("sign_progress", {

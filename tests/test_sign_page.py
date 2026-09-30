@@ -108,14 +108,18 @@ class TestSignPageLoadData:
         assert sign_page.success_stat.value == "1"
         assert sign_page.failure_stat.value == "1"
 
-    async def test_load_matrix_total_unique_fnames(self, sign_page, db):
-        """全矩阵统计 = 所有账号去重后的贴吧名数"""
-        await _add_account_with_forum(db, "acc1", [(1, "alpha", None), (2, "beta", None)])
-        await _add_account_with_forum(db, "acc2", [(1, "alpha", None), (3, "gamma", None)])
+    async def test_load_matrix_stats_from_rollup(self, sign_page, db):
+        """矩阵态统计 = rollup 各账号行汇总（口径闭合：成功+失败+待签=总数）"""
+        await _add_account_with_forum(db, "acc1", [(1, "alpha", "success"), (2, "beta", "failure")])
+        await _add_account_with_forum(db, "acc2", [(1, "alpha", None)])
 
         await sign_page.load_data()
+        sign_page._toggle_mode(None)
 
-        assert sign_page.matrix_total_stat.value == "3"  # alpha/beta/gamma 去重
+        assert sign_page.total_stat.value == "3"
+        assert sign_page.success_stat.value == "1"
+        assert sign_page.failure_stat.value == "1"
+        assert sign_page.pending_stat.value == "1"
 
     async def test_load_daemon_settings(self, sign_page, db):
         import json
@@ -181,57 +185,63 @@ class TestMatrixModeStats:
         assert sign_page.failure_stat.value == "1"
 
 
-# ========== 矩阵列表账号状态显示 (BUG 回归) ==========
+# ========== 矩阵态账号队列 (整改 #11/#12) ==========
 
 
 @pytest.mark.asyncio
-class TestMatrixAccountStatusDisplay:
-    def _extract_badge(self, card):
-        # card.content = Row[Icon, Column[Row[Text, Container(badge)], Row[...]], Icon]
-        row = card.content
-        col = row.controls[1]
-        return col.controls[0].controls[1]
+class TestMatrixAccountQueue:
+    def _row_texts(self, items):
+        """提取每行的主要文本（账号名/聚合行标签）"""
+        import flet as ft
 
-    async def test_active_account_shows_primary(self, sign_page, db):
-        """回归: 系统账号状态取值为 active/pending/..., 不存在 ready;
-        active 账号徽标应为 primary 色而非 error 色"""
-        await _add_account_with_forum(db, "acc_active", [(1, "f1", None)])
+        texts = []
+        for card in items:
+            row = card.content
+            for c in row.controls:
+                if isinstance(c, ft.Text) and c.value:
+                    texts.append(c.value)
+        return texts
+
+    async def test_queue_rows_and_stats_closure(self, sign_page, db):
+        """行数 = 可用账号数 + 聚合行；统计与队列所见一致"""
+        acc1 = await _add_account_with_forum(db, "q_active", [(1, "q1", "success"), (2, "q2", None)])
+        acc2 = await _add_account_with_forum(db, "q_susp", [(3, "q3", None)])
+        await db.update_account(acc2.id, status="suspended")
+
         await sign_page.load_data()
+        sign_page._set_mode("matrix")
 
-        items = sign_page._build_matrix_mode_items()
-        badge = self._extract_badge(items[0])
-        assert badge.bgcolor == with_opacity(0.4, "primary"), (
-            "active 账号不应显示为 ERROR 红色状态"
-        )
+        items = sign_page._build_account_queue_items()
+        texts = self._row_texts(items)
+        # 可用账号 1 行 + 挂起聚合 1 行（无孤儿）
+        assert len(items) == 2
+        assert any("q_active" in t for t in texts)
+        assert any("挂起/封禁账号" in t for t in texts)
 
-    async def test_suspended_account_shows_error(self, sign_page, db):
-        acc = await _add_account_with_forum(db, "acc_susp", [(2, "f2", None)])
-        await db.update_account(acc.id, status="suspended")
-        await sign_page.load_data()
+        # 统计闭合：成功 + 失败 + 待签 = 总数（仅可用账号口径）
+        assert sign_page.total_stat.value == "2"
+        assert sign_page.success_stat.value == "1"
+        assert sign_page.failure_stat.value == "0"
+        assert sign_page.pending_stat.value == "1"
 
-        items = sign_page._build_matrix_mode_items()
-        badge = self._extract_badge(items[0])
-        assert badge.bgcolor == with_opacity(0.4, "error")
-
-    async def test_orphaned_forum_labeled(self, sign_page, db):
-        """账号已遗失的贴吧应显示为 未知/已遗失 (防御分支)"""
+    async def test_orphan_forums_aggregate_row(self, sign_page, db):
+        """账号已删的吧聚合为孤儿行，不再平铺成卡片"""
         from sqlalchemy import delete as sa_delete
         from tieba_mecha.db.models import Account
 
         acc = await _add_account_with_forum(db, "acc_gone", [(3, "f3", None)])
-        await sign_page.load_data()
-
-        # 绕过 delete_account 的级联删除, 直接移除账号行以模拟孤儿贴吧
         async with db.async_session() as session:
             await session.execute(sa_delete(Account).where(Account.id == acc.id))
             await session.commit()
 
         await sign_page.load_data()
-        items = sign_page._build_matrix_mode_items()
-        row = items[0].content
-        col = row.controls[1]
-        badge_text = col.controls[0].controls[1].content.value
-        assert "未知" in badge_text or "遗失" in badge_text
+        sign_page._set_mode("matrix")
+
+        items = sign_page._build_account_queue_items()
+        texts = self._row_texts(items)
+        assert any("孤儿数据" in t for t in texts)
+        # 无可用账号 → 0 账号行 + 0 挂起行 + 1 孤儿行
+        assert len(items) == 1
 
 
 # ========== 守护进程配置保存 ==========
