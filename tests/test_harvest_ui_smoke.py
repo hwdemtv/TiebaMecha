@@ -69,10 +69,9 @@ class TestHarvestViewControls:
 
         await bp._refresh_material_table()
 
-        assert len(bp._harvest_table.rows) == 1
+        assert len(bp._material_table.rows) == 1
         assert "🌾采集(2)" in bp._stats_text.value
-        # 采集视图：宿主行只挂采集表（摘除制）
-        assert bp._table_row.controls == [bp._harvest_table]
+        # 静态单表：rows 数据填充（列结构永不改动，flet 动态换表 patch 不可靠）
         # 采集视图隐藏排期池专属批量按钮
         assert bp._bulk_reset_btn.visible is False
         assert bp._bulk_ai_btn.visible is False
@@ -86,8 +85,8 @@ class TestHarvestViewControls:
         bp._material_view = "schedule"
         await bp._refresh_material_table()
         assert bp._bulk_reset_btn.visible is True
-        # 切回排期池：宿主行换回排期池表（先去采集视图再回来，验证摘除可逆）
-        assert bp._table_row.controls == [bp._material_table]
+        # 排期池视图：同一张表填排期池行（切换=换数据不换结构）
+        assert bp._material_table.rows == []
 
     def test_harvest_row_states_pure(self, bp):
         # 行状态判定抽成纯函数（不依赖 flet 控件内部结构，桩环境下同样可测）
@@ -136,7 +135,8 @@ class TestHarvestViewControls:
         await bp._on_material_view_click("harvest")
         assert bp._material_view == "harvest"
         assert bp._material_page == 1 and bp._selected_material_ids == set()
-        assert bp._table_row.controls == [bp._harvest_table]
+        # 静态单表：切换只换 rows（采集 0 条 → 空 rows）
+        assert bp._material_table.rows == []
         # 同视图再点：no-op
         bp._material_page = 3
         await bp._on_material_view_click("harvest")
@@ -144,26 +144,22 @@ class TestHarvestViewControls:
 
         await bp._on_material_view_click("schedule")
         assert bp._material_view == "schedule"
-        assert bp._table_row.controls == [bp._material_table]
 
-    def test_update_view_buttons_text_and_style(self, bp):
-        # 计数进按钮文本；激活态样式切换（桩环境直接属性赋值可读；
-        # 桩 ButtonStyle 按 dict 存 kwarg，真 flet 是属性——双形态取值）
-        def _bgcolor(style):
-            if isinstance(style, dict):
-                return style.get("bgcolor")
-            return getattr(style, "bgcolor", None)
-
+    def test_update_view_buttons_text_and_state(self, bp):
+        # 计数进按钮文本；激活态 bgcolor/color 简单属性切换
+        # （style 对象替换在 flet 0.23.2 patch 不可靠，已弃用；桩 ButtonStyle 是 dict，不再断言它）
         bp._update_view_buttons(pending=3, failed=1, harvested=5)
         assert bp._view_btn_schedule.text == "⏳ 排期池(4)"
         assert bp._view_btn_harvest.text == "🌾 采集待审(5)"
-        assert _bgcolor(bp._view_btn_schedule.style) == "primary"
-        assert _bgcolor(bp._view_btn_harvest.style) is None
+        assert bp._view_btn_schedule.bgcolor == "primary"
+        assert bp._view_btn_schedule.color == "white"
+        assert bp._view_btn_harvest.bgcolor is None
 
         bp._material_view = "harvest"
         bp._update_view_buttons(pending=3, failed=1, harvested=5)
-        assert _bgcolor(bp._view_btn_harvest.style) == "primary"
-        assert _bgcolor(bp._view_btn_schedule.style) is None
+        assert bp._view_btn_harvest.bgcolor == "primary"
+        assert bp._view_btn_harvest.color == "white"
+        assert bp._view_btn_schedule.bgcolor is None
 
 
 class TestSettingsHarvestFields:

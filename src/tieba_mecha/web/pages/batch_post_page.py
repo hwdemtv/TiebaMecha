@@ -685,16 +685,13 @@ class BatchPostPage:
                 order_desc=True,  # 新采的排前面，先审新鲜的
             )
             self._materials = mat_items  # 全选/编辑弹窗等按 id 复用
-            # 视图切换用控件摘除制（visible=False 在 ListView/Row 内对 DataTable 不可靠，
-            # flet 0.23.2 实测表头仍渲染）——不显示的表格直接离开控件树
-            self._table_row.controls = [self._harvest_table]
             harvest_rows = []
             for m in mat_items:
                 try:
                     harvest_rows.append(self._build_harvest_row(m))
                 except Exception:
                     continue
-            self._harvest_table.rows = harvest_rows
+            self._material_table.rows = harvest_rows
             # 采集视图只保留批量删除（重置/自顶/AI改写是排期池语义）
             self._bulk_reset_btn.visible = False
             self._bulk_bump_btn.visible = False
@@ -702,13 +699,13 @@ class BatchPostPage:
             self._update_material_pagination()
             self._update_bulk_visibility()
             try:
-                self._table_row.update()
+                if hasattr(self, "_material_table"):
+                    self._material_table.update()
             except Exception:
                 pass
             return
 
         # --- 排期池分页查询（默认视图） ---
-        self._table_row.controls = [self._material_table]
         self._bulk_reset_btn.visible = True
         self._bulk_bump_btn.visible = True
         self._bulk_ai_btn.visible = True
@@ -722,55 +719,7 @@ class BatchPostPage:
         pending_rows = []
         for m in mat_items:
             try:
-                m_title = m.title or ""
-                m_content = m.content or ""
-                display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
-                display_c = m_content if len(m_content) <= 18 else m_content[:18] + "..."
-                ai_text = "✨独立改写" if m.ai_status == "rewritten" else "无处理"
-                ai_color = "primary" if m.ai_status == "rewritten" else "onSurfaceVariant"
-                status_color = "onSurfaceVariant" if m.status == "pending" else "error"
-                status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
-                status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
-                pending_rows.append(
-                    ft.DataRow(
-                        selected=m.id in self._selected_material_ids,
-                        on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
-                        cells=[
-                            ft.DataCell(ft.Text(str(m.id))),
-                            ft.DataCell(ft.Container(ft.Text(display_t, size=12, tooltip=m_title), width=170)),
-                            ft.DataCell(ft.Container(ft.Text(display_c, size=12, tooltip=m_content), width=200)),
-                            ft.DataCell(
-                                ft.Row([
-                                    ft.Icon(status_icon, color=status_color, size=14),
-                                    ft.Text(status_text, color=status_color, size=12),
-                                    ft.IconButton(
-                                        icons.INFO,
-                                        icon_size=14,
-                                        icon_color=status_color,
-                                        tooltip="点击查看拒稿原因详情",
-                                        data={
-                                            "error": m.last_error,
-                                            "account_id": m.posted_account_id,
-                                            "fname": m.posted_fname
-                                        },
-                                        on_click=self._show_rejection_detail,
-                                        visible=(m.status == "failed")
-                                    )
-                                ], spacing=4)
-                            ),
-                            ft.DataCell(ft.Row([
-                                ft.Text(ai_text, color=ai_color, size=12),
-                                ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
-                            ], spacing=2)),
-                            ft.DataCell(ft.Row([
-                                ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
-                                ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
-                                ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
-                            ], spacing=0)),
-                            ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8, tooltip="待发布成功后，系统将自动开始循环回帖流程")),
-                        ]
-                    )
-                )
+                pending_rows.append(self._build_schedule_row(m))
             except Exception as ex:
                 continue
 
@@ -1085,10 +1034,63 @@ class BatchPostPage:
 
     # ========== 采集待审 (harvested) 视图 ==========
 
-    def _build_harvest_row(self, m) -> ft.DataRow:
-        """采集物料行：源链/提取码悬停可见；处置=编辑/放行/跳过链接/删除"""
+    def _build_schedule_row(self, m) -> ft.DataRow:
+        """排期池物料行（并集列：ID/标题/正文/状态/来源吧/原链/类型/AI/操作/自顶，采集专属列填"-"）"""
         m_title = m.title or ""
-        display_t = m_title if len(m_title) <= 18 else m_title[:18] + "..."
+        display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
+        display_c = (m.content or "")[:18]
+        ai_text = "✨独立改写" if m.ai_status == "rewritten" else "无处理"
+        ai_color = "primary" if m.ai_status == "rewritten" else "onSurfaceVariant"
+        status_color = "onSurfaceVariant" if m.status == "pending" else "error"
+        status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
+        status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
+        return ft.DataRow(
+            selected=m.id in self._selected_material_ids,
+            on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
+            cells=[
+                ft.DataCell(ft.Text(str(m.id))),
+                ft.DataCell(ft.Container(ft.Text(display_t, size=12, tooltip=m_title), width=170)),
+                ft.DataCell(ft.Container(ft.Text(display_c, size=12, tooltip=(m.content or "")), width=200)),
+                ft.DataCell(
+                    ft.Row([
+                        ft.Icon(status_icon, color=status_color, size=14),
+                        ft.Text(status_text, color=status_color, size=12),
+                        ft.IconButton(
+                            icons.INFO,
+                            icon_size=14,
+                            icon_color=status_color,
+                            tooltip="点击查看拒稿原因详情",
+                            data={
+                                "error": m.last_error,
+                                "account_id": m.posted_account_id,
+                                "fname": m.posted_fname
+                            },
+                            on_click=self._show_rejection_detail,
+                            visible=(m.status == "failed")
+                        )
+                    ], spacing=4)
+                ),
+                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
+                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
+                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
+                ft.DataCell(ft.Row([
+                    ft.Text(ai_text, color=ai_color, size=12),
+                    ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
+                ], spacing=2)),
+                ft.DataCell(ft.Row([
+                    ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
+                    ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
+                    ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
+                ], spacing=0)),
+                ft.DataCell(ft.Switch(value=m.is_auto_bump, data=m.id, on_change=self._on_material_toggle_bump, scale=0.8, tooltip="待发布成功后，系统将自动开始循环回帖流程")),
+            ]
+        )
+
+    def _build_harvest_row(self, m) -> ft.DataRow:
+        """采集物料行（并集列：ID/标题/正文/状态/来源吧/原链/类型/AI/操作/自顶；AI/自顶列填"-"）"""
+        m_title = m.title or ""
+        display_t = m_title if len(m_title) <= 15 else m_title[:15] + "..."
+        display_c = (m.content or "")[:18]
         _STATE_DISPLAY = {
             HARVEST_STATE_PENDING_TRANSFER: ("待转存", "orange", icons.HOURGLASS_EMPTY),
             HARVEST_STATE_TRANSFERRED: ("已转存·待审核", "primary", icons.CHECK_CIRCLE_ROUNDED),
@@ -1104,13 +1106,15 @@ class BatchPostPage:
             cells=[
                 ft.DataCell(ft.Text(str(m.id))),
                 ft.DataCell(ft.Container(ft.Text(display_t, size=12, tooltip=m_title), width=170)),
-                ft.DataCell(ft.Text(m.source_fname or "-", size=12)),
-                ft.DataCell(ft.Container(ft.Text(link_disp, size=11, tooltip=link_tooltip), width=210)),
-                ft.DataCell(ft.Text(m.source_link_type or "other", size=12)),
+                ft.DataCell(ft.Container(ft.Text(display_c, size=12, tooltip=(m.content or "")), width=200)),
                 ft.DataCell(ft.Row([
                     ft.Icon(st_icon, color=st_color, size=14),
                     ft.Text(st_text, color=st_color, size=12),
                 ], spacing=4)),
+                ft.DataCell(ft.Text(m.source_fname or "-", size=12)),
+                ft.DataCell(ft.Container(ft.Text(link_disp, size=11, tooltip=link_tooltip), width=210)),
+                ft.DataCell(ft.Text(m.source_link_type or "other", size=12)),
+                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
                 ft.DataCell(ft.Row([
                     ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="先修剪文案再放行"),
                     ft.IconButton(icons.CHECK_CIRCLE_ROUNDED, icon_color="green", data=m.id,
@@ -1121,6 +1125,7 @@ class BatchPostPage:
                                   tooltip="跳过链接：弃用别人的链（不可恢复），降级纯内容帖放行"),
                     ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
                 ], spacing=0)),
+                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
             ],
         )
 
@@ -1142,22 +1147,23 @@ class BatchPostPage:
         await self._refresh_material_table()
 
     def _update_view_buttons(self, pending: int, failed: int, harvested: int):
-        """视图按钮的计数与激活态同步（激活=实底，非激活=描边）"""
+        """视图按钮的计数与激活态同步——激活态用 bgcolor/color 简单属性赋值
+        （style 对象整体替换的 patch 在 flet 0.23.2 不可靠，实测两按钮同亮）"""
         if not hasattr(self, "_view_btn_schedule"):
             return
         self._view_btn_schedule.text = f"⏳ 排期池({pending + failed})"
         self._view_btn_harvest.text = f"🌾 采集待审({harvested})"
         schedule_active = getattr(self, "_material_view", "schedule") == "schedule"
-        self._view_btn_schedule.style = (
-            ft.ButtonStyle(bgcolor="primary", color="white")
-            if schedule_active
-            else ft.ButtonStyle(color="onSurfaceVariant")
-        )
-        self._view_btn_harvest.style = (
-            ft.ButtonStyle(color="onSurfaceVariant")
-            if schedule_active
-            else ft.ButtonStyle(bgcolor="primary", color="white")
-        )
+        if schedule_active:
+            self._view_btn_schedule.bgcolor = "primary"
+            self._view_btn_schedule.color = "white"
+            self._view_btn_harvest.bgcolor = None
+            self._view_btn_harvest.color = "onSurfaceVariant"
+        else:
+            self._view_btn_schedule.bgcolor = None
+            self._view_btn_schedule.color = "onSurfaceVariant"
+            self._view_btn_harvest.bgcolor = "primary"
+            self._view_btn_harvest.color = "white"
         try:
             self._view_btn_schedule.update()
             self._view_btn_harvest.update()
@@ -2090,14 +2096,19 @@ class BatchPostPage:
         )
         self._add_btn = ft.IconButton(icon=icons.ADD_BOX, icon_color="primary", on_click=self._add_material_row, tooltip="写好就塞进去")
         
+        # 物料池单表（静态列=排期池∪采集并集，视图切换只换 rows 数据——
+        # 动态换表/换列/换 style 在 flet 0.23.2 的客户端 patch 不可靠，连踩四坑后的定论）
         self._material_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("ID", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("基准标题", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("文案引擎池", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("发布状态", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("AI附魔", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("生命控制", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("标题", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("正文摘要", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("状态", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("来源吧", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("原链(悬停看提取码)", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("类型", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("AI", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(ft.Text("操作", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("自顶", size=11, weight=ft.FontWeight.BOLD)),
             ],
             rows=[],
@@ -2107,40 +2118,19 @@ class BatchPostPage:
             on_select_all=self._on_material_select_all,
         )
 
-        # 采集待审视图：harvested 物料（别人的链，转存替换/审核后才进排期池）
-        self._harvest_table = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Text("ID", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("来源标题", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("来源吧", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("原链(悬停看提取码)", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("类型", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("采集状态", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("处置", size=11, weight=ft.FontWeight.BOLD)),
-            ],
-            rows=[],
-            heading_row_height=40, data_row_min_height=45, data_row_max_height=60,
-            column_spacing=18,
-            show_checkbox_column=True,
-            on_select_all=self._on_material_select_all,
-        )
-
-        # 表格宿主行：排期池/采集两张表共用，视图切换直接替换 controls
-        # （visible=False 在 ListView/Row 内对 DataTable 不可靠，flet 0.23.2 实测表头仍渲染，
-        #  故不显示的表格必须摘出控件树）
+        # 表格宿主行：仅维持横向滚动结构，controls 初始一次、永不替换
         self._table_row = ft.Row([self._material_table], scroll=ft.ScrollMode.ADAPTIVE)
 
         # 物料池视图切换：排期池(pending/failed) ↔ 采集待审(harvested)——并排双按钮
+        # （激活态走 bgcolor/color 简单属性，不用 style 对象替换——后者 patch 不可靠）
         self._material_view = "schedule"
-        _VIEW_ACTIVE = ft.ButtonStyle(bgcolor="primary", color="white")
-        _VIEW_IDLE = ft.ButtonStyle(color="onSurfaceVariant")
         self._view_btn_schedule = ft.FilledButton(
-            "⏳ 排期池", style=_VIEW_ACTIVE,
+            "⏳ 排期池", bgcolor="primary", color="white",
             on_click=lambda e: self.page.run_task(self._on_material_view_click, "schedule"),
             tooltip="待发/失败物料的排期池（原物料列表）",
         )
         self._view_btn_harvest = ft.OutlinedButton(
-            "🌾 采集待审", style=_VIEW_IDLE,
+            "🌾 采集待审", color="onSurfaceVariant",
             on_click=lambda e: self.page.run_task(self._on_material_view_click, "harvest"),
             tooltip="养号采集的热门资源物料（转存替换/审核后才进排期池）",
         )
