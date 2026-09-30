@@ -18,9 +18,12 @@ async def get_db():
     return await get_db_original()
 
 # 默认授权服务器列表 (支持容灾)
+# 优先级说明：km/kami 为阿里云 VPS nginx 反代（国内直连快，但上游依赖 VPS→Cloudflare 链路）；
+# api-worker 为 Cloudflare 自定义域（国内多数网络可达）；workers.dev 在大陆被墙，仅供海外/代理环境兜底
 DEFAULT_LICENSE_SERVERS = [
     "https://km.hwdemtv.com",
     "https://kami.hwdemtv.com",
+    "https://api-worker.hwdemtv.com",
     "https://hw-license-center.hwdemtv.workers.dev"
 ]
 

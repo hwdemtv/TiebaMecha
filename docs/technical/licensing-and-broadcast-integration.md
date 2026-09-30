@@ -64,14 +64,15 @@
 
 ## 4. 容灾机制 (Failover Handling)
 
-系统内置了三层防御式探测路径，确保护持握手的鲁棒性：
+系统内置了四层防御式探测路径，确保护持握手的鲁棒性：
 
 1.  **Tier 1 (主控机)**：`km.hwdemtv.com`
-2.  **Tier 2 (备机)**：`kami.hwdemtv.com`
-3.  **Tier 3 (边缘侧)**：`hw-license-center.hwdemtv.workers.dev`
+2.  **Tier 2 (备机)**：`kami.hwdemtv.com`（与 Tier 1 同一台阿里云 VPS，共用一张双域 SAN 证书；覆盖证书/配置层故障，不覆盖整机宕机）
+3.  **Tier 3 (边缘侧-自定义域)**：`api-worker.hwdemtv.com`（Cloudflare Worker 自定义域，解析到 CF 边缘 IP，大陆直连可达；跨机容灾，VPS 整机宕机时仍可用）
+4.  **Tier 4 (边缘侧-兜底)**：`hw-license-center.hwdemtv.workers.dev`（workers.dev 域名在大陆被 DNS 污染，仅海外/代理环境可达）
 
 **探测顺序与优先级**：
-`数据库自定义 URL (license_server_url) > Tier 1 > Tier 2 > Tier 3`
+`数据库自定义 URL (license_server_url) > Tier 1 > Tier 2 > Tier 3 > Tier 4`
 
 > [!WARNING]
 > **失效清理机制**：若数据库中存储的自定义域名已失效（如 `license.hubinwei.top`），系统会因其优先级最高而持续报错。此时必须在数据库 `settings` 表中清空该字段，以释放优先级并让系统回退至内置容灾链路。
