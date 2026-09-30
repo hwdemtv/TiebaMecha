@@ -267,7 +267,8 @@ def sign_run(
             success_count = 0
             fail_count = 0
 
-            async for result in sign.sign_all_forums(db, delay_min=delay, delay_max=delay + 2.0):
+            # 手动意图：无视拟人化跳过骰子（CLI 补扫=用户明确要求签齐）
+            async for result in sign.sign_all_forums(db, delay_min=delay, delay_max=delay + 2.0, ignore_skip=True):
                 if result.success:
                     console.print(f"[green]✓ {result.fname}[/green]")
                     success_count += 1

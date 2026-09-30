@@ -742,6 +742,58 @@ class TestBatch1CoreFixes:
         assert expected_order(other) != expected_order(base)
 
 
+    async def test_manual_run_bypasses_skip_dice(self, db):
+        """整改#14: ignore_skip=True 时跳过率 1.0 也全部照签（手动=明确意图）；
+        守护路径默认掷骰不变（由 TestHumanizedSkip 覆盖）"""
+        acc = await self._add_account_with_forums(db, 2)
+        client = make_client()
+
+        with patch("tieba_mecha.core.sign.create_client", return_value=client), \
+             patch("tieba_mecha.core.sign._get_skip_probability", AsyncMock(return_value=1.0)), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            results = [r async for r in sign_all_forums(db, delay_min=0, delay_max=0, ignore_skip=True)]
+
+        assert len(results) == 2 and all(r.success for r in results)
+        assert client.sign_forum.call_count == 2
+
+    async def test_stop_event_aborts_between_forums(self, db):
+        """整改#16: 停止事件置位后下个循环顶即退出，不再签后续贴吧"""
+        await self._add_account_with_forums(db, 3)
+        client = make_client()
+        stop = asyncio.Event()
+        collected = []
+
+        with patch("tieba_mecha.core.sign.create_client", return_value=client), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            async for r in sign_all_forums(db, delay_min=0, delay_max=0, stop_event=stop):
+                collected.append(r)
+                stop.set()
+
+        assert len(collected) == 1, "首个吧之后应立即中止"
+        client.sign_forum.assert_awaited_once()
+
+    async def test_stop_event_prevents_account_switch(self, db):
+        """整改#16: 矩阵流账号切换延迟被中止后不再进入下一账号"""
+        from tieba_mecha.core.account import add_account
+
+        for i in range(2):
+            acc = await add_account(db=db, name=f"acc_stop{i}", bduss="a" * 192, stoken="b" * 64)
+            await db.add_forum(fid=i + 1, fname=f"stop_forum_{i}", account_id=acc.id)
+        await db.set_setting("sign_skip_probability", "0")
+
+        client = make_client()
+        stop = asyncio.Event()
+        names = []
+
+        with patch("tieba_mecha.core.sign.create_client", return_value=client), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            async for r in sign_all_accounts(db, 0, 0, 0, 0, stop_event=stop):
+                names.append(r.get("account_name"))
+                stop.set()
+
+        assert len(names) == 1, "第一账号第一个吧后应中止，不切换账号"
+
+
 @pytest.mark.asyncio
 class TestSignRollup:
     async def test_rollup_accounts_and_aggregates(self, db):

@@ -372,13 +372,20 @@ class ForumRepository:
             await session.commit()
             await session.refresh(log)
             return log
-    async def get_sign_logs(self, limit: int = 100, forum_id: int | None = None) -> list[SignLog]:
-        """获取签到日志"""
+    async def get_sign_logs(
+        self,
+        limit: int = 100,
+        forum_id: int | None = None,
+        since: datetime | None = None,
+    ) -> list[SignLog]:
+        """获取签到日志（since 只取该时刻之后的记录，供当日原因判定）"""
         async with self.async_session() as session:
             stmt = select(SignLog)
             if forum_id is not None:
                 stmt = stmt.where(SignLog.forum_id == forum_id)
-            
+            if since is not None:
+                stmt = stmt.where(SignLog.signed_at >= since)
+
             result = await session.execute(
                 stmt.order_by(SignLog.signed_at.desc()).limit(limit)
             )

@@ -95,7 +95,21 @@ def _parse_sign_result(result_raw):
     return False, str(err) if err else "签到失败", is_already_signed, is_forum_invalid, err_code
 
 
-async def _browse_disguise(client, fname: str, probability: float = 0.20):
+async def _interruptible_sleep(stop_event, seconds: float) -> bool:
+    """可中止睡眠：stop_event 置位时立即返回 True（调用方应尽快收尾退出）。"""
+    if stop_event is None:
+        await asyncio.sleep(seconds)
+        return False
+    if stop_event.is_set():
+        return True
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def _browse_disguise(client, fname: str, probability: float = 0.20, stop_event=None):
     """
     [防检测] 签到前随机浏览伪装：以一定概率先读吧首页并抽 1 帖深读，
     模拟真实用户"先逛再签"。浏览失败静默忽略，不影响签到主流程。
@@ -108,7 +122,8 @@ async def _browse_disguise(client, fname: str, probability: float = 0.20):
             sample = random.sample(threads.objs[:5], min(1, len(threads.objs[:5])))
             for t in sample:
                 await client.get_posts(t.tid, pn=1)
-                await asyncio.sleep(random.uniform(3, 8))
+                if await _interruptible_sleep(stop_event, random.uniform(3, 8)):
+                    return
     except Exception:
         pass
 
@@ -323,13 +338,17 @@ async def sign_all_forums(
     db: Database,
     delay_min: float = 5.0,
     delay_max: float = 15.0,
+    ignore_skip: bool = False,
+    stop_event: asyncio.Event | None = None,
 ) -> AsyncGenerator[SignResult, None]:
     """
     签到所有关注贴吧 (已解决 N+1 痛点)
 
     Args:
         db: 数据库实例
-        delay: 每次签到间隔(秒)
+        delay_min/max: 每次签到间隔(秒)
+        ignore_skip: 手动意图时无视拟人化跳过骰子（守护/自动流保持默认掷骰）
+        stop_event: 置位后在下个间隙快速中止（停止按钮 1-2s 生效）
 
     Yields:
         SignResult: 每个贴吧的签到结果
@@ -363,17 +382,23 @@ async def sign_all_forums(
     # N+1 优化: 在外层建立单一持久化连接池
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for forum in forums:
+            if stop_event is not None and stop_event.is_set():
+                yield SignResult(fname=forum.fname, success=False, message="用户中止")
+                break
+
             # [防检测] 拟人化随机跳过：只落 SignLog 供审计统计，不动贴吧签到战绩
-            if _should_skip_today(account.id, forum.fid, skip_p):
+            if not ignore_skip and _should_skip_today(account.id, forum.fid, skip_p):
                 await db.add_sign_log(forum_id=forum.id, fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
                 await log_info(f"自动签到任务: {forum.fname} | {SIGN_SKIP_MESSAGE}")
                 yield SignResult(fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
-                await asyncio.sleep(random.uniform(delay_min, delay_max))
+                if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
+                    break
                 continue
 
+            aborted = False
             try:
                 # [防检测] 签到前随机浏览伪装（20%概率，模拟真实用户先逛再签到）
-                await _browse_disguise(client, forum.fname)
+                await _browse_disguise(client, forum.fname, stop_event=stop_event)
 
                 # 针对底层网络抖动（如 Can not write request body）增加一次自动重试
                 try:
@@ -406,7 +431,7 @@ async def sign_all_forums(
                     result = SignResult(fname=forum.fname, success=False, message=msg)
             except TiebaServerError as e:
                 await log_warn(f"[{forum.fname}] 触发风控或 API 阻隔 ({e.code})，系统静默退避休眠 60 秒...")
-                await asyncio.sleep(60)
+                aborted = await _interruptible_sleep(stop_event, 60)
                 result = SignResult(fname=forum.fname, success=False, message=f"被风控限流: {e.msg}")
             except (asyncio.CancelledError, concurrent.futures.CancelledError):
                 # 优雅处理 Flet 任务取消
@@ -432,9 +457,11 @@ async def sign_all_forums(
 
             yield result
 
-            # 行为人性化：随机波动延迟
-            sleep_time = random.uniform(delay_min, delay_max)
-            await asyncio.sleep(sleep_time)
+            # 行为人性化：随机波动延迟（可被停止事件快速中止）
+            if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
+                break
+            if aborted:
+                break
 
 
 
@@ -471,6 +498,8 @@ async def sign_all_accounts(
     delay_max: float = 15.0,
     acc_delay_min: float = 30.0,
     acc_delay_max: float = 120.0,
+    ignore_skip: bool = False,
+    stop_event: asyncio.Event | None = None,
 ):
     """
     矩阵全扫签到：遍历所有可用账号，依次完成每个账号下所有贴吧的签到。
@@ -481,6 +510,8 @@ async def sign_all_accounts(
         delay_max: 同账号内，贴吧间最大延迟（秒）
         acc_delay_min: 账号切换间最小延迟（秒），防止关联风险
         acc_delay_max: 账号切换间最大延迟（秒）
+        ignore_skip: 手动意图时无视拟人化跳过骰子（守护/自动流保持默认掷骰）
+        stop_event: 置位后在下个间隙快速中止（停止按钮 1-2s 生效）
 
     Yields:
         dict: {
@@ -562,8 +593,11 @@ async def sign_all_accounts(
         # 每个账号使用单一持久化连接，避免重复创建客户端
         async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
             for forum in forums:
+                if stop_event is not None and stop_event.is_set():
+                    break
+
                 # [防检测] 拟人化随机跳过：只落 SignLog 供审计统计，不动贴吧签到战绩
-                if _should_skip_today(account.id, forum.fid, skip_p):
+                if not ignore_skip and _should_skip_today(account.id, forum.fid, skip_p):
                     await db.add_sign_log(forum_id=forum.id, fname=forum.fname, success=False, message=SIGN_SKIP_MESSAGE)
                     await log_info(f"矩阵签到 [{account.name}] → {forum.fname}: {SIGN_SKIP_MESSAGE}")
                     yield {
@@ -574,12 +608,14 @@ async def sign_all_accounts(
                         "message": SIGN_SKIP_MESSAGE,
                         "proxy_status": proxy_status,
                     }
-                    await asyncio.sleep(random.uniform(delay_min, delay_max))
+                    if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
+                        break
                     continue
 
+                aborted = False
                 try:
                     # [防检测] 签到前随机浏览伪装（20%概率）
-                    await _browse_disguise(client, forum.fname)
+                    await _browse_disguise(client, forum.fname, stop_event=stop_event)
 
                     # 针对底层网络抖动增加一次自动重试
                     try:
@@ -625,12 +661,13 @@ async def sign_all_accounts(
                         "proxy_status": proxy_status,
                     }
 
-                    # 吧间延迟（人性化行为模拟）
-                    await asyncio.sleep(random.uniform(delay_min, delay_max))
+                    # 吧间延迟（人性化行为模拟，可被停止事件快速中止）
+                    if await _interruptible_sleep(stop_event, random.uniform(delay_min, delay_max)):
+                        break
 
                 except TiebaServerError as e:
                     await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 触发风控或 API 阻隔 ({e.code})，退避 60s...")
-                    await asyncio.sleep(60)
+                    aborted = await _interruptible_sleep(stop_event, 60)
                     # 与单账号路径保持一致：风控失败同样落日志并更新贴吧状态
                     await db.add_sign_log(
                         forum_id=forum.id,
@@ -659,14 +696,17 @@ async def sign_all_accounts(
                         "message": str(e),
                         "proxy_status": proxy_status,
                     }
+                if aborted:
+                    break
 
-        # 账号切换延迟（防关联核心防线）
+        # 账号切换延迟（防关联核心防线；停止事件置位则不再进入下一账号）
         if acc_idx < len(accounts) - 1:
             wait = random.uniform(acc_delay_min, acc_delay_max)
             await log_info(
                 f"账号 [{account.name}] 签到完毕，等待 {wait:.1f}s 后切换下一个账号..."
             )
-            await asyncio.sleep(wait)
+            if await _interruptible_sleep(stop_event, wait):
+                break
 
     await log_info("矩阵全扫签到任务全部完成")
 
