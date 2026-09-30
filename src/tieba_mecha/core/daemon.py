@@ -13,8 +13,8 @@ from .auth import get_auth_manager
 from .account import get_account_credentials
 from ..db.crud import get_db
 
-async def do_sign_task():
-    """执行定时签到任务的内部包裹（自适应模式）"""
+async def do_sign_task(attempt: int = 1):
+    """执行定时签到任务的内部包裹（自适应模式；attempt 为遇锁重试计数）"""
     # 触发时间抖动：消除每天精确同分钟的定时指纹（选任务内睡而非改注册，
     # 不动 reload 的 cron 注册逻辑，代价仅是重启丢失当次抖动）
     jitter = random.uniform(0, 600)
@@ -48,10 +48,24 @@ async def do_sign_task():
 
     print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 模式: {mode.upper()} | 吧间延迟: {d_min}-{d_max}s")
 
-    # 与手动签到互斥：定时触发不排队等待（一轮全扫可能长达数小时），
-    # 已有签到流在执行时直接放弃本次触发
+    # 与手动签到互斥：定时触发不排队等待（一轮全扫可能长达数小时）；
+    # 遇锁不再当日放弃——挂 40 分钟一次性重试，至多 3 次（守护缺签事故闭环）
     if sign_flow_lock.locked():
-        print(f"[{datetime.now()}] [DAEMON] 检测到已有签到流在执行 (手动?)，跳过本次定时触发")
+        if attempt >= 3:
+            print(f"[{datetime.now()}] [DAEMON] 定时签到连续 {attempt} 次遇锁，今日放弃（次日按配置恢复）")
+            return
+        retry_at = datetime.now() + timedelta(minutes=40)
+        try:
+            daemon_instance.scheduler.add_job(
+                do_sign_task, 'date', run_date=retry_at,
+                kwargs={"attempt": attempt + 1},
+                id=f"sign_retry_{datetime.now().date().isoformat()}",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            print(f"[{datetime.now()}] [DAEMON] 检测到已有签到流在执行 (手动?)，{retry_at:%H:%M} 后自动重试 ({attempt}/3)")
+        except Exception as e:
+            print(f"[{datetime.now()}] [DAEMON] 签到重试任务挂载失败: {e}")
         return
 
     success_count = 0
@@ -72,6 +86,12 @@ async def do_sign_task():
                     success_count += 1
                 else:
                     fail_count += 1
+
+    # 幂等完成标记：补跑判断依据（当日守护已跑过即不再补，重试成功也会走到这里）
+    try:
+        await db.set_setting("last_daemon_sign_date", datetime.now().date().isoformat())
+    except Exception:
+        pass
 
     print(f"[{datetime.now()}] [DAEMON] 任务闭环 | 成功: {success_count} | 失败: {fail_count}")
 
@@ -417,6 +437,26 @@ async def do_survival_governance_task():
 async def do_maintenance_task():
     """执行拟人化养号维护任务的内部包裹"""
     db = await get_db()
+
+    # SignLog 滚动保留（默认 180 天；Forum 行上的聚合统计列不受影响，
+    # recalculate_all_forum_stats 需要时可从 Forum 聚合回溯，无需依赖明细）
+    try:
+        retention_days = int(float(await db.get_setting("signlog_retention_days", "180")))
+    except Exception:
+        retention_days = 180
+    if retention_days > 0:
+        try:
+            cutoff = datetime.now() - timedelta(days=retention_days)
+            async with db.async_session() as session:
+                from sqlalchemy import delete as sa_delete
+                from ..db.models import SignLog
+                res = await session.execute(sa_delete(SignLog).where(SignLog.signed_at < cutoff))
+                await session.commit()
+                if res.rowcount:
+                    print(f"[DAEMON] SignLog 滚动清理: 删除 {res.rowcount} 条 {retention_days} 天前日志")
+        except Exception as prune_err:
+            print(f"[DAEMON] SignLog 清理失败（不影响养号）: {prune_err}")
+
     from .maintenance import MaintManager
     manager = MaintManager(db)
 
@@ -586,6 +626,25 @@ class TiebaMechaDaemon:
                 misfire_grace_time=300,  # 事件循环被长任务阻塞时保留 5 分钟补触发窗口
             )
             print(f"[DAEMON] 已重载热更新: 每天 {hour:02d}:{minute:02d} 执行...")
+
+            # 补跑：重启/宕机错过今日触发时刻且守护今日尚未完成过 → 挂即时补跑
+            # （核心流已剔除今日已签，补跑对已签账号零请求秒过，成本极低）
+            try:
+                now = datetime.now()
+                fire_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                last_done = await db.get_setting("last_daemon_sign_date", "")
+                if now > fire_today + timedelta(minutes=10) and last_done != now.date().isoformat():
+                    if not self.scheduler.get_job(f"sign_retry_{now.date().isoformat()}"):
+                        self.scheduler.add_job(
+                            do_sign_task, 'date',
+                            run_date=now + timedelta(minutes=1),
+                            kwargs={"attempt": 2},
+                            id=f"sign_retry_{now.date().isoformat()}",
+                            replace_existing=True,
+                        )
+                        print(f"[DAEMON] 检测到今日 {hour:02d}:{minute:02d} 触发已被错过（重启/宕机），1 分钟后补跑")
+            except Exception as catchup_err:
+                print(f"[DAEMON] 签到补跑检查失败（不影响常规调度）: {catchup_err}")
         except Exception as e:
             # 解析失败时不动现有任务，避免定时签到静默失效
             print(f"[DAEMON] 解析配置签到时间出错: {e} (已保留原有任务配置)")

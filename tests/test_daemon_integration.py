@@ -144,10 +144,13 @@ class TestDaemonIntegration:
         assert forums[0].is_sign_today is True
 
     async def test_do_sign_task_skips_when_sign_flow_locked(self, db):
-        """回归: 已有签到流 (手动) 在执行时, 定时触发直接跳过, 不并发执行"""
+        """回归: 已有签到流 (手动) 在执行时, 定时触发不并发执行"""
         from tieba_mecha.core.sign import sign_flow_lock
+        from tieba_mecha.core.daemon import daemon_instance
 
         await db.set_setting("schedule", json.dumps({"mode": "single"}))
+        # 整改#15 后遇锁会挂当日重试 job，测试结束须清理防污染后续用例
+        leftover = f"sign_retry_{datetime.now().date().isoformat()}"
 
         async with sign_flow_lock:
             with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
@@ -155,6 +158,53 @@ class TestDaemonIntegration:
                  patch("asyncio.sleep", new_callable=AsyncMock):
                 await do_sign_task()
                 mock_single.assert_not_called()
+
+        if daemon_instance.scheduler.get_job(leftover):
+            daemon_instance.scheduler.remove_job(leftover)
+
+    async def test_do_sign_task_schedules_retry_when_locked(self, db):
+        """整改#15: 遇锁改为挂 40 分钟重试而非当日放弃；attempt≥3 才放弃"""
+        from tieba_mecha.core.sign import sign_flow_lock
+        from tieba_mecha.core.daemon import daemon_instance
+
+        await db.set_setting("schedule", json.dumps({"mode": "single"}))
+        job_id = f"sign_retry_{datetime.now().date().isoformat()}"
+        # 防御：清掉可能残留的同日重试 job（单例调度器跨用例共享）
+        if daemon_instance.scheduler.get_job(job_id):
+            daemon_instance.scheduler.remove_job(job_id)
+
+        async with sign_flow_lock:
+            with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+                 patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                await do_sign_task(attempt=1)
+                mock_single.assert_not_called()
+
+        assert daemon_instance.scheduler.get_job(job_id) is not None, "遇锁应挂重试任务"
+        daemon_instance.scheduler.remove_job(job_id)
+
+        async with sign_flow_lock:
+            with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                await do_sign_task(attempt=3)
+
+        assert daemon_instance.scheduler.get_job(job_id) is None, "attempt≥3 应放弃不再挂重试"
+
+    async def test_do_sign_task_marks_completion_date(self, db):
+        """整改#15: 跑完写 last_daemon_sign_date 幂等标记（补跑判断依据）"""
+        await db.set_setting("schedule", json.dumps({"mode": "single"}))
+
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+             patch("tieba_mecha.core.daemon.sign_all_forums") as mock_single, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+
+            async def empty_gen(*args, **kwargs):
+                if False: yield {}
+
+            mock_single.return_value = empty_gen()
+            await do_sign_task()
+
+        assert await db.get_setting("last_daemon_sign_date", "") == datetime.now().date().isoformat()
 
     async def test_do_sign_task_tolerates_corrupted_schedule_json(self, db):
         """回归: schedule 为损坏 JSON 时按默认模式执行而非整体失败"""
