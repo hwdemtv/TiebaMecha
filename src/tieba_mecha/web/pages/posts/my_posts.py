@@ -18,6 +18,7 @@ from ...components.icons import (
     POST_ADD,
     REFRESH_ROUNDED,
     SEARCH,
+    SELECT_ALL,
     SEND_ROUNDED,
 )
 from .helpers import (
@@ -42,17 +43,6 @@ class MyPostsTabMixin:
         )
         self._filter_fname = ft.Dropdown(
             label="贴吧", width=140, text_size=12, options=[],
-            on_change=self._on_filter_change,
-        )
-        self._filter_survival = ft.Dropdown(
-            label="存活状态", width=130, text_size=12, value="all",
-            options=[
-                ft.dropdown.Option("all", "全部"),
-                ft.dropdown.Option("alive", "存活"),
-                ft.dropdown.Option("dead", "已删除"),
-                ft.dropdown.Option("suspected", "疑似删除"),
-                ft.dropdown.Option("unknown", "未知"),
-            ],
             on_change=self._on_filter_change,
         )
         self._filter_good = ft.Dropdown(
@@ -80,7 +70,6 @@ class MyPostsTabMixin:
         filter_bar = ft.Row([
             self._filter_account,
             self._filter_fname,
-            self._filter_survival,
             self._filter_good,
             self._filter_date_from,
             self._filter_date_to,
@@ -89,8 +78,14 @@ class MyPostsTabMixin:
             ft.IconButton(REFRESH_ROUNDED, icon_size=18, tooltip="刷新列表", on_click=self._on_refresh, icon_color="primary"),
         ], spacing=8, wrap=True)
 
-        # 存活统计徽章（存活/疑似/已删/未知）
-        self._stats_row = ft.Row(spacing=8)
+        # 存活统计徽章（全部/存活/疑似/已删/未知）：构建期一次性建好静态结构，
+        # 之后只做 text/bgcolor 简单属性填充——flet 0.23.2 web 端 controls 列表替换不可靠
+        self._stat_badges: dict[str, ft.Container] = {}
+        self._stat_texts: dict[str, ft.Text] = {}
+        self._stats_row = ft.Row(
+            [self._build_stat_badge(s) for s in ("all", "alive", "suspected", "dead", "unknown")],
+            spacing=8, wrap=True,
+        )
 
         # 一键检测（当前筛选结果）
         self._check_progress = ft.ProgressBar(visible=False, bar_height=2, color="primary", expand=True)
@@ -148,10 +143,9 @@ class MyPostsTabMixin:
             self._filter_fname.value = "all"
 
     def _collect_filters(self) -> dict:
-        """读取筛选控件 → get_my_posts 参数。"""
+        """读取筛选控件 → get_my_posts 参数（存活态走徽章筛选，不在此列）。"""
         account_val = self._filter_account.value if hasattr(self, "_filter_account") else "all"
         fname_val = self._filter_fname.value if hasattr(self, "_filter_fname") else "all"
-        survival_val = self._filter_survival.value if hasattr(self, "_filter_survival") else "all"
         good_val = self._filter_good.value if hasattr(self, "_filter_good") else "all"
         kw = (self._filter_keyword.value or "").strip() if hasattr(self, "_filter_keyword") else ""
 
@@ -168,7 +162,6 @@ class MyPostsTabMixin:
         return {
             "account_id": int(account_val) if account_val and account_val != "all" else None,
             "fname": None if (not fname_val or fname_val == "all") else fname_val,
-            "survival": None if survival_val == "all" else survival_val,
             "is_good": {"good": True, "normal": False}.get(good_val),
             "date_from": _date(self._filter_date_from.value),
             "date_to": _date(self._filter_date_to.value, end_of_day=True),
@@ -181,31 +174,41 @@ class MyPostsTabMixin:
     async def _on_refresh(self, e=None):
         await self._reload_rows()
 
-    # ---------- 统计徽章 ----------
+    # ---------- 统计徽章（点击筛选） ----------
+
+    def _build_stat_badge(self, state: str) -> ft.Container:
+        icon, label, color = (
+            (SELECT_ALL, "全部", "primary") if state == "all" else SURVIVAL_DISPLAY[state]
+        )
+        text = ft.Text("", size=12, color=color, weight=ft.FontWeight.W_500)
+        badge = ft.Container(
+            content=ft.Row([ft.Icon(icon, size=14, color=color), text], spacing=4),
+            bgcolor=with_opacity(0.08, color),
+            padding=ft.padding.symmetric(horizontal=8, vertical=4),
+            border_radius=6,
+            tooltip="显示全部帖子" if state == "all" else f"点击只看{label}，再点一次取消",
+            on_click=lambda e, s=state: self._on_stat_badge_click(s),
+        )
+        self._stat_badges[state] = badge
+        self._stat_texts[state] = text
+        return badge
+
+    def _on_stat_badge_click(self, state: str):
+        """徽章即筛选：点击切换存活态（纯客户端派生，不查库）；再点已激活的回全部。"""
+        self._survival_filter = "all" if self._survival_filter == state else state
+        self._refresh_survival_views(reset_page=True)
 
     def _update_stats(self):
-        counts = {"alive": 0, "suspected": 0, "dead": 0, "unknown": 0}
-        for r in self._rows:
+        counts = {"all": len(self._all_rows), "alive": 0, "suspected": 0, "dead": 0, "unknown": 0}
+        for r in self._all_rows:
             counts[classify_survival(r.survival_status, r.death_reason)] += 1
 
-        def _badge(state: str, n: int):
-            icon, label, color = SURVIVAL_DISPLAY[state]
-            return ft.Container(
-                content=ft.Row([
-                    ft.Icon(icon, size=14, color=color),
-                    ft.Text(f"{label} {n}", size=12, color=color, weight=ft.FontWeight.W_500),
-                ], spacing=4),
-                bgcolor=with_opacity(0.08, color),
-                padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                border_radius=6,
-            )
-
-        self._stats_row.controls = [
-            _badge("alive", counts["alive"]),
-            _badge("suspected", counts["suspected"]),
-            _badge("dead", counts["dead"]),
-            _badge("unknown", counts["unknown"]),
-        ]
+        for state, n in counts.items():
+            color = "primary" if state == "all" else SURVIVAL_DISPLAY[state][2]
+            label = "全部" if state == "all" else SURVIVAL_DISPLAY[state][1]
+            self._stat_texts[state].value = f"{label} {n}"
+            # 激活态仅靠 bgcolor 简单属性区分（强化底色），避开 flet web 端复杂对象替换
+            self._stat_badges[state].bgcolor = with_opacity(0.30 if self._survival_filter == state else 0.08, color)
 
     # ---------- 列表 ----------
 
@@ -307,7 +310,23 @@ class MyPostsTabMixin:
         )
 
     def _build_empty_state(self) -> ft.Control:
-        """空状态引导：发布新帖 / 前往矩阵发帖 / 导入历史记录。"""
+        """空状态：存活筛选无结果给"查看全部"；否则引导发布/矩阵/导入。"""
+        if self._survival_filter != "all":
+            _, label, color = SURVIVAL_DISPLAY[self._survival_filter]
+
+            def _go_all(e):
+                self._on_stat_badge_click(self._survival_filter)
+
+            return ft.Container(
+                content=ft.Column([
+                    ft.Icon(SURVIVAL_DISPLAY[self._survival_filter][0], size=44, color=with_opacity(0.4, color)),
+                    ft.Text(f"没有「{label}」状态的帖子", size=14, color="onSurfaceVariant"),
+                    ft.Text("其他状态下可能还有帖子，或已被上方筛选条件过滤", size=11, color="onSurfaceVariant"),
+                    ft.OutlinedButton("查看全部", icon=SELECT_ALL, on_click=_go_all),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                alignment=ft.alignment.center,
+                padding=50,
+            )
 
         def _go_tab0(e):
             self.tabs.selected_index = 0

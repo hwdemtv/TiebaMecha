@@ -25,6 +25,7 @@ from .publish import PublishTabMixin
 from .my_posts import MyPostsTabMixin
 from .batch_ops import BatchOpsTabMixin
 from .detail import DetailDrawerMixin
+from .helpers import classify_survival
 
 if TYPE_CHECKING:
     from tieba_mecha.db.crud import Database
@@ -57,6 +58,8 @@ class PostsPage(
 
         # 统一帖子行（get_my_posts 结果），供"我的帖子/批量"两个 Tab 共用
         self._rows: list = []
+        self._all_rows: list = []        # 未做存活筛选的全集（统计徽章数据源）
+        self._survival_filter: str = "all"  # 存活徽章筛选态：all/alive/suspected/dead/unknown
         self._mine_page: int = 1         # 我的帖子 分页
         self._batch_page: int = 1        # 批量 分页
         self._page_size: int = PAGE_SIZE
@@ -159,17 +162,32 @@ class PostsPage(
         await self.load_data()
 
     async def _reload_rows(self, first_load: bool = False, reset_page: bool = False):
-        """按当前筛选加载统一帖子行，并同步刷新"我的帖子/批量"两个 Tab。"""
+        """按当前筛选加载统一帖子行（存活态不在 SQL 层过滤，徽章统计须全集口径）。"""
         if not self.db:
             return
         filters = self._collect_filters()
         try:
-            self._rows = await self.db.get_my_posts(**filters)
+            self._all_rows = await self.db.get_my_posts(**filters)
         except Exception as ex:
-            self._rows = []
+            self._all_rows = []
             self._show_snackbar(f"帖子数据加载失败: {ex}", "error")
 
-        if reset_page or first_load:
+        self._refresh_survival_views(reset_page=reset_page or first_load)
+
+    def _refresh_survival_views(self, reset_page: bool = False):
+        """按存活徽章筛选态从全集客户端派生 _rows，并同步两 Tab 渲染（不查库）。
+
+        客户端按 classify_survival 过滤与旧 SQL 过滤等价（记录行恒 unknown），
+        且"已删除"口径与徽章计数严格一致（SQL 旧口径会把疑似删除混入）。
+        """
+        if self._survival_filter == "all":
+            self._rows = list(self._all_rows)
+        else:
+            self._rows = [
+                r for r in self._all_rows
+                if classify_survival(r.survival_status, r.death_reason) == self._survival_filter
+            ]
+        if reset_page:
             self._mine_page = 1
             self._batch_page = 1
         # 选中键失效清理
@@ -178,7 +196,7 @@ class PostsPage(
 
         self._update_mine_list()
         self._update_batch_list()
-        self._update_stats()           # 我的帖子：存活徽章
+        self._update_stats()           # 我的帖子：存活徽章（全集口径，含"全部"）
         self._update_batch_analysis()  # 批量：分析卡片
         self._update_batch_hint()
         self.page.update()

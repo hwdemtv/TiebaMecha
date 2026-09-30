@@ -111,6 +111,8 @@ def posts_page(mock_page):
 class TestPostsPageStructure:
     def test_init_defaults(self, posts_page):
         assert posts_page._rows == []
+        assert posts_page._all_rows == []
+        assert posts_page._survival_filter == "all"
         assert posts_page._selected == set()
         assert posts_page._mine_page == 1
         assert posts_page._page_size == 20
@@ -133,9 +135,9 @@ class TestPostsPageStructure:
         assert [o.key for o in posts_page.post_forum.options] == ["python", "linux", "_resources"]
         assert posts_page._filter_account.value == "1"  # 默认只看当前账号
         assert posts_page._ai_ready is True
-        # 行数据已加载，统计徽章 4 个（存活/疑似/已删/未知）
+        # 行数据已加载，统计徽章 5 枚（全部/存活/疑似/已删/未知，静态结构）
         assert len(posts_page._rows) == 1
-        assert len(posts_page._stats_row.controls) == 4
+        assert len(posts_page._stats_row.controls) == 5
         # 发布摘要包含账号与代理信息
         assert posts_page._summary_card.content is not None
 
@@ -188,17 +190,105 @@ class TestFilters:
         f = posts_page._collect_filters()
         assert f["account_id"] == 1
         assert f["fname"] is None
-        assert f["survival"] is None
         assert f["is_good"] is None
         assert f["keyword"] is None
+        # 存活态改由统计徽章筛选（客户端派生），不再进 SQL 参数
+        assert "survival" not in f
 
-        posts_page._filter_survival.value = "suspected"
         posts_page._filter_good.value = "good"
         posts_page._filter_keyword.value = "测试词"
         f2 = posts_page._collect_filters()
-        assert f2["survival"] == "suspected"
         assert f2["is_good"] is True
         assert f2["keyword"] == "测试词"
+
+
+class TestSurvivalBadges:
+    """存活统计徽章即筛选：全集口径计数、点击客户端过滤、再点取消。"""
+
+    @staticmethod
+    def _extra_rows():
+        return [
+            SimpleNamespace(
+                src="material", material_id=11, tid=222, title="已删帖", content="内容",
+                fname="python", account_id=1, post_time=datetime(2026, 9, 19, 10, 0),
+                reply_num=0, is_good=False, survival_status="dead", death_reason="deleted_by_mod",
+                last_checked_at=None, ai_status="none", original_title=None,
+                original_content=None, is_auto_bump=False, bump_count=0,
+                last_bumped_at=None, bump_mode="once", bump_hour=10,
+                bump_duration_days=0, bump_start_date=None, task_id=None, mat_status="success",
+            ),
+            SimpleNamespace(
+                src="material", material_id=12, tid=333, title="疑似帖", content="内容",
+                fname="python", account_id=1, post_time=datetime(2026, 9, 20, 10, 0),
+                reply_num=0, is_good=False, survival_status="dead", death_reason="captcha_required",
+                last_checked_at=None, ai_status="none", original_title=None,
+                original_content=None, is_auto_bump=False, bump_count=0,
+                last_bumped_at=None, bump_mode="once", bump_hour=10,
+                bump_duration_days=0, bump_start_date=None, task_id=None, mat_status="success",
+            ),
+            SimpleNamespace(
+                src="record", material_id=None, tid=444, title="导入帖", content="",
+                fname="linux", account_id=None, post_time=datetime(2026, 9, 21, 10, 0),
+                reply_num=0, is_good=False, survival_status="unknown", death_reason="",
+                last_checked_at=None,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_badge_counts_from_unfiltered_set(self, posts_page):
+        """徽章计数来自未筛选全集，筛选激活时其余徽章不丢全景。"""
+        posts_page.build()
+        posts_page.db.rows.extend(self._extra_rows())
+        await posts_page._reload_rows()
+        assert posts_page._stat_texts["all"].value == "全部 4"
+        assert posts_page._stat_texts["alive"].value == "存活 1"
+        assert posts_page._stat_texts["suspected"].value == "疑似删除 1"
+        assert posts_page._stat_texts["dead"].value == "已删除 1"
+        assert posts_page._stat_texts["unknown"].value == "未知 1"
+        assert len(posts_page._rows) == 4
+
+    @pytest.mark.asyncio
+    async def test_badge_click_filters_client_side(self, posts_page):
+        posts_page.build()
+        posts_page.db.rows.extend(self._extra_rows())
+        await posts_page._reload_rows()
+        posts_page._selected.update({"m10", "m11"})
+
+        posts_page._on_stat_badge_click("dead")
+        assert posts_page._survival_filter == "dead"
+        # 只剩已确认删除的一条：疑似删除不混入，筛选口径与徽章计数严格一致
+        assert [r.tid for r in posts_page._rows] == [222]
+        # 统计仍为全集口径，分页复位、失效选中键清理
+        assert posts_page._stat_texts["all"].value == "全部 4"
+        assert posts_page._mine_page == 1
+        assert posts_page._selected == {"m11"}
+        # 激活徽章底色强化（简单属性赋值）
+        assert posts_page._stat_badges["dead"].bgcolor != posts_page._stat_badges["alive"].bgcolor
+
+    @pytest.mark.asyncio
+    async def test_badge_click_toggles_and_switches(self, posts_page):
+        posts_page.build()
+        posts_page.db.rows.extend(self._extra_rows())
+        await posts_page._reload_rows()
+        posts_page._on_stat_badge_click("alive")
+        assert [r.tid for r in posts_page._rows] == [111]
+        posts_page._on_stat_badge_click("alive")  # 再点取消 → 全部
+        assert posts_page._survival_filter == "all"
+        assert len(posts_page._rows) == 4
+        posts_page._on_stat_badge_click("unknown")  # 直接换状态
+        assert [r.tid for r in posts_page._rows] == [444]
+
+    @pytest.mark.asyncio
+    async def test_empty_state_offers_view_all(self, posts_page):
+        posts_page.build()
+        await posts_page._reload_rows()
+        posts_page._on_stat_badge_click("dead")  # 全集只有存活帖 → 空状态
+        empty = posts_page._mine_list.controls[0]
+        assert "没有「已删除」状态的帖子" in empty.content.controls[1].value
+        assert empty.content.controls[3].text == "查看全部"
+        empty.content.controls[3].on_click(None)  # 一键回全部
+        assert posts_page._survival_filter == "all"
+        assert len(posts_page._rows) == 1
 
 
 class TestDetailPanel:
