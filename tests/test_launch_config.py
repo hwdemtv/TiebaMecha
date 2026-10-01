@@ -160,6 +160,22 @@ class TestPreflightService:
         assert any(i.code == "materials_missing_title" for i in report.warnings)
         assert any(i.code == "materials_duplicate" for i in report.warnings)
 
+    async def test_material_link_placeholder_scan(self):
+        """链接占位符未填的物料应在预检中标注（2026-10-01 电影吧事故 P2 项）。"""
+        materials = [
+            self._material(1, title="正常物料", content="正常正文"),
+            self._material(2, title="占位物料", content="影评正文\n\n链接：[这里插入链接]"),
+        ]
+        db = await self._make_db(
+            accounts=[self._account(1)],
+            forums=[{"fname": "吧A", "is_banned": False, "is_post_target": True}],
+            materials=materials,
+        )
+        svc = PreflightService(db)
+        report = await svc.run(LaunchConfig(account_ids=[1], local_fnames=["吧A"], post_count=2))
+        assert report.stats["materials_link_placeholder"] == [2]
+        assert any(i.code == "materials_link_placeholder" for i in report.warnings)
+
     async def test_delay_warnings_and_risk_score(self):
         db = await self._make_db(
             accounts=[self._account(1)],

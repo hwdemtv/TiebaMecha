@@ -37,6 +37,9 @@ _QUIET_START, _QUIET_END = 1, 6  # 凌晨 1-6 点高风险时段（与 TimeWindo
 # helpers.extract_links 是"精确提取 http(s) 链接"（供展示/逐条列出）。
 # 两者请勿互相替换。
 _URL_RE = re.compile(r"https?://|t\.cn/|[-A-Za-z0-9.]{4,}\.(?:com|cn|net|top|xyz|me|cc)\b")
+# 链接占位符未填判定：物料模板预留的链接位未替换就投放，内容残缺是典型
+# 垃圾帖特征（2026-10-01 电影吧 220012 静默拦截事故的疑似诱因之一）
+_LINK_PLACEHOLDER_MARK = "这里插入链接"
 
 
 @dataclass
@@ -99,12 +102,13 @@ class ImportScanReport:
     overlong_title: list[int] = field(default_factory=list)     # 标题超 DB 上限
     duplicate_groups: list[list[int]] = field(default_factory=list)
     with_links: list[int] = field(default_factory=list)         # 含链接/短链
+    link_placeholder: list[int] = field(default_factory=list)   # 链接占位符未填
 
     @property
     def has_warnings(self) -> bool:
         return bool(
             self.empty_entries or self.missing_title or self.overlong_title
-            or self.duplicate_groups or self.with_links
+            or self.duplicate_groups or self.with_links or self.link_placeholder
         )
 
     def valid_indices(self) -> list[int]:
@@ -136,6 +140,8 @@ def scan_import_pairs(pairs: list[tuple[str, str]]) -> ImportScanReport:
             report.overlong_title.append(idx)
         if _URL_RE.search(t) or _URL_RE.search(c):
             report.with_links.append(idx)
+        if _LINK_PLACEHOLDER_MARK in t or _LINK_PLACEHOLDER_MARK in c:
+            report.link_placeholder.append(idx)
         key = f"{_normalize_text(t)}|{_normalize_text(c)}"
         if key:
             if key in seen:
@@ -373,9 +379,10 @@ class PreflightService:
 
     # ------------------------------------------------------------------
     def _scan_material_content(self, materials, report: PreflightReport, stats: dict) -> None:
-        """物料质量扫描：缺标题/空正文/批内重复/含链接。"""
+        """物料质量扫描：缺标题/空正文/批内重复/含链接/占位符未填。"""
         sample = materials[: self.SCAN_CAP]
-        missing_title, empty_content, with_links = [], [], 0
+        missing_title, empty_content, link_placeholder = [], [], []
+        with_links = 0
         seen: dict[str, int] = {}
         dup_groups: dict[str, list[int]] = {}
 
@@ -388,6 +395,8 @@ class PreflightService:
                 empty_content.append(m.id)
             if _URL_RE.search(title) or _URL_RE.search(content):
                 with_links += 1
+            if _LINK_PLACEHOLDER_MARK in title or _LINK_PLACEHOLDER_MARK in content:
+                link_placeholder.append(m.id)
             key = f"{_normalize_text(title)}|{_normalize_text(content)}"
             if key:
                 if key in seen:
@@ -398,6 +407,7 @@ class PreflightService:
         stats["materials_missing_title"] = missing_title
         stats["materials_empty_content"] = empty_content
         stats["materials_with_links"] = with_links
+        stats["materials_link_placeholder"] = link_placeholder
         stats["materials_dup_groups"] = [ids for ids in dup_groups.values()]
 
         if missing_title:
@@ -408,6 +418,10 @@ class PreflightService:
             report.issues.append(PreflightIssue(
                 "warning", "materials_empty_content",
                 f"{len(empty_content)} 条物料正文为空（ID: {empty_content[:10]}{'…' if len(empty_content) > 10 else ''}）"))
+        if link_placeholder:
+            report.issues.append(PreflightIssue(
+                "warning", "materials_link_placeholder",
+                f"{len(link_placeholder)} 条物料的链接占位符未填写（ID: {link_placeholder[:10]}{'…' if len(link_placeholder) > 10 else ''}），内容残缺似垃圾帖特征，易触发风控"))
         if dup_groups:
             total_dup = sum(len(g) - 1 for g in dup_groups.values())
             report.issues.append(PreflightIssue(

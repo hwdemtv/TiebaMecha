@@ -492,7 +492,7 @@ class TestPickOptimalAccount:
         assert selected_ids == {acc1.id}
 
     async def test_pick_account_all_banned(self, db):
-        """测试当所有原生账号都被封禁时，回落到其他策略"""
+        """测试当所有原生账号都被封禁时返回 None（调用方顺延物料，不再撞墙）"""
         from tieba_mecha.core.account import encrypt_value
 
         enc_bduss1 = encrypt_value("a" * 192)
@@ -520,14 +520,14 @@ class TestPickOptimalAccount:
         )
         native_map, followed_map = await self._build_maps(db, task)
 
-        # 应该回落到 round_robin 策略
+        # 原生号全被封禁 → 映射为空 → 空降回落也避开封禁组合 → 返回 None
+        # （契约升级 2026-10-01：物料由调用方顺延，不再向已知封禁吧空降派号）
         selected = await pm._pick_optimal_account_for_target(
             task, "target_forum", 0, [(acc1.id, 5), (acc2.id, 5)],
-            native_map, followed_map
+            native_map, followed_map,
+            banned_pairs={(acc1.id, "target_forum"), (acc2.id, "target_forum")},
         )
-
-        # 因为原生号全被封禁，会回落到 round_robin，选择 acc1
-        assert selected in [acc1.id, acc2.id]
+        assert selected is None
 
     async def test_pick_account_no_native_follow(self, db):
         """测试没有原生关注账号时的情况"""

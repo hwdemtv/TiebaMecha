@@ -1116,15 +1116,43 @@ class BatchPostManager:
                 mapping.setdefault(fname, []).append(acc_id)
             return mapping
 
-    async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple[int, int]], native_map: dict[str, list[int]], followed_map: dict[str, list[int]]) -> int:
+    async def _build_banned_pairs(self, accounts: list[int]) -> set[tuple[int, str]]:
+        """预构建已被吧务封禁的 (账号ID, 贴吧名) 组合（forums.is_banned 单源）。
+
+        空降回落必须避开这批组合：签到链路已实证封禁的组合再撞墙只会白耗
+        请求并给风控递证据（2026-10-01 电影吧事故：签到 08:07 已标记
+        is_banned，发帖任务 08:50 仍空降发射遭 220012）。
+        """
+        from sqlalchemy import select
+
+        async with self.db.async_session() as session:
+            stmt = select(Forum.account_id, Forum.fname).where(
+                Forum.is_banned == True,
+                Forum.account_id.in_(accounts)
+            )
+            result = await session.execute(stmt)
+            return {(aid, fname) for aid, fname in result.all()}
+
+    async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple[int, int]], native_map: dict[str, list[int]], followed_map: dict[str, list[int]], banned_pairs: set[tuple[int, str]] | None = None) -> int | None:
         """
         靶场智能撮合核心：优先寻找本号已关注且 is_post_target=True 的原生号
         这极大提高了防抽几率（本土作战）。同时跳过已被该吧封禁的账号。
-        
+
         Args:
             native_map: 预构建的贴吧→原生安全账号映射
             followed_map: 预构建的贴吧→关注账号映射
+            banned_pairs: 预构建的已知封禁 (账号ID, 贴吧名) 组合
+
+        Returns:
+            选中的账号 ID；该贴吧全部候选均已知封禁/权限不足时返回 None，
+            由调用方将物料顺延，不再空降撞墙。
         """
+        _denied = banned_pairs or set()
+
+        def _pair_blocked(aid: int, fname: str) -> bool:
+            # 已知权限不足（进程内记录）或已被吧务封禁（DB 标记）的组合一律不派发
+            return is_permission_denied(aid, fname) or (aid, fname) in _denied
+
         # 严格轮询：从轮询位置向后搜索，优先找到已关注该吧的账号
         # 搜索顺序：原生号 → 关注号 → 纯轮询（空降）
         # 既保持全局均匀分配，又最大化成功率
@@ -1134,18 +1162,18 @@ class BatchPostManager:
             available_accounts = followed_map.get(target_fname, [])
             for offset in range(n):
                 candidate = task.accounts[(step + offset) % n]
-                if candidate in native_accounts:
+                if candidate in native_accounts and not _pair_blocked(candidate, target_fname):
                     return candidate
             for offset in range(n):
                 candidate = task.accounts[(step + offset) % n]
-                if candidate in available_accounts:
+                if candidate in available_accounts and not _pair_blocked(candidate, target_fname):
                     return candidate
-            # 空降回落：跳过已知权限不足的 (账号, 贴吧) 组合，轮转起点不变
+            # 空降回落：跳过已知权限不足/已封禁的 (账号, 贴吧) 组合，轮转起点不变
             for offset in range(n):
                 candidate = task.accounts[(step + offset) % n]
-                if not is_permission_denied(candidate, target_fname):
+                if not _pair_blocked(candidate, target_fname):
                     return candidate
-            return task.accounts[step % len(task.accounts)]
+            return None
 
         # 1. 优先尝试：安全原生号 (关注了该吧且设为发布目标)
         native_accounts = native_map.get(target_fname, [])
@@ -1155,17 +1183,19 @@ class BatchPostManager:
                 n = len(task.accounts)
                 for offset in range(n):
                     candidate = task.accounts[(step + offset) % n]
-                    if candidate in native_accounts:
+                    if candidate in native_accounts and not _pair_blocked(candidate, target_fname):
                         return candidate
                 # 轮询模式下，如果找不到匹配的原生账号，继续轮询而非随机选择
                 candidate = task.accounts[step % len(task.accounts)]
-                if not is_permission_denied(candidate, target_fname):
+                if not _pair_blocked(candidate, target_fname):
                     return candidate
             elif task.strategy == "weighted":
-                filtered = [(a, w) for a, w in weights if a in native_accounts]
+                filtered = [(a, w) for a, w in weights if a in native_accounts and not _pair_blocked(a, target_fname)]
                 if filtered:
                     return self._weighted_choice(filtered)
-            return random.choice(native_accounts)
+            eligible = [a for a in native_accounts if not _pair_blocked(a, target_fname)]
+            if eligible:
+                return random.choice(eligible)
 
         # 2. 次优尝试：普通关注号 (关注了该吧但未设为目标，或未勾选安全开关)
         available_accounts = followed_map.get(target_fname, [])
@@ -1174,28 +1204,31 @@ class BatchPostManager:
                 n = len(task.accounts)
                 for offset in range(n):
                     candidate = task.accounts[(step + offset) % n]
-                    if candidate in available_accounts:
+                    if candidate in available_accounts and not _pair_blocked(candidate, target_fname):
                         return candidate
                 # 轮询模式下，如果找不到匹配的关注账号，继续轮询而非随机选择
                 candidate = task.accounts[step % len(task.accounts)]
-                if not is_permission_denied(candidate, target_fname):
+                if not _pair_blocked(candidate, target_fname):
                     return candidate
             elif task.strategy == "weighted":
-                filtered = [(a, w) for a, w in weights if a in available_accounts]
+                filtered = [(a, w) for a, w in weights if a in available_accounts and not _pair_blocked(a, target_fname)]
                 if filtered:
                     return self._weighted_choice(filtered)
-            return random.choice(available_accounts)
+            eligible = [a for a in available_accounts if not _pair_blocked(a, target_fname)]
+            if eligible:
+                return random.choice(eligible)
 
-        # 3. 最终回退：大盘调度策略 (空降兵打法)，同样避开已知权限不足的组合
+        # 3. 最终回退：大盘调度策略 (空降兵打法)，同样避开已知权限不足/封禁的组合；
+        #    全部候选都避开不了时返回 None（调用方顺延物料），不再无条件撞墙
         candidate = await self._pick_account(task, step, weights)
-        if not is_permission_denied(candidate, target_fname):
+        if not _pair_blocked(candidate, target_fname):
             return candidate
         n = len(task.accounts)
         for offset in range(n):
             alt = task.accounts[(step + offset) % n]
-            if not is_permission_denied(alt, target_fname):
+            if not _pair_blocked(alt, target_fname):
                 return alt
-        return candidate
+        return None
 
     async def execute_task(self, task: BatchPostTask, material_ids: list[int] | None = None) -> AsyncGenerator[dict[str, Any], None]:
         """
@@ -1303,6 +1336,9 @@ class BatchPostManager:
         # 预构建贴吧→账号映射，避免循环中 N+1 查询
         native_map = await self._build_native_account_map(task.accounts)
         followed_map = await self._build_followed_account_map(task.accounts)
+        # 已知封禁 (账号, 贴吧) 组合：空降回落也必须避开，否则会把账号往
+        # 系统已知的封禁墙上撞（2026-10-01 电影吧事故缺口）
+        banned_pairs = await self._build_banned_pairs(task.accounts)
 
         # 从数据库拉取物料：指定 ID 列表或全局 pending 物料
         if material_ids:
@@ -1380,15 +1416,22 @@ class BatchPostManager:
             tried_accounts = set()
             max_account_retries = min(3, len(available_account_ids))
             success_for_this_material = False
-            forum_permission_denied = False  # 贴吧级权限不足标志
+            forum_skip_reason = ""  # 贴吧级拦截原因（非空=该物料应顺延而非判失败）
+            last_err_summary = ""  # 末次拦截摘要（供流水如实记录尝试次数与错误）
             current_target_fname = base_target_fname  # 初始化，避免循环内未绑定
             
             for attempt_idx in range(max_account_retries):
                 # 选取账号：传入 material_ptr+attempt_idx 以保证 Failover 时的轮转顺序
                 account_id = await self._pick_optimal_account_for_target(
-                    task, base_target_fname, material_ptr + attempt_idx, weighted_accounts, native_map, followed_map
+                    task, base_target_fname, material_ptr + attempt_idx, weighted_accounts, native_map, followed_map, banned_pairs
                 )
-                
+                if account_id is None:
+                    # 该贴吧全部候选账号均已知封禁/权限不足：不再空降撞墙，
+                    # 物料顺延由外层轮转换吧（material_ptr 由循环末尾统一前进）
+                    if not forum_skip_reason:
+                        forum_skip_reason = "候选账号均已被该吧封禁/权限不足"
+                    break
+
                 # 强行排除重复尝试
                 if account_id in tried_accounts:
                     remaining = [aid for aid in task.accounts if aid not in tried_accounts]
@@ -1562,12 +1605,15 @@ class BatchPostManager:
                             else:
                                 err_msg = str(res_json.get('error') or res_json)
                                 acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
+                                _need_vcode = ((res_json.get("data") or {}).get("vcode") or {}).get("need_vcode") or 0
+                                last_err_summary = (str(res_json.get('error') or '').strip()
+                                                    or (f"err_code={err_code}" if err_code else "未知拦截"))[:80]
                                 # 验证码与熔断逻辑集成
                                 await captcha_breaker.check_and_trigger(account_id, err_msg, err_code)
                                 await failure_breaker.record_failure(account_id)
-                                
+
                                 # 封禁逻辑识别（统一风控分类器）
-                                from .risk import is_account_ban_error
+                                from .risk import is_account_ban_error, is_silent_intercept_error
                                 if err_code == 4 or is_account_ban_error(err_msg):
                                     if "本吧" in err_msg:
                                         await self.db.mark_forum_banned(account_id, current_target_fname, reason="发射检测吧封")
@@ -1580,21 +1626,33 @@ class BatchPostManager:
                                         account_map.pop(account_id, None)
                                         weighted_accounts = [aw for aw in weighted_accounts if aw[0] != account_id]
                                         await log_warn(f"账号 {acc_display} 已被全吧封禁，本轮任务剩余物料不再使用该账号")
-                                
+
                                 # 权限不足识别：贴吧级限制 → 物料顺延（下轮轮转自然换吧）
                                 elif "没有权限" in err_msg or "权限不足" in err_msg or "无权" in err_msg:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason="用户没有权限")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="用户没有权限")
                                     record_permission_denied(account_id, current_target_fname, "用户没有权限")
                                     await log_permission_denied(account_id, acc_display, current_target_fname, "用户没有权限")
-                                    forum_permission_denied = True
+                                    forum_skip_reason = "权限不足"
                                     break  # 退出账号重试循环，让外层顺延物料
                                 elif "等级" in err_msg or "级别" in err_msg:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason=f"等级限制: {err_msg}")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason=f"等级限制: {err_msg}")
                                     record_permission_denied(account_id, current_target_fname, err_msg)
                                     await log_permission_denied(account_id, acc_display, current_target_fname, err_msg)
-                                    forum_permission_denied = True
+                                    forum_skip_reason = "等级限制"
+                                    break  # 退出账号重试循环，让外层顺延物料
+                                elif is_silent_intercept_error(err_msg, err_code) and not _need_vcode:
+                                    # 静默拦截（如 220012）：无错误文本的发帖拒绝，实证为账号在
+                                    # 封禁状态下发帖（2026-10-01 电影吧吧务单吧封禁、2026-09-21
+                                    # hwdemtv3 全吧封禁均返回此码）→ 按贴吧级拦截处置：标记该吧 +
+                                    # 物料顺延，避免任务内后续账号继续撞同一堵墙。
+                                    # need_vcode=1 时属验证码挑战，走下方换号重试分支。
+                                    await self.db.mark_forum_banned(account_id, current_target_fname, reason=f"发帖静默拦截({err_code})疑似吧务封禁")
+                                    await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason=f"发帖静默拦截({err_code})")
+                                    record_permission_denied(account_id, current_target_fname, f"发帖静默拦截({err_code})")
+                                    await log_permission_denied(account_id, acc_display, current_target_fname, f"发帖静默拦截({err_code})")
+                                    forum_skip_reason = f"发帖静默拦截({err_code})疑似吧务封禁"
                                     break  # 退出账号重试循环，让外层顺延物料
                                 else:
                                     await log_warn(f"账号 {acc_display} 发射遭拦截: {err_msg}，准备换号重试...")
@@ -1602,34 +1660,38 @@ class BatchPostManager:
                     acc_info = account_map.get(account_id)
                     acc_display = acc_info.user_name or acc_info.name if acc_info else f"账号(ID:{account_id})"
                     await log_error(f"执行链异常 ({acc_display} @ {current_target_fname}): {str(ex)}")
+                    last_err_summary = f"执行链异常: {str(ex)}"[:80]
                     await failure_breaker.record_failure(account_id)
-            
+
             if not success_for_this_material:
-                if forum_permission_denied:
-                    # 贴吧权限不足：不标记物料失败，物料顺延由下轮轮转自然换吧
+                if forum_skip_reason:
+                    # 贴吧级拦截（权限不足/等级限制/静默拦截/候选全封禁）：
+                    # 不标记物料失败，物料顺延由下轮轮转自然换吧
                     await self.db.add_batch_post_log(
                         task_id=str(task.id),
                         fname=current_target_fname,
                         status="skip",
-                        message=f"贴吧权限不足，物料顺延: {current_target_fname}",
+                        message=f"贴吧{forum_skip_reason}，物料顺延: {current_target_fname}",
                         title=current_material.title,
                         data={"progress": task.progress, "total": task.total}
                     )
-                    yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] 权限不足，该物料已顺延至下轮", "progress": task.progress, "total": task.total}
+                    yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] {forum_skip_reason}，该物料已顺延至下轮", "progress": task.progress, "total": task.total}
                 else:
-                    # --- 集成：失败流水持久化 ---
+                    # --- 集成：失败流水持久化（如实记录尝试账号数与末次拦截，
+                    # 替代"多账号均告失败"的笼统文案——单账号任务只试1次也曾写作"多账号"）---
+                    _tried_n = len(tried_accounts)
                     await self.db.add_batch_post_log(
                         task_id=str(task.id),
                         fname=base_target_fname,
                         status="error",
-                        message="物料已由多个账号尝试均告失败，可能触发内容风控",
+                        message=f"物料经{_tried_n}个账号尝试均告失败（末次拦截: {last_err_summary or '未知'}）",
                         title=current_material.title,
-                        data={"progress": task.progress, "total": task.total}
+                        data={"progress": task.progress, "total": task.total, "tried_accounts": _tried_n, "last_error": last_err_summary}
                     )
-                    await self.db.update_material_status(current_material.id, "failed", last_error="多账号 Failover 尝试后均失败", task_id=str(task.id))
+                    await self.db.update_material_status(current_material.id, "failed", last_error=f"{_tried_n}个账号 Failover 均失败: {last_err_summary or '未知'}", task_id=str(task.id))
                     # 记录靶场拦截
-                    await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason="多账号尝试均失败")
-                    yield {"status": "error", "msg": "物料已由多个账号尝试均告失败，可能内容已变味", "progress": task.progress, "total": task.total}
+                    await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason=f"多账号尝试均失败（末次: {last_err_summary or '未知'}）")
+                    yield {"status": "error", "msg": f"物料发帖失败：{_tried_n}个账号尝试均被拦截（{last_err_summary or '未知'}）", "progress": task.progress, "total": task.total}
 
             material_ptr += 1
 

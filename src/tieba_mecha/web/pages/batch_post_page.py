@@ -904,6 +904,8 @@ class BatchPostPage:
             issue_rows.append(("⚠️", f"{len(scan.duplicate_groups)} 组完全重复（去重可减少 {extra} 条，同内容重复投放易触发风控）"))
         if scan.with_links:
             issue_rows.append(("ℹ️", f"{len(scan.with_links)} 条物料正文含链接（主帖应净文化，链接请填在 link_url 走楼中楼首评）"))
+        if scan.link_placeholder:
+            issue_rows.append(("⚠️", f"{len(scan.link_placeholder)} 条物料的链接占位符未填（内容残缺似垃圾帖特征，易触发风控，建议补齐后再导入）"))
 
         content = ft.Column([
             ft.Text(f"共解析 {scan.total} 条，导入前请确认：", size=12, weight=ft.FontWeight.BOLD),

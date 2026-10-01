@@ -580,8 +580,12 @@ class TestPermissionDeniedRegistry:
         assert picked == 2
 
     @pytest.mark.asyncio
-    async def test_all_denied_falls_back_to_rotation(self):
-        """所有候选都权限不足时仍按轮转返回，避免死循环。"""
+    async def test_all_denied_returns_none(self):
+        """所有候选都权限不足/封禁时返回 None，由调用方顺延物料，不再无条件撞墙。
+
+        契约升级（2026-10-01 电影吧事故缺口A）：旧实现"全部拒绝仍按轮转返回"
+        会把账号空降进已知封禁的吧；调用方现已处理 None → 物料顺延，无死循环。
+        """
         from unittest.mock import MagicMock
 
         from tieba_mecha.core.batch_post import (
@@ -599,7 +603,47 @@ class TestPermissionDeniedRegistry:
         picked = await mgr._pick_optimal_account_for_target(
             task, "吧A", step=0, weights=[], native_map={}, followed_map={},
         )
-        assert picked == 1
+        assert picked is None
+
+    @pytest.mark.asyncio
+    async def test_strict_fallback_skips_db_banned_pair(self):
+        """空降回落必须避开 forums.is_banned 的 (账号, 贴吧) 组合。
+
+        回归：2026-10-01 电影吧事故——签到链路 08:07 已标记 is_banned，
+        发帖任务 08:50 仍空降发射遭 220012。
+        """
+        from unittest.mock import MagicMock
+
+        from tieba_mecha.core.batch_post import BatchPostManager
+
+        mgr = BatchPostManager(db=None)
+        task = MagicMock()
+        task.strategy = "strict_round_robin"
+        task.accounts = [1, 2, 3]
+
+        picked = await mgr._pick_optimal_account_for_target(
+            task, "电影", step=0, weights=[], native_map={}, followed_map={},
+            banned_pairs={(1, "电影")},
+        )
+        assert picked == 2, "账号1已被电影吧封禁，应顺移到账号2"
+
+    @pytest.mark.asyncio
+    async def test_all_banned_pairs_returns_none(self):
+        """全部候选都被该吧封禁时返回 None（调用方顺延物料）。"""
+        from unittest.mock import MagicMock
+
+        from tieba_mecha.core.batch_post import BatchPostManager
+
+        mgr = BatchPostManager(db=None)
+        task = MagicMock()
+        task.strategy = "strict_round_robin"
+        task.accounts = [1, 2]
+
+        picked = await mgr._pick_optimal_account_for_target(
+            task, "电影", step=0, weights=[], native_map={}, followed_map={},
+            banned_pairs={(1, "电影"), (2, "电影")},
+        )
+        assert picked is None
 
 
 # ========================================================================

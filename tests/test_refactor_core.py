@@ -4,12 +4,14 @@ import pytest
 
 from tieba_mecha.core.risk import (
     ERR_FORUM_BANNED,
+    ERR_SILENT_INTERCEPT,
     extract_err_code,
     is_already_followed_error,
     is_account_ban_error,
     is_blacklisted_error,
     is_captcha_error,
     is_forum_ban_error,
+    is_silent_intercept_error,
 )
 from tieba_mecha.core.proxy import build_proxy_url
 from tieba_mecha.core.web_poster import (
@@ -29,6 +31,43 @@ class TestRiskClassifier:
         assert is_captcha_error("", err_code=6)
         assert not is_captcha_error("普通业务错误")
         assert not is_captcha_error("", err_code=999)
+
+    def test_captcha_need_vcode_truth_value(self):
+        """need_vcode 真值优先：字段名里的 "captcha" 子串不构成判定依据。
+
+        回归：2026-10-01 220012 静默拦截响应（need_vcode=0）被 is_captcha_error
+        对整个响应 dict 的子串匹配误判为验证码，触发错误的验证码熔断。
+        """
+        # 2026-10-01 电影吧事故的真实响应形态
+        real_payload = {
+            "no": 12, "err_code": 220012, "error": None,
+            "data": {
+                "autoMsg": "", "fid": 14, "fname": "电影", "tid": 0,
+                "is_login": 1, "content": "", "access_state": None,
+                "experience": 0, "is_pop_award": 0, "pop_url": "",
+                "draw_thread_content_match": 0,
+                "vcode": {
+                    "need_vcode": 0, "str_reason": "",
+                    "captcha_vcode_str": "", "captcha_code_type": 0,
+                    "userstatevcode": 0,
+                },
+                "is_thread_visible": 0,
+            },
+        }
+        assert not is_captcha_error(str(real_payload), 220012)
+        # 真验证码挑战（need_vcode=1）必须命中
+        assert is_captcha_error(str({**real_payload, "data": {**real_payload["data"], "vcode": {**real_payload["data"]["vcode"], "need_vcode": 1}}}), 220012)
+        # JSON 形态同样真值优先
+        assert not is_captcha_error('{"data": {"vcode": {"need_vcode": 0, "captcha_vcode_str": "x"}}}')
+        assert is_captcha_error('{"data": {"vcode": {"need_vcode": 1}}}')
+
+    def test_silent_intercept(self):
+        """220012 静默拦截码识别：封禁账号发帖的无文本拒绝。"""
+        assert is_silent_intercept_error("", err_code=ERR_SILENT_INTERCEPT)
+        assert is_silent_intercept_error("{'no': 12, 'err_code': 220012, 'error': None}")
+        assert is_silent_intercept_error("发帖失败 220012")
+        assert not is_silent_intercept_error("普通业务错误", err_code=0)
+        assert not is_silent_intercept_error("", err_code=3250004)
 
     def test_forum_ban(self):
         assert is_forum_ban_error(f"错误 {ERR_FORUM_BANNED} 被吧务封禁")

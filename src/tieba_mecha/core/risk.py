@@ -14,6 +14,7 @@ ERR_ALREADY_SIGNED = 160002
 ERR_FORUM_INVALID = (340006, 340001)
 ERR_FORUM_BANNED = 3250004        # 吧务封禁（在该吧被封）
 ERR_ACCOUNT_BLACKLISTED = 400013  # 账号被该吧拉黑
+ERR_SILENT_INTERCEPT = 220012     # 发帖静默拦截（web 发帖接口无文本拒绝码）
 
 # ── 验证码 / 风控拦截 ──
 # 关键词取历史上两套实现的并集：batch_post 的 ["验证码","captcha","安全验证",
@@ -30,6 +31,9 @@ NOT_FOLLOWED_KEYWORDS = ("未关注", "没有关注", "尚未关注", "未收藏
 BLACKLIST_KEYWORDS = ("被拉黑",)
 
 _CODE_RE = re.compile(r"(\d{4,})")
+# vcode.need_vcode 真值提取：兼容 python dict 字符串（'need_vcode': 0）与
+# JSON（"need_vcode":0）两种形态
+_NEED_VCODE_RE = re.compile(r"need_vcode['\"]?\s*[:=]\s*([01])")
 
 
 def extract_err_code(err_msg) -> int:
@@ -44,9 +48,29 @@ def extract_err_code(err_msg) -> int:
 
 
 def is_captcha_error(err_msg="", err_code: int = 0) -> bool:
-    """是否触发验证码/风控人机拦截。"""
+    """是否触发验证码/风控人机拦截。
+
+    响应中 vcode.need_vcode 是唯一真值来源：报文里带 "captcha" 的字段名
+    （如 captcha_vcode_str）不构成判定依据——对字符串化响应做子串匹配曾把
+    need_vcode=0 的普通拒绝误判成验证码（2026-10-01 220012 熔断误报）。
+    """
     msg = str(err_msg or "")
+    m = _NEED_VCODE_RE.search(msg)
+    if m:
+        return m.group(1) == "1"
     return any(kw in msg for kw in CAPTCHA_KEYWORDS) or err_code in CAPTCHA_ERR_CODES
+
+
+def is_silent_intercept_error(err_msg="", err_code: int = 0) -> bool:
+    """是否为发帖静默拦截（220012：error=None、tid=0、帖子未发出）。
+
+    实证语义：账号在封禁状态下发帖（2026-10-01 电影吧吧务单吧封禁、
+    2026-09-21 hwdemtv3 全吧封禁均返回此码）。若报文同时给出
+    need_vcode=1，属验证码挑战，调用方应先按验证码分支处理。
+    """
+    if err_code == ERR_SILENT_INTERCEPT:
+        return True
+    return str(ERR_SILENT_INTERCEPT) in str(err_msg or "")
 
 
 def is_forum_ban_error(err_msg="", err_code: int = 0) -> bool:
