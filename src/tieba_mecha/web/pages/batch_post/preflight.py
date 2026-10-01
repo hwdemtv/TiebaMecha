@@ -37,9 +37,17 @@ _QUIET_START, _QUIET_END = 1, 6  # 凌晨 1-6 点高风险时段（与 TimeWindo
 # helpers.extract_links 是"精确提取 http(s) 链接"（供展示/逐条列出）。
 # 两者请勿互相替换。
 _URL_RE = re.compile(r"https?://|t\.cn/|[-A-Za-z0-9.]{4,}\.(?:com|cn|net|top|xyz|me|cc)\b")
-# 链接占位符未填判定：物料模板预留的链接位未替换就投放，内容残缺是典型
-# 垃圾帖特征（2026-10-01 电影吧 220012 静默拦截事故的疑似诱因之一）
-_LINK_PLACEHOLDER_MARK = "这里插入链接"
+# 占位符/模板假链标记族：物料模板预留位未替换就投放，内容残缺是典型垃圾帖
+# 特征（2026-10-01 电影吧 220012 事故的疑似诱因之一；池内实测共 5 个变体家族）
+_PLACEHOLDER_MARKS = (
+    "这里插入链接",
+    "此处插入链接",
+    "在这里插入链接",
+    "你的链接地址",
+    "[链接地址]",
+    "example.com",
+    "公众号",
+)
 
 
 @dataclass
@@ -140,7 +148,7 @@ def scan_import_pairs(pairs: list[tuple[str, str]]) -> ImportScanReport:
             report.overlong_title.append(idx)
         if _URL_RE.search(t) or _URL_RE.search(c):
             report.with_links.append(idx)
-        if _LINK_PLACEHOLDER_MARK in t or _LINK_PLACEHOLDER_MARK in c:
+        if any(m in t or m in c for m in _PLACEHOLDER_MARKS):
             report.link_placeholder.append(idx)
         key = f"{_normalize_text(t)}|{_normalize_text(c)}"
         if key:
@@ -395,7 +403,7 @@ class PreflightService:
                 empty_content.append(m.id)
             if _URL_RE.search(title) or _URL_RE.search(content):
                 with_links += 1
-            if _LINK_PLACEHOLDER_MARK in title or _LINK_PLACEHOLDER_MARK in content:
+            if any(m in title or m in content for m in _PLACEHOLDER_MARKS):
                 link_placeholder.append(m.id)
             key = f"{_normalize_text(title)}|{_normalize_text(content)}"
             if key:
