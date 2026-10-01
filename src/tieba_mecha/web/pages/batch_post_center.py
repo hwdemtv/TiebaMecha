@@ -348,7 +348,7 @@ class BatchPostCenterPage:
                         icons.EDIT_NOTE_ROUNDED,
                         icon_color="primary",
                         icon_size=18,
-                        tooltip="查看详情 / 修改（待执行、已暂停任务可编辑计划时间、账号池与参数）",
+                        tooltip="查看详情 / 修改（待执行、已暂停任务可编辑目标贴吧、策略、计划时间、账号池与参数）",
                         on_click=lambda _: self.page.run_task(self._open_task_detail_dialog, t)
                     ),
                     ft.IconButton(
@@ -481,7 +481,7 @@ class BatchPostCenterPage:
             self._show_snackbar(f"重新激活失败: {str(e)}", "error")
 
     async def _open_task_detail_dialog(self, task):
-        """任务详情/编辑对话框：只读信息 + 高频修改项（改期/换号/参数）。
+        """任务详情/编辑对话框：只读信息 + 高频修改项（目标贴吧/策略/改期/换号/参数）。
 
         仅 pending/paused 任务可编辑；running 显示只读（执行中改配置会造成
         执行流与展示不一致），completed/failed/stopped 无编辑意义（重激活/复制已有通道）。
@@ -533,6 +533,11 @@ class BatchPostCenterPage:
                         value=str(getattr(task, "schedule_day_of_week", 0) or 0),
                         width=120,
                         options=[ft.dropdown.Option(str(i), n) for i, n in enumerate(day_names)])
+            elif schedule_type == "interval":
+                fields["interval"] = ft.TextField(
+                    label="间隔（小时，最小6）",
+                    value=str(getattr(task, "interval_hours", 6) or 6),
+                    width=160, keyboard_type=ft.KeyboardType.NUMBER)
 
             try:
                 current_acc_ids = set(json.loads(task.accounts_json)) if task.accounts_json else set()
@@ -555,6 +560,58 @@ class BatchPostCenterPage:
                 ], wrap=True, spacing=12, run_spacing=8),
             ], height=130, scroll=ft.ScrollMode.AUTO)
 
+            # 目标贴吧候选池：全域唯一吧（排除隐藏）。已封禁吧禁选且不预勾，
+            # 保存时随采集器剔除（与账号池终态同口径）；候选库已不含的现存
+            # 目标（如被隐藏）追加保留，避免保存时无声丢失
+            try:
+                forum_pool = await self.db.get_all_unique_forums()
+            except Exception:
+                forum_pool = []
+            current_fname_set = set(fnames)
+            pool_fname_set = {f["fname"] for f in forum_pool}
+            extra_fnames = [f for f in fnames if f and f not in pool_fname_set]
+            fields["forums"] = ft.Column([
+                ft.Row([
+                    ft.Checkbox(
+                        label=(f["fname"] + "（已封禁）" if f["is_banned"] else f["fname"]),
+                        value=(f["fname"] in current_fname_set and not f["is_banned"]),
+                        data=f["fname"],
+                        disabled=bool(f["is_banned"]),
+                    ) for f in forum_pool
+                ] + [ft.Checkbox(label=f, value=True, data=f) for f in extra_fnames],
+                wrap=True, spacing=12, run_spacing=8),
+            ], height=130, scroll=ft.ScrollMode.AUTO)
+
+            # 策略组：账号调度 + 文案提取（+ 循环任务的物料轮转），选项与批量发帖页同源
+            raw_strategy = task.strategy or "round_robin"
+            # 兼容旧复合串格式 "strategy:pairing"
+            if ":" in raw_strategy:
+                raw_strategy = raw_strategy.split(":")[0]
+            if raw_strategy not in ("round_robin", "strict_round_robin", "random"):
+                raw_strategy = "round_robin"
+            pairing_val = task.pairing_mode or "random"
+            if pairing_val not in ("random", "strict"):
+                pairing_val = "random"
+            fields["strategy"] = ft.Dropdown(
+                label="账号调度策略", value=raw_strategy, expand=1,
+                options=[
+                    ft.dropdown.Option("round_robin", "轮询 (Round-Robin)"),
+                    ft.dropdown.Option("strict_round_robin", "严格轮询 (Strict RR)"),
+                    ft.dropdown.Option("random", "随机 (Random)"),
+                ])
+            fields["pairing"] = ft.Dropdown(
+                label="文案提取模式", value=pairing_val, expand=1,
+                options=[ft.dropdown.Option("random", "随机混用 (防抽混淆)"),
+                         ft.dropdown.Option("strict", "严格配对 (发多资源)")])
+            reset_val = getattr(task, "reset_strategy", None) or "new_only"
+            if reset_val not in ("new_only", "reuse"):
+                reset_val = "new_only"
+            if schedule_type != "once":
+                fields["reset_strategy"] = ft.Dropdown(
+                    label="物料轮转", value=reset_val, expand=1,
+                    options=[ft.dropdown.Option("new_only", "仅新物料 (安全)"),
+                             ft.dropdown.Option("reuse", "重置复用")])
+
             fields["total"] = ft.TextField(label="发帖数量", value=str(task.total), width=110,
                                            keyboard_type=ft.KeyboardType.NUMBER)
             fields["delay_min"] = ft.TextField(label="间隔Min(秒)", value=str(task.delay_min), width=110,
@@ -566,16 +623,26 @@ class BatchPostCenterPage:
                 label="AI 人格", value=task.ai_persona or "normal", width=180,
                 options=[ft.dropdown.Option(k, v.get("name", k)) for k, v in AIOptimizer.PERSONA_PROMPTS.items()])
 
-        edit_tip = ("（仅待执行、已暂停任务可编辑；目标贴吧与策略需经「复制配置」到批量发帖页调整）"
+        edit_tip = ("（仅待执行、已暂停任务可编辑，目标贴吧与策略可就地调整）"
                     if editable else "（当前状态不可编辑；失败/停止任务可用「重新激活」，配置复用「复制」）")
 
         edit_controls = []
         if editable:
+            # once/daily/weekly 用时刻字段，interval 用间隔小时字段
+            schedule_head = ([fields["schedule"]] if "schedule" in fields
+                             else [fields["interval"]] if "interval" in fields
+                             else [])
             edit_controls = [
                 ft.Container(content=ft.Column(
-                    [fields["schedule"]] + ([fields["weekday"]] if "weekday" in fields else []) + [
+                    schedule_head + ([fields["weekday"]] if "weekday" in fields else []) + [
                         ft.Text("账号池（终态账号自动被调度剔除）:", size=12, color="onSurfaceVariant"),
                         fields["accounts"],
+                        ft.Text("目标贴吧（已封禁吧禁选，保存时自动剔除）:", size=12, color="onSurfaceVariant"),
+                        fields["forums"],
+                        ft.Row(
+                            [fields["strategy"], fields["pairing"]]
+                            + ([fields["reset_strategy"]] if "reset_strategy" in fields else []),
+                            spacing=10),
                         ft.Row([fields["total"], fields["delay_min"], fields["delay_max"]], spacing=10),
                         ft.Row([fields["use_ai"], fields["persona"]], spacing=20),
                     ], spacing=10),
@@ -608,9 +675,10 @@ class BatchPostCenterPage:
 
     @staticmethod
     def _collect_checked_account_ids(accounts_area) -> list:
-        """从账号池控件区收集勾选的账号 ID（勾选框可能直挂或嵌套在 wrap Row 内）。
+        """从勾选控件区收集勾选项的 data 值（勾选框可能直挂或嵌套在 wrap Row 内）。
 
-        终态（disabled）勾选框一律剔除：即使被预勾也不得进入账号池。
+        账号池传账号 ID、目标贴吧传贴吧名，同一采集器复用；
+        终态（disabled）控件一律剔除：即使被预勾也不得进入账号池/目标池。
         """
         terminal_disabled = []
         checked = []
@@ -626,6 +694,49 @@ class BatchPostCenterPage:
                 stack.extend(ctrl.controls)
         return sorted(set(checked) - set(terminal_disabled))
 
+    @staticmethod
+    def _sync_launch_snapshot(
+        raw_snapshot: str | None, *, fnames: list, account_ids: list,
+        strategy: str, pairing_mode: str, reset_strategy: str,
+        total: int, delay_min: float, delay_max: float,
+        use_ai: bool, ai_persona: str,
+        schedule_time: datetime | None = None, schedule_day_of_week: int | None = None,
+        interval_hours: int | None = None,
+    ) -> str | None:
+        """把原位编辑后的字段回写进 LaunchConfig 快照，返回新 config_json。
+
+        「复制配置」优先读快照还原完整配置，不同步会复活旧目标/旧策略。
+        快照缺失、损坏或无目标组（旧任务）时返回 None，落库保持原样
+        （复制配置对该形态有展示字段反推的降级通道）。
+        """
+        if not raw_snapshot:
+            return None
+        try:
+            snapshot = json.loads(raw_snapshot)
+        except Exception:
+            return None
+        if not (isinstance(snapshot, dict) and (snapshot.get("global_fnames") or snapshot.get("local_fnames"))):
+            return None
+        # 原位编辑不区分本地/全域分组，统一归入全域组（与复制配置同口径）
+        snapshot["global_fnames"] = list(fnames)
+        snapshot["local_fnames"] = []
+        snapshot["account_ids"] = list(account_ids)
+        snapshot["strategy"] = strategy
+        snapshot["pairing_mode"] = pairing_mode
+        snapshot["reset_strategy"] = reset_strategy
+        snapshot["post_count"] = total
+        snapshot["delay_min"] = delay_min
+        snapshot["delay_max"] = delay_max
+        snapshot["use_ai"] = bool(use_ai)
+        snapshot["ai_persona"] = ai_persona
+        if isinstance(schedule_time, datetime):
+            snapshot["schedule_time"] = schedule_time.strftime("%Y-%m-%d %H:%M")
+        if schedule_day_of_week is not None:
+            snapshot["schedule_day_of_week"] = schedule_day_of_week
+        if interval_hours is not None:
+            snapshot["interval_hours"] = interval_hours
+        return json.dumps(snapshot, ensure_ascii=False)
+
     async def _on_save_task_detail(self, task, dialog, fields):
         """保存任务修改：校验 → 落库 → 重算下次时间 → 重挂精确触发器。"""
         from ...core.daemon import calc_batch_task_resume_time, daemon_instance
@@ -634,29 +745,43 @@ class BatchPostCenterPage:
             updates = {}
             schedule_type = getattr(task, "schedule_type", "once") or "once"
 
-            # 计划时间
-            new_st_raw = (fields["schedule"].value or "").strip()
-            if schedule_type == "once":
+            # 计划时间 / 循环参数（interval 用间隔小时字段，无时刻字段）
+            if schedule_type == "interval":
                 try:
-                    new_st = datetime.strptime(new_st_raw, "%Y-%m-%d %H:%M")
-                except ValueError:
-                    self._show_snackbar("计划时间格式应为 YYYY-MM-DD HH:MM", "error")
+                    ih = int((fields["interval"].value or "").strip())
+                except (ValueError, TypeError):
+                    self._show_snackbar("间隔需为整数小时", "error")
                     return
-                if new_st <= datetime.now():
-                    self._show_snackbar("计划时间必须晚于当前时间", "error")
+                if ih < 6:
+                    self._show_snackbar("循环间隔最小 6 小时", "error")
                     return
-                updates["schedule_time"] = new_st
-            elif schedule_type in ("daily", "weekly"):
-                try:
-                    hh, mm = [int(x) for x in new_st_raw.split(":")]
-                    assert 0 <= hh < 24 and 0 <= mm < 60
-                except (ValueError, AssertionError):
-                    self._show_snackbar("执行时刻格式应为 HH:MM", "error")
-                    return
-                # 用今天+新时刻做载体，交由 _calc_next_schedule_time 归一到下一档
-                updates["schedule_time"] = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if schedule_type == "weekly" and "weekday" in fields:
-                    updates["schedule_day_of_week"] = int(fields["weekday"].value)
+                updates["interval_hours"] = ih
+                # 时刻载体仅作占位：pending 由重算覆盖、paused 恢复时重算，
+                # 语义与 daemon._calc_next_schedule_time（now + 间隔）一致
+                updates["schedule_time"] = datetime.now()
+            else:
+                new_st_raw = (fields["schedule"].value or "").strip()
+                if schedule_type == "once":
+                    try:
+                        new_st = datetime.strptime(new_st_raw, "%Y-%m-%d %H:%M")
+                    except ValueError:
+                        self._show_snackbar("计划时间格式应为 YYYY-MM-DD HH:MM", "error")
+                        return
+                    if new_st <= datetime.now():
+                        self._show_snackbar("计划时间必须晚于当前时间", "error")
+                        return
+                    updates["schedule_time"] = new_st
+                elif schedule_type in ("daily", "weekly"):
+                    try:
+                        hh, mm = [int(x) for x in new_st_raw.split(":")]
+                        assert 0 <= hh < 24 and 0 <= mm < 60
+                    except (ValueError, AssertionError):
+                        self._show_snackbar("执行时刻格式应为 HH:MM", "error")
+                        return
+                    # 用今天+新时刻做载体，交由 _calc_next_schedule_time 归一到下一档
+                    updates["schedule_time"] = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if schedule_type == "weekly" and "weekday" in fields:
+                        updates["schedule_day_of_week"] = int(fields["weekday"].value)
 
             # 账号池
             acc_ids = self._collect_checked_account_ids(fields["accounts"])
@@ -678,6 +803,33 @@ class BatchPostCenterPage:
                 return
             updates.update(total=total, delay_min=d_min, delay_max=d_max,
                            use_ai=bool(fields["use_ai"].value), ai_persona=fields["persona"].value)
+
+            # 目标贴吧与策略（执行流每次派发从库重读，下次执行即生效）
+            new_fnames = self._collect_checked_account_ids(fields["forums"])
+            if not new_fnames:
+                self._show_snackbar("至少勾选一个目标贴吧", "error")
+                return
+            updates["fnames_json"] = json.dumps(new_fnames, ensure_ascii=False)
+            updates["fname"] = new_fnames[0]  # 旧单贴吧列（非空约束）与列表首位保持同步
+            updates["strategy"] = fields["strategy"].value
+            updates["pairing_mode"] = fields["pairing"].value
+            if "reset_strategy" in fields:
+                updates["reset_strategy"] = fields["reset_strategy"].value
+
+            # LaunchConfig 快照同步：「复制配置」优先读快照，不同步会复活旧目标/旧策略
+            synced = self._sync_launch_snapshot(
+                getattr(task, "config_json", None),
+                fnames=new_fnames, account_ids=acc_ids,
+                strategy=updates["strategy"], pairing_mode=updates["pairing_mode"],
+                reset_strategy=updates.get("reset_strategy", "new_only"),
+                total=total, delay_min=d_min, delay_max=d_max,
+                use_ai=bool(fields["use_ai"].value), ai_persona=fields["persona"].value,
+                schedule_time=updates.get("schedule_time"),
+                schedule_day_of_week=updates.get("schedule_day_of_week"),
+                interval_hours=updates.get("interval_hours"),
+            )
+            if synced is not None:
+                updates["config_json"] = synced
 
             await self.db.update_batch_task(task.id, **updates)
 
