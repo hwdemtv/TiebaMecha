@@ -198,7 +198,7 @@ class MaintManager:
                             if new_id:
                                 await log_info(f"[BioWarming] {account_name} 🌾采集热门资源入库: [{target_forum_name}] {target_thread.title[:24]}... -> 物料#{new_id}（待转存/待审核）")
                             else:
-                                await log_info(f"[BioWarming] {account_name} 候选帖 [{target_forum_name}] 首页楼层无可采链接或已采过，跳过")
+                                await log_info(f"[BioWarming] {account_name} 候选帖 [{target_forum_name}] 首页楼层无网盘链接或已采过，跳过")
                             harvest_candidate = None  # 每轮最多采 1 条，采完收口
 
                         # 拟真停顿：模拟深度阅读

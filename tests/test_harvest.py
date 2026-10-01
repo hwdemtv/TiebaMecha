@@ -75,6 +75,36 @@ def test_extract_no_link_returns_none():
     assert extract_floor_link("") is None
 
 
+def test_extract_rejects_unknown_domain():
+    # 只认网盘链接标识：未识别域名的杂链（哪怕在楼主楼层）一律不采
+    assert extract_floor_link("资源在此 example.com/xyz 自取") is None
+
+
+def test_extract_rejects_checkurl_album_from_real_incident():
+    # 2026-10-01 物料#830 首例误采回归：2014 吧规伸手楼楼主层里，
+    # checkurl 壳内真身是已死的百度相册（xiangce），解包后识别不出网盘类型 → 不采
+    text = (
+        "新人必看，想要资源的，伸手到这里来取。图片来自："
+        "http://tieba.baidu.com/mo/q/checkurl?url=http%3A%2F%2Fxiangce.baidu.com"
+        "%2Fpicture%2Falbum%2Flist%2Fcc496194cedd2e7bd509f79608d859e9f34b9bb6"
+        "&urlrefer=05fe5408da470b019ec4acf9b27338f9\n继续用旧图镇！"
+    )
+    assert extract_floor_link(text) is None
+
+
+def test_extract_unwraps_checkurl_pan_link():
+    # 包在 checkurl 壳里的真网盘：解包识别出 baidu，且存下解包后的纯链（转存要用）
+    wrapped = (
+        "链接 http://tieba.baidu.com/mo/q/checkurl?url=https%3A%2F%2Fpan.baidu.com"
+        "%2Fs%2F1WrApp%3Fpwd%3Dk9x2 拿好"
+    )
+    hit = extract_floor_link(wrapped)
+    assert hit is not None
+    assert hit.link_type == "baidu"
+    assert hit.url == "https://pan.baidu.com/s/1WrApp?pwd=k9x2"
+    assert "提取码 k9x2" in hit.note
+
+
 # ---------- 纯逻辑：候选判定 ----------
 
 def _thread(title, reply_num, tid=1):
@@ -154,12 +184,35 @@ async def test_harvest_from_posts_first_reply_link():
 
 
 @pytest.mark.asyncio
-async def test_harvest_from_posts_skips_unknown_link_in_replies():
-    # 回复楼层里的未识别杂链不采（只信楼主楼层的未识别链）
+async def test_harvest_from_posts_skips_unknown_link():
+    # 未识别杂链任何楼层都不采（含楼主层），只有网盘链接标识才入库
     db = _FakeDB()
-    page = _posts_page({1: "纯文字介绍资源", 2: "看我主页 example.com/xyz", 3: "顶"})
+    page = _posts_page({1: "看我主页 example.com/xyz", 2: "顶"})
     assert await harvest_from_posts(db, page, _thread("资源帖", 40, tid=6), "电影吧") is None
+    # 旧版误采的 checkurl 相册壳（物料#830 同款）同样不入库
+    page2 = _posts_page({
+        1: ("新人必看，伸手到这里来取。图片来自：http://tieba.baidu.com/mo/q/checkurl"
+            "?url=http%3A%2F%2Fxiangce.baidu.com%2Fpicture%2Falbum%2Flist%2Fcc49&urlrefer=abc"),
+        2: "顶",
+    })
+    assert await harvest_from_posts(db, page2, _thread("资源帖", 40, tid=6), "电影吧") is None
     assert db.calls == []
+
+
+@pytest.mark.asyncio
+async def test_harvest_from_posts_unwraps_checkurl_op_link():
+    # 楼主层 checkurl 壳内真网盘：解包识别 + 纯链入库
+    db = _FakeDB()
+    page = _posts_page({
+        1: ("整理好了 http://tieba.baidu.com/mo/q/checkurl"
+            "?url=https%3A%2F%2Fpan.quark.cn%2Fs%2F9aaa%3Fpwd%3D3ed5 拿好"),
+        2: "感谢楼主",
+    })
+    mid = await harvest_from_posts(db, page, _thread("资源分享", 40, tid=10), "综艺吧")
+    assert mid == 77
+    kwargs = db.calls[0]
+    assert kwargs["source_link_type"] == "quark"
+    assert kwargs["source_link_url"] == "https://pan.quark.cn/s/9aaa?pwd=3ed5"
 
 
 @pytest.mark.asyncio

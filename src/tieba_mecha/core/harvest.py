@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import unquote
 
 # 采集配置默认值（与 web/pages/settings.py 的 _maint_config 保持一致）
 HARVEST_DEFAULTS = {
@@ -92,12 +93,32 @@ def _extract_code(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def extract_floor_link(text: str) -> Optional[HarvestHit]:
-    """从单楼层文本提取最值得采的链接。
+# 贴吧客户端给外链套的跳转壳：真身在 url= 参数里（percent-encoded）
+_CHECKURL_HOST = "tieba.baidu.com/mo/q/checkurl"
+_CHECKURL_URL_PARAM_RE = re.compile(r"[?&]url=([^&\s]+)", re.IGNORECASE)
 
-    优先级：已知网盘类型 > other；同优先级取先出现的。
+
+def _unwrap_checkurl(url: str) -> str:
+    """解贴吧 checkurl 跳转壳，返回壳内真实目标；非壳或解不出参数时原样返回。
+
+    不解包的后果：真网盘链接被包进壳后域名是 tieba.baidu.com，识别不出网盘类型；
+    反过来壳内的相册图/杂链也必须解包后才能被正确拒收（2026-10-01 物料#830 首例误采）。
+    """
+    if _CHECKURL_HOST not in url.lower():
+        return url
+    m = _CHECKURL_URL_PARAM_RE.search(url)
+    if not m:
+        return url
+    return unquote(m.group(1))
+
+
+def extract_floor_link(text: str) -> Optional[HarvestHit]:
+    """从单楼层文本提取网盘链接——只认已知网盘标识，未识别域名一律不采。
+
+    checkurl 壳先解包再识别：壳内真网盘能被打标并存下解包后的纯链
+    （转存需程序化打开纯 URL），壳内相册图/杂链不冒充资源。
     note = 提取码(若有) + 楼层文本前 200 字符上下文。
-    无链接返回 None。
+    无网盘链接返回 None。
     """
     if not text:
         return None
@@ -105,13 +126,12 @@ def extract_floor_link(text: str) -> Optional[HarvestHit]:
     if not urls:
         return None
 
-    best: Optional[HarvestHit] = None
     for raw_url in urls:
+        url = _unwrap_checkurl(raw_url).rstrip(".,;:!?)]}") or raw_url
+        link_type = classify_link(url)
+        if link_type == "other":
+            continue  # 未识别域名（贴吧壳内杂链/相册图/无关外链）不采
         # 百度盘 ?pwd= 内联码拆进 note，URL 保持原样（format_link_for_share 发出时也会同规则拆）
-        link_type = classify_link(raw_url)
-        if best is not None and link_type == "other":
-            continue  # 已有候选且当前是未识别类型，不覆盖
-        url = raw_url.rstrip(".,;:!?)]}") or raw_url
         code = _extract_code(text)
         inline_pwd = ""
         pwd_m = re.search(r"[?&]pwd=([A-Za-z0-9]{3,8})", url)
@@ -124,10 +144,8 @@ def extract_floor_link(text: str) -> Optional[HarvestHit]:
             parts.append(f"提取码 {code}")
         context = text.strip()[:_NOTE_MAX_LEN]
         note = " | ".join(parts + ([context] if context else []))
-        best = HarvestHit(url=url, link_type=link_type, note=note)
-        if link_type != "other":
-            break  # 已知网盘类型即定格
-    return best
+        return HarvestHit(url=url, link_type=link_type, note=note)
+    return None
 
 
 def is_harvest_candidate(thread, min_reply: int) -> bool:
@@ -153,6 +171,7 @@ async def harvest_from_posts(db, posts_page, thread, source_fname: str) -> Optio
     """从已拉回的 get_posts 首页响应提取并入库一条采集物料。
 
     楼层优先级：楼主(1楼)最先，其后按楼层顺序取最早命中；只扫本页，不翻楼中楼。
+    extract_floor_link 只认网盘链接，整帖无网盘链接则不入库。
     入库走 add_harvested_material（内部按 source_tid 去重）。
     Returns: 新物料 ID；未命中链接/已采过/异常返回 None。
     """
@@ -163,13 +182,8 @@ async def harvest_from_posts(db, posts_page, thread, source_fname: str) -> Optio
     for post in floors:
         text = getattr(post, "text", "") or ""
         candidate = extract_floor_link(text)
-        if candidate is None:
-            continue
-        if candidate.link_type == "other" and (getattr(post, "floor", 0) or 0) != 1:
-            # 未识别类型只信楼主楼层，回复楼层里的杂链不采
-            continue
-        hit = candidate
-        if candidate.link_type != "other" or (getattr(post, "floor", 0) or 0) == 1:
+        if candidate is not None:
+            hit = candidate
             break
 
     if hit is None:
