@@ -835,12 +835,18 @@ class BatchPostCenterPage:
 
             # 重算下次时间：paused 交给恢复时的重算，pending 立即重挂触发器
             if task.status == "pending":
+                from ...core.daemon import jittered_dispatch_time
                 fresh = await self.db.get_batch_task(task.id)
                 next_time = calc_batch_task_resume_time(fresh)
                 await self.db.update_batch_task(task.id, schedule_time=next_time)
-                daemon_instance.schedule_batch_task(task.id, next_time)
+                dispatch_time = jittered_dispatch_time(fresh, next_time)
+                daemon_instance.schedule_batch_task(task.id, dispatch_time)
+                dispatch_note = (
+                    f"，派发(含抖动): {dispatch_time.strftime('%m-%d %H:%M')}"
+                    if dispatch_time != next_time else "")
                 self._show_snackbar(
-                    f"任务 #{task.id} 已更新，下次执行: {next_time.strftime('%m-%d %H:%M')}", "success")
+                    f"任务 #{task.id} 已更新，下次执行: {next_time.strftime('%m-%d %H:%M')}{dispatch_note}",
+                    "success")
             else:
                 self._show_snackbar(f"任务 #{task.id} 已更新（已暂停状态，恢复时按新配置重算）", "success")
             self.page.close(dialog)
@@ -870,10 +876,11 @@ class BatchPostCenterPage:
                 self._show_snackbar(f"任务 #{task.id} 状态已变化，恢复未生效", "warning")
                 await self.load_data()
                 return
-            from ...core.daemon import calc_batch_task_resume_time, daemon_instance
+            from ...core.daemon import calc_batch_task_resume_time, daemon_instance, jittered_dispatch_time
             next_time = calc_batch_task_resume_time(task)
             await self.db.update_batch_task(task.id, schedule_time=next_time)
-            daemon_instance.schedule_batch_task(task.id, next_time)
+            daemon_instance.schedule_batch_task(
+                task.id, jittered_dispatch_time(task, next_time))
             self._show_snackbar(
                 f"任务 #{task.id} 已恢复运行，下次执行: {next_time.strftime('%m-%d %H:%M')}",
                 "success")

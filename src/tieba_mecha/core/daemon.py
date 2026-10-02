@@ -327,8 +327,10 @@ async def _run_claimed_task(task_id: str):
                 progress=0,
                 cycle_count=new_cycle,
             )
-            daemon_instance.schedule_batch_task(task.id, next_time)
-            print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 第{new_cycle}轮完成，下次执行: {next_time}")
+            dispatch_time = jittered_dispatch_time(task, next_time)
+            daemon_instance.schedule_batch_task(task.id, dispatch_time)
+            print(f"[{datetime.now()}] [DAEMON] 循环任务 ID={task.id} 第{new_cycle}轮完成，"
+                  f"下次锚点: {next_time}，实际派发: {dispatch_time}")
         else:
             await db.update_batch_task(task.id, status="completed")
             print(f"[{datetime.now()}] [DAEMON] once 任务 ID={task.id} 执行完成")
@@ -411,10 +413,11 @@ async def _execute_scheduled_task(task_id: str):
     if task.status != "pending":
         print(f"[{datetime.now()}] [DAEMON] 定时任务 {task_id} 状态为 {task.status}，跳过触发")
         return
-    # 陈旧触发器守卫：注册后任务的计划时间被编辑推迟，按新时间重注册
-    if task.schedule_time and task.schedule_time > datetime.now() + timedelta(seconds=5):
-        print(f"[{datetime.now()}] [DAEMON] 任务 {task_id} 计划时间已变更为 {task.schedule_time}，重注册触发器")
-        daemon_instance.schedule_batch_task(task.id, task.schedule_time)
+    # 陈旧触发器守卫：生效派发时刻（含抖动偏移/改期）未到则按生效时刻重注册
+    effective = _effective_dispatch_time(task)
+    if effective and effective > datetime.now() + timedelta(seconds=5):
+        print(f"[{datetime.now()}] [DAEMON] 任务 {task_id} 生效派发时刻为 {effective}，重注册触发器")
+        daemon_instance.schedule_batch_task(task.id, effective)
         return
 
     db = await get_db()
@@ -442,10 +445,14 @@ async def do_batch_post_tasks():
     pending_tasks = await db.get_pending_batch_tasks()
     if not pending_tasks:
         return
+    # 生效派发时刻未到的不兜底派发（锚点已到但被抖动后移的，精确触发会接管）
+    due_tasks = _filter_due_tasks(pending_tasks, datetime.now())
+    if not due_tasks:
+        return
 
     running_tasks = await db.get_running_batch_tasks()
-    pending_tasks.sort(key=lambda t: (t.schedule_time or datetime.max, t.id))
-    for task in pending_tasks:
+    due_tasks.sort(key=lambda t: (t.schedule_time or datetime.max, t.id))
+    for task in due_tasks:
         blocked_by = _find_running_same_plan(running_tasks, task)
         if blocked_by is not None:
             print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 与运行中任务 ID={blocked_by.id} 属同一发帖计划，本轮询跳过")
@@ -509,6 +516,60 @@ def _calc_next_schedule_time(task) -> datetime:
     else:
         # fallback
         return datetime.now() + timedelta(hours=6)
+
+
+# ── 发帖起点日抖动（去指纹，2026-10-02）────────────────────────────────
+# 循环任务每天固定 HH:MM:00 整触发，分钟级恒定本身是行为指纹。给每个派发
+# 周期叠加 ±_BATCH_JITTER_MINUTES 分钟的种子稳定偏移：seed=(task_id, 锚点)，
+# 同日内重启不重掷、跨日自然漂移。schedule_time 列始终存用户配置的锚点
+# （展示稳定），实际派发时刻记入 _DISPATCH_OVERRIDES，精确触发守卫与轮询
+# 兜底都按生效时刻判定到期。once 任务与"立即重新激活"类调用不抖。
+_BATCH_JITTER_MINUTES = 10
+_DISPATCH_OVERRIDES: dict = {}  # task_id -> datetime（当前周期的生效派发时刻）
+
+
+def jittered_dispatch_time(task, anchor: datetime | None) -> datetime | None:
+    """循环任务的生效派发时刻 = 锚点 ± 种子稳定偏移，并记入 override 表。
+
+    once 任务或无锚点时原样返回（不抖、不记表）。"""
+    if not anchor:
+        return anchor
+    if (getattr(task, 'schedule_type', 'once') or 'once') == 'once':
+        return anchor
+    rng = random.Random(f"batch-jitter:{task.id}:{anchor.strftime('%Y%m%d%H%M')}")
+    offset = rng.randint(-_BATCH_JITTER_MINUTES, _BATCH_JITTER_MINUTES)
+    effective = anchor + timedelta(minutes=offset)
+    _DISPATCH_OVERRIDES[task.id] = effective
+    return effective
+
+
+def _effective_dispatch_time(task) -> datetime | None:
+    """任务的生效派发时刻：override 通过锚点一致性校验才采信，否则惰性重推。
+
+    校验防陈旧键误伤：任务删除后新建可能复用同 id（SQLite rowid 复用），
+    旧周期/旧任务的 override 与新锚点偏差超抖动窗时必须作废重算；
+    once 任务永不查表（用户指定时刻即派发时刻）。"""
+    anchor = task.schedule_time
+    if (getattr(task, 'schedule_type', 'once') or 'once') == 'once':
+        return anchor
+    override = _DISPATCH_OVERRIDES.get(task.id)
+    if (override is not None and anchor is not None
+            and abs((override - anchor).total_seconds()) <= _BATCH_JITTER_MINUTES * 60):
+        return override
+    return jittered_dispatch_time(task, anchor)
+
+
+def _filter_due_tasks(pending_tasks, now: datetime) -> list:
+    """轮询兜底的到期过滤：生效派发时刻已到的任务才参与本轮派发。
+
+    锚点已到但被抖动后移的任务在此跳过，由精确触发器按时接管。"""
+    due = []
+    for t in pending_tasks:
+        eff = _effective_dispatch_time(t)
+        if eff is None or eff <= now:
+            due.append(t)
+    return due
+
 
 async def do_auto_bump_task():
     """执行自动回帖(自顶)任务的内部包裹"""
@@ -680,7 +741,13 @@ class TiebaMechaDaemon:
                 for t in scheduled:
                     st = getattr(t, 'schedule_time', None)
                     if st and st > now:
-                        self.schedule_batch_task(t.id, st)
+                        # 锚点距今不足一个抖动窗时不偏移，避免触发器注册到过去
+                        if st > now + timedelta(minutes=_BATCH_JITTER_MINUTES):
+                            dispatch = jittered_dispatch_time(t, st)
+                        else:
+                            dispatch = st
+                            _DISPATCH_OVERRIDES[t.id] = st
+                        self.schedule_batch_task(t.id, dispatch)
                         reg_count += 1
                 print(f"[DAEMON] 批量任务精确调度: {reg_count} 个未来任务已注册触发器")
             except Exception as sync_err:

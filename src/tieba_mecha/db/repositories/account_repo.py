@@ -426,6 +426,23 @@ class AccountRepository:
 
             # 存在关注缺失（未关注至少一个指定贴吧）的账号
             return [acc for acc in all_accounts if any((acc.id, f) not in followed_pairs for f in fnames)]
+
+    async def get_fnames_followed_by_accounts(self, account_ids: list[int], fnames: list[str]) -> list[str]:
+        """获取指定账号集合中至少一人关注的贴吧名（去重，空降判定用）。
+
+        hidden 滞后记录不算已关注，与上方关注缺失口径一致。"""
+        if not account_ids or not fnames:
+            return []
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Forum.fname).where(
+                    Forum.account_id.in_(account_ids),
+                    Forum.fname.in_(fnames),
+                    Forum.is_hidden == False,
+                ).distinct()
+            )
+            return list(result.scalars().all())
+
     async def get_account_ids_following_forums(self, fnames: list[str]) -> list[int]:
         """获取关注了指定贴吧列表的所有账号 ID"""
         async with self.async_session() as session:

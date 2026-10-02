@@ -4,7 +4,7 @@ import pytest
 import json
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from tieba_mecha.core.batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
 from tieba_mecha.core.daemon import do_batch_post_tasks, wait_spawned_batch_tasks
@@ -122,7 +122,9 @@ class TestBatchPostWorkflow:
             db_task = await session.get(BatchPostTask, task.id)
             db_task.schedule_type = "daily"
             db_task.reset_strategy = "reuse"
-            db_task.schedule_time = datetime.now()
+            # 锚点取明确的过去时刻：起点日抖动可能把生效派发时刻推后最多 10 分钟，
+            # 锚点贴近 now 时惰性推导会 50% 概率把任务抖出本轮轮询（设计行为）
+            db_task.schedule_time = datetime.now() - timedelta(minutes=30)
             await session.commit()
 
         # Add a "success" material that needs reset

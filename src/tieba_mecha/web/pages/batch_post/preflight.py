@@ -192,6 +192,7 @@ class PreflightService:
         accounts_info = await self._check_accounts(config, report, stats)
         fnames = await self._check_forums_async(config, report, stats)
         report.effective_fnames = fnames
+        await self._check_parachute_async(report, stats, accounts_info["effective"], fnames)
         materials = await self._check_materials(config, report, stats)
         await self._check_quota_async(config, report, stats, accounts_info["effective"])
         self._check_schedule_and_delay(config, report, stats)
@@ -294,6 +295,26 @@ class PreflightService:
                 "warning", "forums_unsafe",
                 f"{len(unsafe)} 个非安全贴吧，将以关注号身份投放（无本土作战加成，删帖风险更高）：{'、'.join(unsafe[:8])}{'…' if len(unsafe) > 8 else ''}"))
         return effective
+
+    # ------------------------------------------------------------------
+    async def _check_parachute_async(self, report, stats, effective_ids, fnames) -> None:
+        """空降可视化：无任何关注账号的靶场，引擎将以空降身份投放。
+
+        非关注身份发帖是吧务风控的敏感信号（2026-10-02 任务巡检发现 92%
+        空降率的案例）。查询失败不阻断预检。"""
+        if not effective_ids or not fnames:
+            return
+        try:
+            followed = set(await self.db.get_fnames_followed_by_accounts(effective_ids, fnames))
+        except Exception:
+            return
+        parachute = [fn for fn in fnames if fn not in followed]
+        stats["forums_parachute"] = parachute
+        if parachute:
+            report.issues.append(PreflightIssue(
+                "warning", "forums_parachute",
+                f"{len(parachute)} 个贴吧无任何关注账号（将空降投放，删帖/拦截风险更高）："
+                f"{'、'.join(parachute[:8])}{'…' if len(parachute) > 8 else ''}"))
 
     # ------------------------------------------------------------------
     async def _check_materials(self, config, report: PreflightReport, stats: dict) -> list:

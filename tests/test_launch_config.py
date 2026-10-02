@@ -91,6 +91,49 @@ class TestPreflightService:
         codes = {i.code for i in report.errors}
         assert "no_accounts" in codes
 
+    async def test_parachute_forums_warned(self):
+        """空降可视化：无任何关注账号的靶场出 warning 并入 stats（2026-10-02 巡检 92% 空降案例）"""
+        db = await self._make_db(
+            accounts=[self._account(1)],
+            forums=[
+                {"fname": "已关注吧", "is_banned": False, "is_post_target": True},
+                {"fname": "空降吧A", "is_banned": False, "is_post_target": True},
+                {"fname": "空降吧B", "is_banned": False, "is_post_target": True},
+            ],
+            materials=[self._material(1)],
+        )
+        db.get_fnames_followed_by_accounts = AsyncMock(return_value=["已关注吧"])
+        svc = PreflightService(db)
+        report = await svc.run(LaunchConfig(
+            account_ids=[1],
+            local_fnames=["已关注吧", "空降吧A", "空降吧B"], post_count=1))
+        assert any(i.code == "forums_parachute" for i in report.warnings)
+        assert report.stats["forums_parachute"] == ["空降吧A", "空降吧B"]
+
+    async def test_parachute_check_silent_when_all_followed(self):
+        db = await self._make_db(
+            accounts=[self._account(1)],
+            forums=[{"fname": "吧A", "is_banned": False, "is_post_target": True}],
+            materials=[self._material(1)],
+        )
+        db.get_fnames_followed_by_accounts = AsyncMock(return_value=["吧A"])
+        svc = PreflightService(db)
+        report = await svc.run(LaunchConfig(account_ids=[1], local_fnames=["吧A"], post_count=1))
+        assert not any(i.code == "forums_parachute" for i in report.issues)
+
+    async def test_parachute_check_failure_does_not_block(self):
+        """关注查询失败不阻断预检（降级为无该项检查）"""
+        db = await self._make_db(
+            accounts=[self._account(1)],
+            forums=[{"fname": "吧A", "is_banned": False, "is_post_target": True}],
+            materials=[self._material(1)],
+        )
+        db.get_fnames_followed_by_accounts = AsyncMock(side_effect=RuntimeError("db down"))
+        svc = PreflightService(db)
+        report = await svc.run(LaunchConfig(account_ids=[1], local_fnames=["吧A"], post_count=1))
+        assert report.effective_fnames == ["吧A"]
+        assert "forums_parachute" not in report.stats
+
     async def test_error_when_all_accounts_terminal(self):
         db = await self._make_db(accounts=[self._account(1, status="banned")])
         svc = PreflightService(db)
