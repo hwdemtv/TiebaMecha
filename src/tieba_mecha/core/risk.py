@@ -30,6 +30,20 @@ ALREADY_FOLLOWED_KEYWORDS = ("已关注",)
 NOT_FOLLOWED_KEYWORDS = ("未关注", "没有关注", "尚未关注", "未收藏", "没有收藏", "尚未收藏")
 BLACKLIST_KEYWORDS = ("被拉黑",)
 
+# ── 物料占位符/模板假链标记族（单一事实源，原 web 层 preflight 内联定义上移）──
+# 物料模板预留位未替换就投放 = 内容残缺的典型垃圾帖特征（2026-10-01 电影吧
+# 220012 事故的疑似诱因之一；池内实测共 5 个变体家族）。
+# 消费方：web 导入预检 scan_import_pairs、AI 改写输出门禁（optimize_post）。
+PLACEHOLDER_MARKS = (
+    "这里插入链接",
+    "此处插入链接",
+    "在这里插入链接",
+    "你的链接地址",
+    "[链接地址]",
+    "example.com",
+    "公众号",
+)
+
 _CODE_RE = re.compile(r"(\d{4,})")
 # vcode.need_vcode 真值提取：兼容 python dict 字符串（'need_vcode': 0）与
 # JSON（"need_vcode":0）两种形态

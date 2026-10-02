@@ -20,6 +20,7 @@ from datetime import datetime
 
 from ....core.auth import get_auth_manager, AuthStatus
 from ....core.batch_post import TERMINAL_ACCOUNT_STATUSES
+from ....core.risk import PLACEHOLDER_MARKS as _PLACEHOLDER_MARKS
 
 # 单一事实源：与引擎完全一致的终态账号集合（含 suspended_proxy）
 _TERMINAL_ACCOUNT_STATUSES = TERMINAL_ACCOUNT_STATUSES
@@ -38,16 +39,8 @@ _QUIET_START, _QUIET_END = 1, 6  # 凌晨 1-6 点高风险时段（与 TimeWindo
 # 两者请勿互相替换。
 _URL_RE = re.compile(r"https?://|t\.cn/|[-A-Za-z0-9.]{4,}\.(?:com|cn|net|top|xyz|me|cc)\b")
 # 占位符/模板假链标记族：物料模板预留位未替换就投放，内容残缺是典型垃圾帖
-# 特征（2026-10-01 电影吧 220012 事故的疑似诱因之一；池内实测共 5 个变体家族）
-_PLACEHOLDER_MARKS = (
-    "这里插入链接",
-    "此处插入链接",
-    "在这里插入链接",
-    "你的链接地址",
-    "[链接地址]",
-    "example.com",
-    "公众号",
-)
+# 特征（2026-10-01 电影吧 220012 事故的疑似诱因之一；池内实测共 5 个变体家族）。
+# 单一事实源在 core/risk.py（AI 改写输出门禁同源消费），此处仅导入。
 
 
 @dataclass

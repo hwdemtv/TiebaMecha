@@ -123,6 +123,79 @@ class TestAIOptimizer:
         assert "Optimized content" in content
         assert error == ""
 
+    def _make_optimizer_and_session(self, json_side_effects):
+        """共用脚手架：配置好的 optimizer + 按 sequence 吐 JSON 响应的 mock session。"""
+        mock_db = MagicMock()
+        mock_db.get_setting = AsyncMock(side_effect=lambda k, d: {
+            "ai_api_key": "test-key",
+            "ai_base_url": "https://api.test.com/v1/",
+            "ai_model": "test-model",
+            "ai_system_prompt": "",
+        }.get(k, d))
+        optimizer = AIOptimizer(mock_db)
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(side_effect=[
+            {"choices": [{"message": {"content": json.dumps(payload)}}]}
+            for payload in json_side_effects
+        ])
+        mock_post_context = AsyncMock()
+        mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        return optimizer, mock_session
+
+    @pytest.mark.asyncio
+    async def test_optimize_post_fabricated_url_retried_then_recovered(self):
+        """输出门禁（2026-10-02 装填批次 14% 中招率根因）：首次输出编造
+        example.com 假链 → 强化指令重试，第二次干净 → 采纳。"""
+        optimizer, mock_session = self._make_optimizer_and_session([
+            {"title": "T1", "content": "这部真不错。\n\n[链接：https://example.com/movie-2020]"},
+            {"title": "T2", "content": "这部真不错，看完心里久久不能平静。"},
+        ])
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
+                success, title, content, error = await optimizer.optimize_post(
+                    "原标题", "原始内容没有链接")
+
+        assert success is True
+        assert title == "T2"
+        assert "example.com" not in content
+
+    @pytest.mark.asyncio
+    async def test_optimize_post_placeholder_persistent_rejected(self):
+        """输出门禁：两次输出都带占位符 → 按改写失败返回，原文原样回退"""
+        dirty = {"title": "T", "content": "好看。\n\n链接：[你的链接地址]"}
+        optimizer, mock_session = self._make_optimizer_and_session([dirty, dirty])
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
+                success, title, content, error = await optimizer.optimize_post(
+                    "原标题", "原始内容")
+
+        assert success is False
+        assert title == "原标题"
+        assert content == "原始内容"
+        assert "占位符" in error
+
+    @pytest.mark.asyncio
+    async def test_optimize_post_preserves_legitimate_original_url(self):
+        """输出门禁不误杀：原文自有 URL 经占位符恢复后仍在输出中 → 正常放行"""
+        real_url = "https://pan.baidu.com/s/1abcDEF?pwd=xyz9"
+        optimizer, mock_session = self._make_optimizer_and_session([
+            {"title": "T", "content": f"这部真不错，链接自取。\n\n{real_url}"},
+        ])
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
+                success, title, content, error = await optimizer.optimize_post(
+                    "原标题", f"原始内容。\n\n{real_url}")
+
+        assert success is True
+        assert real_url in content
+
     @pytest.mark.asyncio
     async def test_optimize_post_api_error(self):
         """Test optimize_post handles API errors gracefully."""

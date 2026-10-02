@@ -10,6 +10,7 @@ import aiohttp
 from typing import Tuple, Optional
 from ..db.crud import Database
 from .auth import require_pro
+from .risk import PLACEHOLDER_MARKS
 
 # --- SEO Optimization Constants ---
 # 关键词密度上限：单个关键词在全文中最多出现次数
@@ -431,6 +432,7 @@ class AIOptimizer:
         use_format = True
         current_user_prompt = user_prompt
         similarity_retried = False
+        quality_retried = False
 
         for attempt in range(DEFAULT_MAX_RETRIES + 1):
             try:
@@ -500,6 +502,36 @@ class AIOptimizer:
                                 optimized_content = optimized_content.rstrip() + f"\n\n{original_url}"
 
                         optimized_title = parsed.get("title", title)
+
+                        # ── 输出质量门禁：占位符残留/编造链接按改写失败处理 ──
+                        # 2026-10-02 装填批次实测：种子正文无链接时，模型受
+                        # "保留链接"类规则驱使即兴编造 "[你的链接地址]" 占位符
+                        # 或 example.com 假链（~14% 中招率），是 10-01 占位符
+                        # 病灶的同源根因。判据：输出含占位符标记族，或出现了
+                        # 原文没有的新 URL（原文自有 URL 已在此处之前恢复，不算）。
+                        fabricated_urls = [
+                            u for u in _URL_PATTERN.findall(optimized_content)
+                            if u not in original_urls
+                        ]
+                        hit_marks = [m for m in PLACEHOLDER_MARKS if m in optimized_content]
+                        if hit_marks or fabricated_urls:
+                            if not quality_retried:
+                                quality_retried = True
+                                current_user_prompt = user_prompt + (
+                                    "\n【重要】上一次输出中出现了“你的链接地址/这里插入链接”"
+                                    "之类的占位符文字或自己编造的 URL（如 example.com）。"
+                                    "原文中没有任何链接可供保留，输出里严禁出现任何 URL "
+                                    "或链接占位文字，链接相关内容直接省略，只保留观感描述。"
+                                )
+                                logger.warning(
+                                    f"AI 改写输出含占位符/编造链接 (marks={hit_marks[:2]}, "
+                                    f"urls={[u[:40] for u in fabricated_urls[:2]]})，使用强化指令重试"
+                                )
+                                continue
+                            return False, title, content, (
+                                f"AI 改写输出含占位符/编造链接，放弃改写 "
+                                f"(marks={hit_marks[:2]}, urls={[u[:40] for u in fabricated_urls[:2]]})"
+                            )
 
                         # ── 关键词密度检查 ──
                         optimized_title, optimized_content = self._enforce_keyword_density(
