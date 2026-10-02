@@ -138,6 +138,11 @@ class BatchPostPage:
     async def _refresh_logs(self, e=None):
         await self._log_stream.refresh(e)
 
+    def _set_progress_busy(self, busy: bool):
+        """进度条位于执行监视区内：上传等短活动期间整区出现，结束即收起（任务运行中除外）。"""
+        self.progress_bar.visible = busy
+        self.live_monitor.visible = busy or self._is_running
+
     def _show_rejection_detail(self, e):
         self._log_stream.show_rejection_detail(e)
 
@@ -2368,7 +2373,9 @@ class BatchPostPage:
         self.progress_bar = ft.ProgressBar(value=0, visible=False, color="primary")
 
         # 6. 物料视图 + 执行监视区（原底部 Tabs 的运行区三视图已迁往运行中心）
+        # 仅在本会话有活动（即时任务运行/上传中）时出现，空闲收起给向导让位（build 时按运行态重置）
         self.live_monitor = ft.Container(
+            visible=False,
             content=ft.Column([
                 ft.Row([
                     ft.Icon(icons.STREAM_ROUNDED, size=14, color="primary"),
@@ -2517,6 +2524,8 @@ class BatchPostPage:
         self._apply_wizard_step_styles()
 
         # --- 封装最终布局界面并预存 ---
+        # 执行监视区可见性每次进页重置：空闲收起让位向导内容，会话内即时任务仍在后台跑时恢复显示
+        self.live_monitor.visible = self._is_running
         self.main_layout = ft.Container(
             content=ft.Column([
                 header,
@@ -2621,7 +2630,7 @@ class BatchPostPage:
         if file_path is None:
             try:
                 # 开启 Web 上传流程
-                self.progress_bar.visible = True
+                self._set_progress_busy(True)
                 self.progress_bar.value = 0
                 self.page.update()
 
@@ -2635,7 +2644,7 @@ class BatchPostPage:
                     else:
                         # 无法获取上传 URL，可能是 SECRET_KEY 问题
                         self._show_snackbar("无法获取上传 URL，请检查 FLET_SECRET_KEY 配置", "error")
-                        self.progress_bar.visible = False
+                        self._set_progress_busy(False)
                         self.page.update()
                         return
 
@@ -2643,12 +2652,12 @@ class BatchPostPage:
                     self._file_picker.upload(upload_files)
                 else:
                     self._show_snackbar("未能创建上传任务，请重试", "warning")
-                    self.progress_bar.visible = False
+                    self._set_progress_busy(False)
                     self.page.update()
                 return
             except Exception as ex:
                 self._show_snackbar(f"文件上传初始化失败: {str(ex)}", "error")
-                self.progress_bar.visible = False
+                self._set_progress_busy(False)
                 self.page.update()
                 return
 
@@ -2689,7 +2698,7 @@ class BatchPostPage:
                     await self._process_file_import(file_server_path)
                 finally:
                     # 处理完后重置进度条
-                    self.progress_bar.visible = False
+                    self._set_progress_busy(False)
                     self.page.update()
 
                     # 处理完后清理临时文件
@@ -2699,7 +2708,7 @@ class BatchPostPage:
                         pass
             else:
                 # 文件不存在，给出明确错误提示
-                self.progress_bar.visible = False
+                self._set_progress_busy(False)
                 self.page.update()
                 self._show_snackbar(f"文件上传后未找到: {file_server_path}，请检查 uploads 目录权限", "error")
 
@@ -3012,7 +3021,8 @@ class BatchPostPage:
         self.start_btn.style = ft.ButtonStyle(color="white", bgcolor="error")
         self.progress_bar.visible = True
         self.progress_bar.value = 0
-        self.log_list.controls.clear()
+        self.live_monitor.visible = True  # 执行监视区随任务出现（结束后保留尾流水供回看，下次进页收起）
+        self._log_stream.clear_ui()
         self.page.update()
 
         task = BatchPostTask(
