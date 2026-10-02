@@ -42,14 +42,35 @@ class BehaviorAuditor:
         alerts = []
         recommendations = []
 
-        # 维度 1：签到率分析
+        # 维度 1：签到健康度（sign_rate 为剔除跳过后的真实成功率）
         sign_rate = stats.get("sign_rate", 0)
-        if sign_rate > 0.95:
-            alerts.append(f"签到率过高 ({sign_rate:.0%})，行为过于规律")
-            recommendations.append("建议随机跳过 5-10% 的贴吧签到，模拟真人偶尔忘记签到的行为")
-        elif sign_rate < 0.3 and stats.get("total_signs", 0) > 10:
-            alerts.append(f"签到率过低 ({sign_rate:.0%})，账号活跃度不足")
-            recommendations.append("适当增加签到频率，提升账号权重")
+        attempts = stats.get("sign_attempts", 0)
+        if attempts > 0:
+            if sign_rate < 0.4:
+                alerts.append(
+                    f"签到真实成功率仅 {sign_rate:.0%}（{attempts} 次真实尝试），疑似被风控拦截"
+                )
+                recommendations.append("检查代理与网络环境，必要时降低该账号的操作频率，切勿加大签到力度")
+            elif sign_rate < 0.7:
+                alerts.append(f"签到真实成功率偏低 ({sign_rate:.0%})")
+                recommendations.append("更换代理 IP 或降低签到频率，观察是否被针对性风控")
+
+        # 跳过比例异常（跳过是保护行为，但过高说明账号实际活跃不足）
+        skip_ratio = stats.get("sign_skip_ratio", 0)
+        if skip_ratio > 0.5:
+            alerts.append(f"签到跳过比例 {skip_ratio:.0%}，实际签到频次偏低")
+            recommendations.append("检查拟人化跳过概率配置，或减少同日重复签到任务")
+
+        # 签到时间规律性（防指纹核心指标：成功签到集中在同一小时是机器特征；
+        # 跳过率本身测不了"过于规律"，改由时间分布衡量）
+        sign_hours = stats.get("sign_hour_distribution", {})
+        sign_success_total = sum(sign_hours.values())
+        if sign_success_total >= 20:
+            sign_peak = max(sign_hours.values()) / sign_success_total
+            if sign_peak > 0.6:
+                peak_hour = max(sign_hours, key=lambda k: sign_hours[k])
+                alerts.append(f"签到时间过于集中：{peak_hour} 时占 {sign_peak:.0%}")
+                recommendations.append("启用签到错峰调度，把每日签到窗口拉开到多个时段")
 
         # 维度 2：发帖时间分布
         hour_dist = stats.get("post_hour_distribution", {})
@@ -62,9 +83,9 @@ class BehaviorAuditor:
                     alerts.append(f"发帖时间过于集中：{peak_hour} 时占 {peak_ratio:.0%}")
                     recommendations.append("将发帖分散到更多时段，避免固定时间发帖")
 
-            # 检查是否只在工作时间发帖
+            # 检查是否只在工作时间发帖（样本 ≥5 才有统计意义，2-3 帖触发纯属噪声）
             work_hours_posts = sum(v for k, v in hour_dist.items() if 9 <= int(k) <= 18)
-            if total_posts > 0 and work_hours_posts / total_posts > 0.9:
+            if total_posts >= 5 and work_hours_posts / total_posts > 0.9:
                 alerts.append("几乎所有帖子都在工作时间 (9-18点) 发出")
                 recommendations.append("增加晚间和周末的发帖比例，更贴近真实用户行为")
 
@@ -91,6 +112,8 @@ class BehaviorAuditor:
         # 计算风险评分 (0-10)
         risk_score = self._calculate_risk_score(
             sign_rate=sign_rate,
+            sign_attempts=attempts,
+            sign_hour_distribution=sign_hours,
             hour_distribution=hour_dist,
             content_variety=content_variety,
             avg_interval=avg_interval,
@@ -116,25 +139,36 @@ class BehaviorAuditor:
 
                 cutoff = datetime.now() - timedelta(days=days)
 
-                # 签到统计
-                from sqlalchemy import case
-                sign_stmt = select(
-                    func.count(SignLog.id).label("total"),
-                    func.sum(case((SignLog.success == True, 1), else_=0)).label("success")
-                ).join(
-                    Forum, SignLog.forum_id == Forum.id
-                ).where(
-                    Forum.account_id == account_id,
-                    SignLog.signed_at >= cutoff
-                )
-                sign_result = await session.execute(sign_stmt)
-                row = sign_result.one_or_none()
-                if row:
-                    total = row.total or 0
-                    success = row.success or 0
-                    stats["total_signs"] = total
-                    stats["successful_signs"] = success
-                    stats["sign_rate"] = success / max(total, 1)
+                # 签到统计：拟人化跳过是防指纹保护行为（sign.py 落 success=False），
+                # 不计入成功率分母——否则"签到率"实为 1-跳过概率，语义失效
+                from .sign import SIGN_SKIP_MESSAGE
+                sign_rows = (await session.execute(
+                    select(SignLog.success, SignLog.message, SignLog.signed_at)
+                    .join(Forum, SignLog.forum_id == Forum.id)
+                    .where(
+                        Forum.account_id == account_id,
+                        SignLog.signed_at >= cutoff
+                    )
+                )).all()
+                total = len(sign_rows)
+                skips = sum(1 for r in sign_rows if r.message == SIGN_SKIP_MESSAGE)
+                success = sum(1 for r in sign_rows if r.success)
+                attempts = total - skips
+                stats["total_signs"] = total
+                stats["sign_skips"] = skips
+                stats["sign_attempts"] = attempts
+                stats["successful_signs"] = success
+                # 真实成功率：仅统计真实尝试（跳过行剔除）
+                stats["sign_rate"] = success / attempts if attempts > 0 else 0.0
+                stats["sign_skip_ratio"] = skips / total if total > 0 else 0.0
+                # 成功签到时间分布（跳过不触碰百度侧，失败无行为意义，
+                # 只有成功签到才是账号在百度留下的行为指纹）
+                sign_hours: dict[str, int] = {}
+                for r in sign_rows:
+                    if r.success and r.signed_at:
+                        hour = str(r.signed_at.hour)
+                        sign_hours[hour] = sign_hours.get(hour, 0) + 1
+                stats["sign_hour_distribution"] = sign_hours
 
                 # 发帖统计
                 post_stmt = select(BatchPostLog).where(
@@ -172,11 +206,12 @@ class BehaviorAuditor:
                     else:
                         stats["avg_post_interval_minutes"] = 0
 
-                # 代理失败统计
+                # 代理健康度：fail_count 是全生命周期累计值（无时间戳日志可回溯），
+                # 只统计仍在轮换中的 active 代理——已停用代理的陈史对后续风险无意义
                 account = await self.db.get_account_by_id(account_id)
                 if account and account.proxy_id:
                     proxy = await self.db.get_proxy(account.proxy_id)
-                    if proxy:
+                    if proxy and proxy.is_active:
                         stats["proxy_fail_count"] = proxy.fail_count
 
         except Exception as e:
@@ -192,14 +227,18 @@ class BehaviorAuditor:
         content_variety: float = 1.0,
         avg_interval: float = 0,
         proxy_fails: int = 0,
+        sign_attempts: int = 0,
+        sign_hour_distribution: dict = None,
     ) -> float:
         """
         综合风险评分 (0-10)，各维度加权：
-        - 签到异常：20%（档位上限 2.0）
-        - 时间集中度：25%（档位上限 3.0）
+        - 签到健康度：20%（档位上限 2.0，取真实成功率档与签到时间规律档的较重者；
+          sign_rate 为剔除拟人化跳过后的真实成功率）
+        - 发帖时间集中度：25%（档位上限 3.0，发帖峰时档与工作时间集中档取较重者，
+          工作时间档需样本 ≥5 帖）
         - 内容重复度：25%（档位上限 3.0）
         - 操作间隔：15%（档位上限 3.0）
-        - 代理健康：15%（档位上限 3.0）
+        - 代理健康：15%（档位上限 3.0，仅统计仍在轮换中的 active 代理）
 
         每维度按危险程度取档位分，加权求和后按理论满分归一到 0-10。
         （历史 bug：曾直接累加 档位分×权重，理论满分仅 2.8，
@@ -207,21 +246,37 @@ class BehaviorAuditor:
         """
         raw = 0.0
 
-        # 签到异常评分
-        if sign_rate > 0.95:
-            raw += 2.0 * 0.20
-        elif sign_rate < 0.3:
-            raw += 1.5 * 0.20
+        # 签到健康度评分（真实成功率与签到时间规律性，取较重档）
+        sign_dim = 0.0
+        if sign_attempts > 0:
+            if sign_rate < 0.4:
+                sign_dim = 2.0
+            elif sign_rate < 0.7:
+                sign_dim = 1.5
+        if sign_hour_distribution:
+            sign_total = sum(sign_hour_distribution.values())
+            if sign_total >= 20:
+                sign_peak = max(sign_hour_distribution.values()) / sign_total
+                if sign_peak > 0.8:
+                    sign_dim = max(sign_dim, 2.0)
+                elif sign_peak > 0.6:
+                    sign_dim = max(sign_dim, 1.0)
+        raw += sign_dim * 0.20
 
-        # 时间集中度评分
+        # 发帖时间集中度评分（峰时占比与工作时间集中，取较重档；样本过小不计）
         if hour_distribution:
             total = sum(hour_distribution.values())
-            if total > 0:
+            if total >= 3:
+                post_dim = 0.0
                 peak_ratio = max(hour_distribution.values()) / total
                 if peak_ratio > 0.6:
-                    raw += 3.0 * 0.25
+                    post_dim = 3.0
                 elif peak_ratio > 0.4:
-                    raw += 1.5 * 0.25
+                    post_dim = 1.5
+                work_ratio = sum(v for k, v in hour_distribution.items() if 9 <= int(k) <= 18) / total
+                if total >= 5 and work_ratio > 0.9:
+                    post_dim = max(post_dim, 2.0)
+                raw += post_dim * 0.25
 
         # 内容重复度评分
         if content_variety < 0.5:

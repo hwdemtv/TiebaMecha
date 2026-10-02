@@ -311,7 +311,7 @@ class TestCheckPostSurvival:
 
     @pytest.mark.asyncio
     async def test_check_post_survival_dead_exception(self):
-        """Test checking post when exception occurs."""
+        """基础设施异常（网络抖动等）→ unknown，不判死不落库语义"""
         from tieba_mecha.core.post import check_post_survival
 
         with patch("aiotieba.Client") as mock_client_class:
@@ -322,12 +322,12 @@ class TestCheckPostSurvival:
 
             status, reason = await check_post_survival(12345)
 
-            assert status == "dead"
+            assert status == "unknown"
             assert reason == "error"
 
     @pytest.mark.asyncio
-    async def test_check_post_survival_deleted_error(self):
-        """Test checking post with deleted error message."""
+    async def test_check_post_survival_generic_exception_ignores_message(self):
+        """通用异常不再从消息猜删帖原因（旧版会把网络错误里的 deleted 误判阵亡）"""
         from tieba_mecha.core.post import check_post_survival
 
         with patch("aiotieba.Client") as mock_client_class:
@@ -340,48 +340,97 @@ class TestCheckPostSurvival:
 
             status, reason = await check_post_survival(12345)
 
+            assert status == "unknown"
+            assert reason == "error"
+
+    @pytest.mark.asyncio
+    async def test_check_post_survival_tieba_error_deleted(self):
+        """TiebaServerError 结构化错误：含删除关键词 → dead + 细分原因"""
+        from tieba_mecha.core.post import check_post_survival
+
+        class FakeTiebaError(Exception):
+            def __init__(self, code, msg):
+                super().__init__(msg)
+                self.code = code
+                self.msg = msg
+
+        with patch("aiotieba.Client") as mock_client_class, patch(
+            "aiotieba.exception.TiebaServerError", FakeTiebaError
+        ):
+            mock_client = mock_client_class.return_value
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get_posts = AsyncMock(
+                side_effect=FakeTiebaError(273, "帖子已被删除")
+            )
+
+            status, reason = await check_post_survival(12345)
+
             assert status == "dead"
-            # 通用异常仅含 "deleted" 无删除者线索 → 归为 unknown
-            # (deleted_by_user 需 msg 含 用户/楼主/自删 关键词, 见 post.py 分类注释)
+            # 消息无删帖者线索 → deleted_unknown（不再臆断为系统删除）
             assert reason == "deleted_unknown"
 
     @pytest.mark.asyncio
-    async def test_check_post_survival_banned_error(self):
-        """Test checking post with banned error message."""
+    async def test_check_post_survival_tieba_error_captcha_unknown(self):
+        """验证码挑战是检测者被拦，不是帖子死亡 → unknown"""
         from tieba_mecha.core.post import check_post_survival
 
-        with patch("aiotieba.Client") as mock_client_class:
+        class FakeTiebaError(Exception):
+            def __init__(self, code, msg):
+                super().__init__(msg)
+                self.code = code
+                self.msg = msg
+
+        with patch("aiotieba.Client") as mock_client_class, patch(
+            "aiotieba.exception.TiebaServerError", FakeTiebaError
+        ):
             mock_client = mock_client_class.return_value
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.get_posts = AsyncMock(
-                side_effect=Exception("Thread blocked by moderator")
+                side_effect=FakeTiebaError(-1, "需要验证码验证")
             )
 
             status, reason = await check_post_survival(12345)
 
-            assert status == "dead"
-            # blocked/banned 类 → 吧务删除; 分类器不产出 banned_by_mod
-            # (crud.update_material_survival_status 的映射表兼容旧拼写仅为防御)
-            assert reason == "deleted_by_mod"
+            assert status == "unknown"
+            assert reason == "captcha_required"
 
     @pytest.mark.asyncio
-    async def test_check_post_survival_captcha_error(self):
-        """Test checking post with captcha error."""
+    async def test_check_post_survival_forum_without_thread_dead(self):
+        """假活修复：有 forum 但无 thread → dead（旧版兜底误判存活）"""
+        from tieba_mecha.core.post import check_post_survival
+
+        mock_response = MagicMock()
+        mock_response.forum.fid = 12345
+        mock_response.thread = None
+
+        with patch("aiotieba.Client") as mock_client_class:
+            mock_client = mock_client_class.return_value
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get_posts = AsyncMock(return_value=mock_response)
+
+            status, reason = await check_post_survival(12345)
+
+            assert status == "dead"
+            assert reason == "deleted_unknown"
+
+    @pytest.mark.asyncio
+    async def test_check_post_survival_null_response_dead(self):
+        """响应为空 → dead deleted_unknown"""
         from tieba_mecha.core.post import check_post_survival
 
         with patch("aiotieba.Client") as mock_client_class:
             mock_client = mock_client_class.return_value
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client.get_posts = AsyncMock(
-                side_effect=Exception("需要验证码验证")
-            )
+            mock_client.get_posts = AsyncMock(return_value=None)
 
             status, reason = await check_post_survival(12345)
 
             assert status == "dead"
-            assert reason == "captcha_required"
+            assert reason == "deleted_unknown"
 
     @pytest.mark.asyncio
     async def test_check_post_survival_with_thread_info(self):
@@ -404,24 +453,44 @@ class TestCheckPostSurvival:
             assert status == "alive"
             assert reason == ""
 
-    @pytest.mark.asyncio
-    async def test_check_post_survival_captcha_in_response(self):
-        """Test checking post when response contains captcha."""
-        from tieba_mecha.core.post import check_post_survival
 
-        mock_response = MagicMock()
-        mock_response.text = "请输入验证码"
+class TestClassifyDeathReason:
+    """_classify_death_reason 纯函数分类测试"""
 
-        with patch("aiotieba.Client") as mock_client_class:
-            mock_client = mock_client_class.return_value
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client.get_posts = AsyncMock(return_value=mock_response)
+    def test_captcha(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(-1, "需要验证码") == "captcha_required"
+        assert _classify_death_reason(-1, "captcha challenge") == "captcha_required"
 
-            status, reason = await check_post_survival(12345)
+    def test_deleted_with_system_keyword(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(273, "内容违规已被系统删除") == "deleted_by_system"
 
-            assert status == "dead"
-            assert reason == "captcha_required"
+    def test_deleted_with_mod_keyword(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(273, "blocked by moderator") == "deleted_by_mod"
+
+    def test_deleted_with_user_keyword(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(273, "楼主已自删该帖") == "deleted_by_user"
+
+    def test_deleted_no_clue(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(273, "帖子已删除") == "deleted_unknown"
+        assert _classify_death_reason(273, "") == "deleted_unknown"
+
+    def test_banned_maps_to_mod(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(500, "账号已被封禁") == "deleted_by_mod"
+
+    def test_not_found(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(269, "内容不存在") == "auto_removed"
+        assert _classify_death_reason(None, "page not found") == "auto_removed"
+
+    def test_unmapped_error(self):
+        from tieba_mecha.core.post import _classify_death_reason
+        assert _classify_death_reason(999, "服务繁忙") == "error"
 
 
 @pytest.mark.asyncio
@@ -754,3 +823,111 @@ class TestGetMaterialIdsByStatus:
 
         ids = await db.get_material_ids_by_status(statuses=["pending"], search_text="特殊")
         assert len(ids) == 1
+
+
+@pytest.mark.asyncio
+class TestSurvivalStatsFilters:
+    """get_survival_stats 筛选参数与检测新鲜度字段"""
+
+    async def _seed(self, db):
+        acc = await db.add_account(name="账号A", bduss="a" * 192)
+        async with db.async_session() as session:
+            m1 = MaterialPool(title="A存活", content="c", status="success", posted_tid=1,
+                              posted_account_id=acc.id, posted_fname="吧一",
+                              survival_status="alive", last_checked_at=datetime(2026, 10, 1, 12, 0, 0))
+            m2 = MaterialPool(title="A阵亡", content="c", status="success", posted_tid=2,
+                              posted_account_id=acc.id, posted_fname="吧二",
+                              survival_status="dead", death_reason="deleted_unknown",
+                              last_checked_at=datetime(2026, 10, 2, 8, 0, 0))
+            m3 = MaterialPool(title="B存活", content="c", status="success", posted_tid=3,
+                              posted_account_id=None, posted_fname="吧一",
+                              survival_status="alive", last_checked_at=datetime(2026, 9, 30, 9, 0, 0))
+            session.add_all([m1, m2, m3])
+            await session.commit()
+        return acc
+
+    async def test_no_filters_counts_all(self, db):
+        await self._seed(db)
+        stats = await db.get_survival_stats()
+        assert stats["total"] == 3
+        assert stats["alive"] == 2
+        assert stats["dead"] == 1
+        # 新鲜度 = 命中集合内最近检测时间
+        assert stats["last_checked_at"] == datetime(2026, 10, 2, 8, 0, 0)
+
+    async def test_filter_by_account(self, db):
+        acc = await self._seed(db)
+        stats = await db.get_survival_stats(account_id=acc.id)
+        assert stats["total"] == 2
+        assert stats["alive"] == 1
+        assert stats["dead"] == 1
+        assert stats["last_checked_at"] == datetime(2026, 10, 2, 8, 0, 0)
+
+    async def test_filter_by_fname(self, db):
+        await self._seed(db)
+        stats = await db.get_survival_stats(fname="吧一")
+        assert stats["total"] == 2
+        assert stats["alive"] == 2
+
+    async def test_filter_by_death_reason(self, db):
+        await self._seed(db)
+        stats = await db.get_survival_stats(death_reason="deleted_unknown")
+        assert stats["total"] == 1
+        assert stats["dead"] == 1
+
+    async def test_never_checked(self, db):
+        async with db.async_session() as session:
+            session.add(MaterialPool(title="未检测", content="c", status="success",
+                                     posted_tid=9, survival_status="unknown"))
+            await session.commit()
+        stats = await db.get_survival_stats()
+        assert stats["last_checked_at"] is None
+
+
+@pytest.mark.asyncio
+class TestMaterialsPaginatedOrdering:
+    """列表排序：新帖在前（id DESC）"""
+
+    async def test_newest_first(self, db):
+        async with db.async_session() as session:
+            for i in range(5):
+                session.add(MaterialPool(title=f"帖{i}", content="c", status="success", posted_tid=100 + i))
+            await session.commit()
+
+        materials, total = await db.get_materials_paginated()
+        assert total == 5
+        # 第一条应为最新插入（id 最大）的物料
+        assert materials[0].title == "帖4"
+        assert materials[-1].title == "帖0"
+
+    async def test_ordering_stable_across_pages(self, db):
+        async with db.async_session() as session:
+            for i in range(15):
+                session.add(MaterialPool(title=f"帖{i:02d}", content="c", status="success", posted_tid=200 + i))
+            await session.commit()
+
+        page1, total = await db.get_materials_paginated(page=1, page_size=10)
+        page2, _ = await db.get_materials_paginated(page=2, page_size=10)
+        assert [m.title for m in page1] == [f"帖{i:02d}" for i in range(14, 4, -1)]
+        assert [m.title for m in page2] == [f"帖{i:02d}" for i in range(4, -1, -1)]
+
+
+@pytest.mark.asyncio
+class TestGetPostedAccountIds:
+    """已删账号筛选数据源：物料池中出现过的全部发帖账号 ID"""
+
+    async def test_empty(self, db):
+        assert await db.get_posted_account_ids() == []
+
+    async def test_returns_distinct_ids(self, db):
+        async with db.async_session() as session:
+            for aid in (5, 5, 9):
+                session.add(MaterialPool(title="t", content="c", status="success",
+                                         posted_tid=1, posted_account_id=aid))
+            # 未发帖成功/无账号的记录不计
+            session.add(MaterialPool(title="t", content="c", status="pending", posted_account_id=7))
+            session.add(MaterialPool(title="t", content="c", status="success", posted_account_id=None))
+            await session.commit()
+
+        ids = await db.get_posted_account_ids()
+        assert ids == [5, 9]

@@ -1118,20 +1118,30 @@ class BatchPostCenterPage:
         try:
             final_status, death_reason = await check_post_survival(tid)
         except Exception:
-            final_status, death_reason = "dead", "error"
+            # 检测基础设施异常：不落库，缓存恢复为未探测（列表回退显示库内原状态）
+            final_status, death_reason = None, None
 
-        # 3. 结果写入缓存并持久化到数据库
-        self._survival_cache[tid] = final_status
-
-        # 寻找对应的物料ID进行持久化（优先从归档数据查找，找不到则查库）
-        mid = next((m.id for m in getattr(self, "_archive_items", []) if m.posted_tid == tid), None)
-        if mid:
-            await self.db.update_material_survival_status(mid, final_status, death_reason)
+        if final_status in ("alive", "dead"):
+            # 结果写入缓存并持久化到数据库
+            self._survival_cache[tid] = final_status
+            # 寻找对应的物料ID进行持久化（优先从归档数据查找，找不到则查库）
+            mid = next((m.id for m in getattr(self, "_archive_items", []) if m.posted_tid == tid), None)
+            if mid:
+                await self.db.update_material_survival_status(mid, final_status, death_reason)
+        elif final_status == "unknown":
+            # 被验证码/网络拦截，结论未定：不落库，保留原状态
+            self._survival_cache.pop(tid, None)
+        else:
+            self._survival_cache.pop(tid, None)
 
         if final_status == "alive":
             self._show_snackbar("响应成功：贴子目前健康正常开放访问", "success")
-        else:
+        elif final_status == "unknown":
+            self._show_snackbar("探测未确认（被验证码/网络拦截），已保留原状态", "warning")
+        elif final_status == "dead":
             self._show_snackbar("探测失败：贴子异常或已被抽除", "error")
+        else:
+            self._show_snackbar("探测异常，已保留原状态", "error")
 
         await self.load_data()
 
@@ -1165,6 +1175,7 @@ class BatchPostCenterPage:
 
         alive_count = 0
         dead_count = 0
+        unconfirmed_count = 0
         total = len(targets)
 
         # 并发控制：最多同时探测3个帖子
@@ -1180,7 +1191,8 @@ class BatchPostCenterPage:
                     status, reason = await check_post_survival(tid)
                     return tid, status, reason
                 except Exception:
-                    return tid, "dead", "error"
+                    # 基础设施异常按"未确认"返回，由结果循环保留原状态
+                    return tid, "unknown", "error"
                 finally:
                     # 限速：每次请求间隔0.5秒
                     await asyncio.sleep(0.5)
@@ -1194,27 +1206,37 @@ class BatchPostCenterPage:
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    # 异常处理
+                    # gather 级异常：不落库，恢复缓存为库内原状态
                     tid = targets[i].posted_tid
-                    self._survival_cache[tid] = "dead"
-                    await self.db.update_material_survival_status(targets[i].id, "dead", "error")
-                    dead_count += 1
+                    self._survival_cache[tid] = targets[i].survival_status or "unknown"
+                    unconfirmed_count += 1
                     self._log_stream.add(f"⚠️ [错误] {targets[i].posted_fname} | TID:{tid} | {str(result)}", "error")
                 else:
                     tid, status, reason = result
-                    self._survival_cache[tid] = status
-                    await self.db.update_material_survival_status(targets[i].id, status, reason)
+                    if status in ("alive", "dead"):
+                        self._survival_cache[tid] = status
+                        await self.db.update_material_survival_status(targets[i].id, status, reason)
+                    else:
+                        # unknown（验证码/网络拦截）：不落库，保留原状态
+                        self._survival_cache[tid] = targets[i].survival_status or "unknown"
+                        unconfirmed_count += 1
 
                     if status == "alive":
                         alive_count += 1
                         self._log_stream.add(f"✅ [存活] {targets[i].posted_fname} | TID:{tid}")
-                    else:
+                    elif status == "dead":
                         dead_count += 1
                         if reason == "captcha_required":
                             captcha_detected = True
                             self._log_stream.add(f"🚫 [验证码] {targets[i].posted_fname} | TID:{tid}", "warning")
                         else:
                             self._log_stream.add(f"❌ [阵亡] {targets[i].posted_fname} | TID:{tid}", "error")
+                    else:
+                        if reason == "captcha_required":
+                            captcha_detected = True
+                            self._log_stream.add(f"🚫 [验证码] {targets[i].posted_fname} | TID:{tid}", "warning")
+                        else:
+                            self._log_stream.add(f"❓ [未确认] {targets[i].posted_fname} | TID:{tid}", "warning")
 
                 # 更新进度
                 self.archive_progress_bar.value = (i + 1) / total
@@ -1233,7 +1255,10 @@ class BatchPostCenterPage:
             self.archive_status_text.visible = False
             self.page.update()
 
-        self._show_snackbar(f"批量探测完毕: {alive_count} 条存活健在，{dead_count} 条已掉线", "info")
+        summary = f"批量探测完毕: {alive_count} 条存活健在，{dead_count} 条已掉线"
+        if unconfirmed_count:
+            summary += f"，{unconfirmed_count} 条未确认（保留原状态）"
+        self._show_snackbar(summary, "info")
         await self.load_data()
 
     def _update_bulk_visibility(self):

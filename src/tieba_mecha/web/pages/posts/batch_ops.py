@@ -453,20 +453,25 @@ class BatchOpsTabMixin:
 
         self._batch_progress_bar.visible = True
         self._batch_progress_bar.value = 0
-        alive = dead = 0
+        alive = dead = unconfirmed = failed = 0
         try:
             total = len(targets)
             for i, row in enumerate(targets, 1):
+                status = None
                 try:
                     status, reason = await check_post_survival(row.tid)
                 except Exception:
-                    # 异常文本不写入 death_reason（列宽有限且非可确认原因）
-                    status, reason = "dead", "error"
-                await self.db.update_material_survival_status(row.material_id, status, reason)
-                if status == "alive":
-                    alive += 1
-                else:
-                    dead += 1
+                    # 检测基础设施异常：不落库，保留物料原状态
+                    failed += 1
+                if status in ("alive", "dead"):
+                    await self.db.update_material_survival_status(row.material_id, status, reason)
+                    if status == "alive":
+                        alive += 1
+                    else:
+                        dead += 1
+                elif status == "unknown":
+                    # 被验证码/网络拦截，结论未定：不落库，保留原状态
+                    unconfirmed += 1
                 self._batch_progress_bar.value = i / total
                 self._batch_progress_info.value = f"存活检测 {i}/{total}"
                 self.page.update()
@@ -476,6 +481,8 @@ class BatchOpsTabMixin:
             self._batch_progress_info.value = ""
 
         msg = f"检测完成: 存活 {alive}, 阵亡 {dead}"
+        if unconfirmed + failed:
+            msg += f", 未确认 {unconfirmed + failed}（保留原状态）"
         if skipped > 0:
             msg += f"（跳过 {skipped} 条本地记录）"
         self._show_snackbar(msg, "success")

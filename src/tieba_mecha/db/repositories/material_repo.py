@@ -301,18 +301,42 @@ class MaterialRepository:
                 .group_by(MaterialPool.posted_fname)
             )
             return {row[0]: row[1] for row in result.all() if row[0]}
-    async def get_survival_stats(self) -> dict:
-        """获取存活统计概览（仅统计已发帖成功的物料）"""
+    async def get_survival_stats(
+        self,
+        account_id: int | None = None,
+        fname: str | None = None,
+        death_reason: str | None = None,
+        date_from=None,
+        date_to=None,
+    ) -> dict:
+        """获取存活统计概览（仅统计已发帖成功的物料）
+
+        筛选参数与列表页共用口径；存活状态本身不作为筛选条件（统计卡即状态分布）。
+        附带 last_checked_at = 命中集合内最近的检测时间，供页面展示检测新鲜度。
+        """
         async with self.async_session() as session:
             from sqlalchemy import func
+            where = [
+                MaterialPool.status == "success",
+                MaterialPool.posted_tid.isnot(None),
+                MaterialPool.posted_tid != 0,
+            ]
+            if account_id:
+                where.append(MaterialPool.posted_account_id == account_id)
+            if fname:
+                where.append(MaterialPool.posted_fname == fname)
+            if death_reason:
+                where.append(MaterialPool.death_reason == death_reason)
+            if date_from:
+                where.append(MaterialPool.posted_time >= date_from)
+            if date_to:
+                where.append(MaterialPool.posted_time <= date_to)
             result = await session.execute(
                 select(
                     MaterialPool.survival_status,
                     func.count(MaterialPool.id)
                 )
-                .where(MaterialPool.status == "success")
-                .where(MaterialPool.posted_tid.isnot(None))
-                .where(MaterialPool.posted_tid != 0)
+                .where(*where)
                 .group_by(MaterialPool.survival_status)
             )
             stats = {"total": 0, "alive": 0, "dead": 0, "unknown": 0}
@@ -320,6 +344,10 @@ class MaterialRepository:
                 if status in stats:
                     stats[status] = count
                 stats["total"] += count
+            last_checked = await session.execute(
+                select(func.max(MaterialPool.last_checked_at)).where(*where)
+            )
+            stats["last_checked_at"] = last_checked.scalar()
             return stats
     async def get_survival_by_account(self) -> list[dict]:
         """获取按账号分组的存活统计"""
@@ -520,12 +548,12 @@ class MaterialRepository:
             count_stmt = sa_select(func.count(MaterialPool.id)).where(*base_where)
             total = (await session.execute(count_stmt)).scalar() or 0
 
-            # 分页数据
+            # 分页数据（新帖在前——监控页最关心的是刚发的帖子）
             offset = (page - 1) * page_size
             data_stmt = (
                 select(MaterialPool)
                 .where(*base_where)
-                .order_by(MaterialPool.id.asc())
+                .order_by(MaterialPool.id.desc())
                 .offset(offset)
                 .limit(page_size)
             )
@@ -553,6 +581,20 @@ class MaterialRepository:
                 .order_by(MaterialPool.death_reason)
             )
             return [row[0] for row in result.all()]
+    async def get_posted_account_ids(self) -> list[int]:
+        """获取物料池中出现过的全部发帖账号 ID（含已删除账号）
+
+        账号被封禁手动删号后，accounts 表无记录但其历史物料仍在池中
+        （往往是阵亡大户），存活分析页的账号筛选需要能看到它们。
+        """
+        async with self.async_session() as session:
+            from sqlalchemy import select as sa_select, distinct
+            result = await session.execute(
+                sa_select(distinct(MaterialPool.posted_account_id))
+                .where(MaterialPool.status == "success")
+                .where(MaterialPool.posted_account_id.isnot(None))
+            )
+            return sorted(row[0] for row in result.all())
     async def get_materials_by_ids(self, ids: list[int]) -> list[MaterialPool]:
         """按 ID 列表批量查询物料"""
         if not ids:

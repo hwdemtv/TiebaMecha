@@ -150,9 +150,11 @@ class TestRiskScoreMath:
         from tieba_mecha.core.behavior_audit import BehaviorAuditor
         auditor = BehaviorAuditor(db=None)
         score = auditor._calculate_risk_score(
-            sign_rate=0.99,
-            hour_distribution={"10": 10},
-            content_variety=0.3,
+            sign_rate=0.3,                              # 真实成功率极低 → 2.0*0.2
+            sign_attempts=10,
+            sign_hour_distribution={"9": 19, "10": 1},  # 签到峰时 95% → 档位取 max 2.0
+            hour_distribution={"10": 10},               # 发帖高度集中 → 3.0*0.25
+            content_variety=0.3,                        # 重复度高 → 3.0*0.25
             avg_interval=1.0,
             proxy_fails=15,
         )
@@ -162,7 +164,9 @@ class TestRiskScoreMath:
         from tieba_mecha.core.behavior_audit import BehaviorAuditor
         auditor = BehaviorAuditor(db=None)
         score = auditor._calculate_risk_score(
-            sign_rate=0.8,
+            sign_rate=1.0,                       # 真实成功率 100% 是健康态，不再扣分
+            sign_attempts=30,
+            sign_hour_distribution={"3": 5, "8": 5, "12": 5, "18": 5, "23": 5},
             hour_distribution={"9": 3, "14": 3, "21": 3},
             content_variety=0.95,
             avg_interval=30.0,
@@ -175,13 +179,52 @@ class TestRiskScoreMath:
         from tieba_mecha.core.behavior_audit import BehaviorAuditor
         auditor = BehaviorAuditor(db=None)
         score = auditor._calculate_risk_score(
-            sign_rate=0.99,                    # 签到过规律 → 2.0*0.2
+            sign_rate=0.9,
+            sign_attempts=30,
+            sign_hour_distribution={"9": 25, "10": 5},  # 签到峰时 >0.8 → 2.0*0.2
             hour_distribution={"2": 8, "3": 1},  # 高度集中 → 3.0*0.25
-            content_variety=0.4,               # 重复度高 → 3.0*0.25
+            content_variety=0.4,                 # 重复度高 → 3.0*0.25
             avg_interval=10.0,
             proxy_fails=0,
         )
         assert score >= 5.0
+
+    def test_high_success_rate_no_longer_scores(self):
+        """口径重构：成功率高≠行为规律，不再计分（旧版 >0.95 即取最高档）"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        auditor = BehaviorAuditor(db=None)
+        score = auditor._calculate_risk_score(
+            sign_rate=1.0,
+            sign_attempts=50,
+            sign_hour_distribution={"9": 2, "11": 2, "15": 2, "20": 2},
+            hour_distribution={"9": 3, "14": 3, "21": 3},
+            content_variety=1.0,
+            avg_interval=30.0,
+            proxy_fails=0,
+        )
+        assert score == pytest.approx(0.0)
+
+    def test_work_hours_concentration_scores(self):
+        """工作时间集中（≥5 帖且 >90%）计入时间维度 2.0/3.0 档"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        auditor = BehaviorAuditor(db=None)
+        # 6 帖分布在 10/12/17 点，峰时 2/6=0.33 不触发峰时档 → 仅工作时间档生效
+        score = auditor._calculate_risk_score(
+            hour_distribution={"10": 2, "12": 2, "17": 2},
+            content_variety=1.0,
+        )
+        expected = 2.0 * 0.25 / 2.8 * 10
+        assert score == pytest.approx(expected)
+
+    def test_work_hours_small_sample_no_score(self):
+        """样本 <5 帖：工作时间集中不计分（2-3 帖触发纯属噪声）"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        auditor = BehaviorAuditor(db=None)
+        score = auditor._calculate_risk_score(
+            hour_distribution={"10": 1, "12": 1},
+            content_variety=1.0,
+        )
+        assert score == pytest.approx(0.0)
 
 
 class TestAuditGovernance:
@@ -463,3 +506,124 @@ class TestAISimilaritySelfCheck:
 
         await optimizer.optimize_post("原标题", ORIGINAL_CONTENT, persona="normal")
         assert "存活参考" not in session.requests[0]["messages"][1]["content"]
+
+
+# ========================================================================
+# 行为审计口径重构：签到率剔除跳过行 / 签到时间规律性 / 工作时间告警样本门槛
+# ========================================================================
+
+class TestAuditSignRateSemantics:
+    """签到率口径重构：跳过行剔除分母，"过于规律"改由签到时间分布衡量"""
+
+    async def _make_account_with_forum(self, db):
+        acc = await db.add_account(name="audit-acc", bduss="x" * 200)
+        forum = await db.add_forum(fid=1, fname="审计吧", account_id=acc.id)
+        return acc, forum
+
+    async def _insert_signs(self, db, forum, rows):
+        from tieba_mecha.db.models import SignLog
+        async with db.async_session() as session:
+            for success, message, hour in rows:
+                session.add(SignLog(forum_id=forum.id, fname=forum.fname, success=success,
+                                    message=message, signed_at=datetime(2026, 10, 2, hour, 30, 0)))
+            await session.commit()
+
+    @pytest.mark.asyncio
+    async def test_skip_rows_excluded_from_rate(self, db):
+        from tieba_mecha.core.sign import SIGN_SKIP_MESSAGE
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        acc, forum = await self._make_account_with_forum(db)
+        rows = [(True, "签到成功", 9)] * 8 + [(False, SIGN_SKIP_MESSAGE, 9)] * 2
+        await self._insert_signs(db, forum, rows)
+
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        stats = report["stats"]
+        assert stats["sign_attempts"] == 8
+        assert stats["sign_skips"] == 2
+        assert stats["sign_rate"] == pytest.approx(1.0)  # 真实成功率 100%，跳过不扣分
+        assert stats["sign_skip_ratio"] == pytest.approx(0.2)
+        assert not any("签到" in a for a in report["alerts"])
+
+    @pytest.mark.asyncio
+    async def test_low_real_success_alert_direction(self, db):
+        """真实成功率低 = 疑似被风控，建议方向是降频查代理而非加大签到"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        acc, forum = await self._make_account_with_forum(db)
+        rows = [(True, "签到成功", 9)] * 2 + [(False, "风控拒绝", 9)] * 8
+        await self._insert_signs(db, forum, rows)
+
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        assert report["stats"]["sign_rate"] == pytest.approx(0.2)
+        assert any("疑似被风控拦截" in a for a in report["alerts"])
+        assert any("切勿加大签到力度" in r for r in report["recommendations"])
+
+    @pytest.mark.asyncio
+    async def test_sign_hour_concentration_alert(self, db):
+        """成功签到集中在同一小时（≥20 次样本）→ 规律性告警并计分"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        acc, forum = await self._make_account_with_forum(db)
+        rows = [(True, "签到成功", 9)] * 25 + [(True, "签到成功", 14)] * 3
+        await self._insert_signs(db, forum, rows)
+
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        assert any("签到时间过于集中" in a for a in report["alerts"])
+        assert report["risk_score"] > 0
+
+    @pytest.mark.asyncio
+    async def test_sign_hour_concentration_needs_sample(self, db):
+        """成功签到样本 <20 次不触发规律性告警"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        acc, forum = await self._make_account_with_forum(db)
+        rows = [(True, "签到成功", 9)] * 10
+        await self._insert_signs(db, forum, rows)
+
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        assert not any("签到时间过于集中" in a for a in report["alerts"])
+
+    @pytest.mark.asyncio
+    async def test_inactive_proxy_excluded_from_stats(self, db):
+        """已停用代理的累计失败数不再计入审计（陈史对后续风险无意义）"""
+        proxy = await db.add_proxy(host="127.0.0.1", port=1080,
+                                   username="", password="", protocol="socks5")
+        for _ in range(11):
+            await db.mark_proxy_fail(proxy.id)
+        acc = await db.add_account(name="px-acc", bduss="z" * 200, proxy_id=proxy.id)
+
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        # 阈值 10 次后代理已停用 → 不计入
+        assert "proxy_fail_count" not in report["stats"]
+
+
+class TestAuditWorkHoursSampleGuard:
+    """工作时间告警样本门槛（≥5 帖才有统计意义）"""
+
+    async def _insert_posts(self, db, acc, hours):
+        from tieba_mecha.db.models import BatchPostLog
+        async with db.async_session() as session:
+            for i, h in enumerate(hours):
+                session.add(BatchPostLog(task_id=f"t{i}", account_id=acc.id, account_name=acc.name,
+                                         fname="吧", title=f"标题{i}", tid=1000 + i, status="success",
+                                         created_at=datetime(2026, 10, 2, h, 0, 0)))
+            await session.commit()
+
+    @pytest.mark.asyncio
+    async def test_small_sample_no_alert(self, db):
+        """2 帖全在 9-18 点：不再触发"工作时间集中"告警（旧版即误触发）"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        acc = await db.add_account(name="post-acc", bduss="y" * 200)
+        await self._insert_posts(db, acc, [10, 14])
+
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        assert not any("工作时间" in a for a in report["alerts"])
+
+    @pytest.mark.asyncio
+    async def test_sufficient_sample_alerts_and_scores(self, db):
+        """6 帖全在 9-18 点：触发告警且计入风险评分"""
+        from tieba_mecha.core.behavior_audit import BehaviorAuditor
+        acc = await db.add_account(name="post-acc2", bduss="y" * 200)
+        await self._insert_posts(db, acc, [10, 11, 12, 14, 16, 17])
+
+        report = await BehaviorAuditor(db).analyze_account(acc.id, days=7)
+        assert any("工作时间" in a for a in report["alerts"])
+        assert report["risk_score"] > 0

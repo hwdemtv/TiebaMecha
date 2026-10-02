@@ -339,11 +339,15 @@ class DetailDrawerMixin:
         try:
             status, reason = await check_post_survival(row.tid)
         except Exception:
-            # 异常文本不写入 death_reason（列宽有限且非可确认原因）
-            status, reason = "dead", "error"
-        await self.db.update_material_survival_status(row.material_id, status, reason)
-        label = "存活" if status == "alive" else ("阵亡(检测异常，疑似删除)" if reason == "error" else f"阵亡({reason or '未知'})")
-        self._show_snackbar(f"检测完成: {label}", "success" if status == "alive" else "warning")
+            # 检测基础设施异常：不落库，保留物料原状态
+            status, reason = None, None
+        if status in ("alive", "dead"):
+            await self.db.update_material_survival_status(row.material_id, status, reason)
+            label = "存活" if status == "alive" else f"阵亡({reason or '未知'})"
+            self._show_snackbar(f"检测完成: {label}", "success" if status == "alive" else "warning")
+        else:
+            # unknown（验证码/网络拦截）与基础设施异常均不落库
+            self._show_snackbar("检测未确认（被验证码/网络拦截），已保留原状态", "warning")
         await self._close_and_refresh()
 
     async def _detail_toggle_bump(self, enabled: bool):

@@ -438,29 +438,38 @@ class MyPostsTabMixin:
         self._check_running = True
         self._check_progress.visible = True
         self._check_progress.value = 0
-        alive = dead = 0
+        alive = dead = unconfirmed = failed = 0
         skipped = len(self._rows) - len(targets)
         try:
             total = len(targets)
             for i, row in enumerate(targets, 1):
+                status = None
                 try:
                     status, reason = await check_post_survival(row.tid)
                 except Exception:
-                    # 异常文本不写入 death_reason（列宽有限且非可确认原因），
-                    # 统一归为 error → 展示层归"疑似删除"
-                    status, reason = "dead", "error"
-                await self.db.update_material_survival_status(row.material_id, status, reason)
-                if status == "alive":
-                    alive += 1
-                else:
-                    dead += 1
+                    # 检测基础设施异常：不落库，保留物料原状态
+                    failed += 1
+                if status in ("alive", "dead"):
+                    await self.db.update_material_survival_status(row.material_id, status, reason)
+                    if status == "alive":
+                        alive += 1
+                    else:
+                        dead += 1
+                elif status == "unknown":
+                    # 被验证码/网络拦截，结论未定：不落库，保留原状态
+                    unconfirmed += 1
                 self._check_progress.value = i / total
-                self._check_info.value = f"检测中 {i}/{total}：存活 {alive} · 阵亡 {dead}"
+                info = f"检测中 {i}/{total}：存活 {alive} · 阵亡 {dead}"
+                if unconfirmed + failed:
+                    info += f" · 未确认 {unconfirmed + failed}"
+                self._check_info.value = info
                 self.page.update()
                 # 逐条限速，避免高频请求触发风控
                 await asyncio.sleep(0.3)
 
             done_msg = f"检测完成: 存活 {alive} 条, 阵亡 {dead} 条"
+            if unconfirmed + failed:
+                done_msg += f", 未确认 {unconfirmed + failed} 条（保留原状态）"
             if skipped > 0:
                 done_msg += f"（本地导入记录 {skipped} 条不支持检测，已跳过）"
             self._show_snackbar(done_msg, "success")

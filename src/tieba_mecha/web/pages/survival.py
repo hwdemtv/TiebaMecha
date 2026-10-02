@@ -115,11 +115,16 @@ class SurvivalPage:
         self._audit_reports: list[dict] = []  # 行为审计报告
         self._active_tab = "survival"  # 当前标签页
         self._audit_error = None  # 审计加载错误信息
+        self._audit_loaded = False  # 审计是否已加载（切到审计页签时才懒加载）
+        self._audit_time: datetime | None = None  # 本次审计的评估时间
+        self._freshness_text: ft.Text | None = None  # 检测新鲜度提示条
 
     def cleanup(self):
         """清理页面资源，导航离开时调用"""
         self._materials = []
         self._audit_reports = []
+        self._audit_loaded = False  # 与 _audit_reports 一并复位，下次进页重新加载
+        self._audit_time = None
         self._account_options = []
         self._fname_options = []
         self._death_reason_options = []
@@ -133,12 +138,20 @@ class SurvivalPage:
             # 仅首次加载或筛选选项为空时重新加载筛选选项
             if not self._account_options:
                 accounts = await self.db.get_accounts()
+                self._account_name_map = {a.id: a.name or f"账号-{a.id}" for a in accounts}
+                # 物料池里挂了帖子但账号已被删号的 ID（往往是阵亡大户）补进筛选与映射
+                known = set(self._account_name_map)
+                ghost_ids = [
+                    i for i in await self.db.get_posted_account_ids() if i not in known
+                ]
                 self._account_options = [
-                    ft.dropdown.Option(str(a.id), a.name or f"账号-{a.id}")
+                    ft.dropdown.Option(str(a.id), self._account_name_map[a.id])
                     for a in accounts
                 ]
-                # 构建账号 ID -> 名称映射
-                self._account_name_map = {a.id: a.name or f"账号-{a.id}" for a in accounts}
+                for gid in ghost_ids:
+                    ghost_label = f"账号-{gid}（已删除）"
+                    self._account_options.append(ft.dropdown.Option(str(gid), ghost_label))
+                    self._account_name_map[gid] = ghost_label
 
             if not self._fname_options:
                 fnames = await self.db.get_distinct_fnames()
@@ -150,12 +163,10 @@ class SurvivalPage:
                     ft.dropdown.Option(r, _death_reason_display(r)) for r in reasons
                 ]
 
-            # 统计数据每次都需要刷新
-            self._stats = await self.db.get_survival_stats()
+            # 统计数据每次都需要刷新（随筛选联动）
+            await self._refresh_stats()
 
             await self._load_page(1)
-            # 加载行为审计数据
-            await self._load_audit_data()
         except Exception as e:
             from ...core.logger import log_error
             from ..components.toast import show_toast
@@ -163,46 +174,97 @@ class SurvivalPage:
             show_toast(self.page, f"存活分析数据加载失败: {e}", "error")
 
     async def _load_audit_data(self):
-        """加载行为审计报告"""
+        """加载行为审计报告（首次切到审计页签时才调用）"""
         try:
             from ...core.behavior_audit import audit_all_accounts
             self._audit_reports = await audit_all_accounts(self.db, days=7)
             self._audit_error = None
+            self._audit_loaded = True
+            self._audit_time = datetime.now()
         except Exception as e:
             from ...core.logger import log_warn
             await log_warn(f"加载行为审计数据失败: {e}")
             self._audit_reports = []
             self._audit_error = str(e)
+            self._audit_loaded = False  # 失败可重试：下次切页签重新加载
+
+    async def _on_audit_refresh(self, e=None):
+        """重新评估审计（数字随近 7 天滚动窗口漂移，供手动刷新）"""
+        await self._load_audit_data()
+        self._tab_panel.content = self._build_active_tab_content()
+        self.page.update()
 
     async def _on_tab_change(self, e):
         """切换标签页"""
         self._active_tab = "audit" if e.control.selected_index == 1 else "survival"
+        if self._active_tab == "audit" and not self._audit_loaded:
+            await self._load_audit_data()
         self._tab_panel.content = self._build_active_tab_content()
         self.page.update()
+
+    def _collect_filters(self) -> dict:
+        """读取筛选栏当前值（控件尚未构建时全部按未筛选处理）"""
+        def val(attr: str):
+            return getattr(self, attr).value if hasattr(self, attr) else None
+
+        status = val("_status_filter")
+        account = val("_account_filter")
+        fname = val("_fname_filter")
+        reason = val("_death_reason_filter")
+        return {
+            "status": status if status and status != "all" else None,
+            "account_id": int(account) if account and account != "all" else None,
+            "fname": fname if fname and fname != "all" else None,
+            "death_reason": reason if reason and reason != "all" else None,
+            "date_from": _parse_date(val("_date_from")),
+            "date_to": _parse_date(val("_date_to"), end_of_day=True),
+        }
+
+    async def _refresh_stats(self):
+        """刷新统计卡与新鲜度提示（随筛选联动；存活状态筛选不作用于统计卡——卡即状态分布）"""
+        f = self._collect_filters()
+        self._stats = await self.db.get_survival_stats(
+            account_id=f["account_id"],
+            fname=f["fname"],
+            death_reason=f["death_reason"],
+            date_from=f["date_from"],
+            date_to=f["date_to"],
+        )
+        if self._stat_cards_container:
+            self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
+        self._update_freshness()
+
+    def _update_freshness(self):
+        """更新检测新鲜度提示条"""
+        if not self._freshness_text:
+            return
+        last = self._stats.get("last_checked_at")
+        if last is None:
+            self._freshness_text.value = "⚠️ 从未执行过存活检测——点右上「批量检测存活」开始首次检测"
+            self._freshness_text.color = "error"
+        else:
+            hours = (datetime.now() - last).total_seconds() / 3600
+            if hours < 1:
+                ago = "1 小时内"
+            elif hours < 24:
+                ago = f"{int(hours)} 小时前"
+            else:
+                ago = f"{int(hours // 24)} 天前"
+            stale = f" · 已超 48 小时未检测，建议执行批量检测" if hours >= 48 else ""
+            self._freshness_text.value = f"最近检测：{last.strftime('%m-%d %H:%M')}（{ago}）{stale}"
+            self._freshness_text.color = "error" if hours >= 48 else "onSurfaceVariant"
 
     async def _load_page(self, page: int):
         """加载指定页"""
         self._current_page = page
-        status_filter = self._status_filter.value if hasattr(self, "_status_filter") else None
-        account_filter = self._account_filter.value if hasattr(self, "_account_filter") else None
-        fname_filter = self._fname_filter.value if hasattr(self, "_fname_filter") else None
-        death_reason_filter = self._death_reason_filter.value if hasattr(self, "_death_reason_filter") else None
-        date_from_filter = self._date_from.value if hasattr(self, "_date_from") else None
-        date_to_filter = self._date_to.value if hasattr(self, "_date_to") else None
-        account_id = int(account_filter) if account_filter and account_filter != "all" else None
-        fname = fname_filter if fname_filter and fname_filter != "all" else None
-        death_reason = death_reason_filter if death_reason_filter and death_reason_filter != "all" else None
-        status = status_filter if status_filter and status_filter != "all" else None
-        # 解析日期
-        date_from = _parse_date(date_from_filter)
-        date_to = _parse_date(date_to_filter, end_of_day=True)
+        f = self._collect_filters()
         materials, total = await self.db.get_materials_paginated(
-            survival_status=status,
-            account_id=account_id,
-            fname=fname,
-            death_reason=death_reason,
-            date_from=date_from,
-            date_to=date_to,
+            survival_status=f["status"],
+            account_id=f["account_id"],
+            fname=f["fname"],
+            death_reason=f["death_reason"],
+            date_from=f["date_from"],
+            date_to=f["date_to"],
             page=page,
             page_size=self._page_size,
         )
@@ -211,19 +273,9 @@ class SurvivalPage:
         self._update_card_list()
         self._update_pagination()
 
-    async def _on_status_change(self, e):
-        await self._load_page(1)
-
-    async def _on_account_change(self, e):
-        await self._load_page(1)
-
-    async def _on_fname_change(self, e):
-        await self._load_page(1)
-
-    async def _on_death_reason_change(self, e):
-        await self._load_page(1)
-
-    async def _on_date_change(self, e):
+    async def _on_filter_change(self, e=None):
+        """任一筛选条件变化：统计卡与列表一并刷新"""
+        await self._refresh_stats()
         await self._load_page(1)
 
     async def _on_prev_page(self, e):
@@ -234,6 +286,19 @@ class SurvivalPage:
         total_pages = (self._total + self._page_size - 1) // self._page_size
         if self._current_page < total_pages:
             await self._load_page(self._current_page + 1)
+
+    async def _on_jump_page(self, e):
+        """跳转到指定页"""
+        total_pages = max(1, (self._total + self._page_size - 1) // self._page_size)
+        try:
+            target = int(str(self._page_jump.value or "").strip())
+        except ValueError:
+            target = 0
+        self._page_jump.value = ""
+        if 1 <= target <= total_pages:
+            await self._load_page(target)
+        else:
+            self.page.update()
 
     # ========== 统计卡片 ==========
 
@@ -308,7 +373,7 @@ class SurvivalPage:
                 ft.dropdown.Option("dead", "阵亡"),
                 ft.dropdown.Option("unknown", "未知"),
             ],
-            on_change=self._on_status_change,
+            on_change=self._on_filter_change,
         )
         self._account_filter = ft.Dropdown(
             label="账号",
@@ -316,7 +381,7 @@ class SurvivalPage:
             width=160,
             text_size=13,
             options=[ft.dropdown.Option("all", "全部账号")] + self._account_options,
-            on_change=self._on_account_change,
+            on_change=self._on_filter_change,
         )
         self._fname_filter = ft.Dropdown(
             label="贴吧",
@@ -324,7 +389,7 @@ class SurvivalPage:
             width=160,
             text_size=13,
             options=[ft.dropdown.Option("all", "全部贴吧")] + self._fname_options,
-            on_change=self._on_fname_change,
+            on_change=self._on_filter_change,
         )
         self._death_reason_filter = ft.Dropdown(
             label="阵亡原因",
@@ -332,28 +397,28 @@ class SurvivalPage:
             width=180,
             text_size=13,
             options=[ft.dropdown.Option("all", "全部原因")] + self._death_reason_options,
-            on_change=self._on_death_reason_change,
+            on_change=self._on_filter_change,
         )
         self._date_from = ft.TextField(
             label="起始日期",
             width=120,
             text_size=12,
             hint_text="YYYY-MM-DD",
-            on_submit=self._on_date_change,
+            on_submit=self._on_filter_change,
         )
         self._date_to = ft.TextField(
             label="结束日期",
             width=120,
             text_size=12,
             hint_text="YYYY-MM-DD",
-            on_submit=self._on_date_change,
+            on_submit=self._on_filter_change,
         )
         return ft.Row(
             [self._status_filter, self._account_filter, self._fname_filter, self._death_reason_filter, self._date_from, self._date_to, ft.IconButton(
                 icon="search",
                 icon_size=18,
                 tooltip="搜索",
-                on_click=self._on_date_change,
+                on_click=self._on_filter_change,
             )],
             spacing=10,
             wrap=True,
@@ -429,10 +494,11 @@ class SurvivalPage:
         meta_items.append(ft.Row([ft.Icon(INFO_OUTLINED, size=12, color="onSurfaceVariant"), ft.Text(account_name, size=11, color="onSurfaceVariant")], spacing=3))
         meta_items.append(ft.Text(posted_time, size=11, color="onSurfaceVariant"))
 
-        # 阵亡原因
-        if m.survival_status == "dead" and m.death_reason:
+        # 阵亡原因（未知态也可能是"检测被拦"，有原因记录就展示）
+        if m.survival_status in ("dead", "unknown") and m.death_reason:
             reason_text = _death_reason_display(m.death_reason)
-            meta_items.append(ft.Text(f"原因: {reason_text}", size=11, color="error", italic=True))
+            reason_color = "error" if m.survival_status == "dead" else "onSurfaceVariant"
+            meta_items.append(ft.Text(f"原因: {reason_text}", size=11, color=reason_color, italic=True))
 
         bottom_row = ft.Row(meta_items, spacing=12, wrap=True)
 
@@ -497,10 +563,11 @@ class SurvivalPage:
             ft.Row([ft.Text("发布时间:", size=12, weight=ft.FontWeight.BOLD, color="onSurfaceVariant"), ft.Text(m.posted_time.strftime("%Y-%m-%d %H:%M") if m.posted_time else "-", size=12)]),
         ]
 
-        # 阵亡原因
-        if m.survival_status == "dead" and m.death_reason:
+        # 阵亡原因（未知态也可能是"检测被拦"，有原因记录就展示）
+        if m.survival_status in ("dead", "unknown") and m.death_reason:
             reason_text = _death_reason_display(m.death_reason)
-            detail_items.append(ft.Row([ft.Text("阵亡原因:", size=12, weight=ft.FontWeight.BOLD, color="error"), ft.Text(reason_text, size=12, color="error", expand=True, selectable=True)]))
+            reason_color = "error" if m.survival_status == "dead" else "onSurfaceVariant"
+            detail_items.append(ft.Row([ft.Text("阵亡原因:", size=12, weight=ft.FontWeight.BOLD, color=reason_color), ft.Text(reason_text, size=12, color=reason_color, expand=True, selectable=True)]))
 
         # 最后检测时间
         if m.last_checked_at:
@@ -548,9 +615,7 @@ class SurvivalPage:
             await log_info(f"用户删除物料 #{material_id}")
             await self.db.delete_material(material_id)
             # 重新加载统计数据和当前页
-            self._stats = await self.db.get_survival_stats()
-            if self._stat_cards_container:
-                self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
+            await self._refresh_stats()
             await self._load_page(self._current_page)
 
     # ========== 分页控件 ==========
@@ -571,10 +636,18 @@ class SurvivalPage:
             on_click=self._on_next_page,
             disabled=True,
         )
+        self._page_jump = ft.TextField(
+            label="跳至页码",
+            width=110,
+            text_size=12,
+            input_filter=ft.NumbersOnlyInputFilter(),
+            on_submit=self._on_jump_page,
+        )
         return ft.Row(
-            [self._prev_btn, self._page_info, self._next_btn],
+            [self._prev_btn, self._page_info, self._next_btn, self._page_jump],
             alignment=ft.MainAxisAlignment.CENTER,
             spacing=10,
+            wrap=True,
         )
 
     def _update_pagination(self):
@@ -622,17 +695,25 @@ class SurvivalPage:
         medium_risk = sum(1 for r in reports if 2.5 <= r.get("risk_score", 0) < 5)
         low_risk = sum(1 for r in reports if r.get("risk_score", 0) < 2.5)
         avg_score = sum(r.get("risk_score", 0) for r in reports) / len(reports)
+        # 均值会掩盖单账号风险，并列展示最高分账号
+        worst = max(reports, key=lambda r: r.get("risk_score", 0))
 
         # 总体评分色
         score_color, _ = _get_risk_color(avg_score)
 
         overview_cards = ft.Row([
-            # 综合风险评分
+            # 综合风险
             ft.Container(
                 content=ft.Column([
                     ft.Row([ft.Icon(SHIELD_ROUNDED, color=score_color, size=20), ft.Text("综合风险 / RISK SCORE", size=11, color="onSurfaceVariant")], spacing=5),
-                    ft.Text(f"{avg_score:.1f}", size=36, weight=ft.FontWeight.BOLD, color=score_color),
-                    ft.Text("/ 10", size=14, color="onSurfaceVariant"),
+                    ft.Row([
+                        ft.Text(f"{avg_score:.1f}", size=36, weight=ft.FontWeight.BOLD, color=score_color),
+                        ft.Text("/ 10", size=14, color="onSurfaceVariant"),
+                    ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.END),
+                    ft.Text(
+                        f"峰值 {worst.get('risk_score', 0)}（{worst.get('account_name', '?')}）",
+                        size=11, color="onSurfaceVariant",
+                    ),
                 ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                 padding=15,
                 bgcolor=with_opacity(0.05, score_color),
@@ -706,10 +787,15 @@ class SurvivalPage:
 
         # 指标徽章
         badges = []
+        # sign_rate 为剔除拟人化跳过后的真实成功率：<70% 才值得警惕
         sign_rate = stats.get("sign_rate", 0)
-        if sign_rate > 0:
-            badges.append(self._mini_badge("签到率", f"{sign_rate:.0%}",
-                          "#4CAF50" if 0.3 <= sign_rate <= 0.95 else "#FF9800"))
+        if stats.get("sign_attempts", 0) > 0:
+            badges.append(self._mini_badge("签到成功率", f"{sign_rate:.0%}",
+                          "#4CAF50" if sign_rate >= 0.7 else "#FF9800"))
+        skip_ratio = stats.get("sign_skip_ratio", 0)
+        if skip_ratio > 0:
+            badges.append(self._mini_badge("跳过", f"{skip_ratio:.0%}",
+                          "#4CAF50" if skip_ratio <= 0.3 else "#FF9800"))
 
         content_variety = stats.get("content_unique_ratio", 1.0)
         badges.append(self._mini_badge("内容多样性", f"{content_variety:.0%}",
@@ -820,8 +906,8 @@ class SurvivalPage:
 
         # 详细指标
         metrics = [
-            ("签到率", f"{stats.get('sign_rate', 0):.0%}", stats.get('sign_rate', 0) > 0),
-            ("总签到数", str(stats.get('total_signs', 0)), stats.get('total_signs', 0) > 0),
+            ("签到真实成功率", f"{stats.get('sign_rate', 0):.0%}", stats.get('sign_attempts', 0) > 0),
+            ("真实尝试 / 跳过", f"{stats.get('sign_attempts', 0)} 次 / {stats.get('sign_skips', 0)} 次", stats.get('total_signs', 0) > 0),
             ("总发帖数", str(stats.get('total_posts', 0)), stats.get('total_posts', 0) > 0),
             ("内容多样性", f"{stats.get('content_unique_ratio', 1.0):.0%}", True),
             ("平均发帖间隔", f"{stats.get('avg_post_interval_minutes', 0):.1f} 分钟", stats.get('avg_post_interval_minutes', 0) > 0),
@@ -892,10 +978,25 @@ class SurvivalPage:
         if not self._audit_reports:
             return self._build_audit_overview()
 
+        # 评估时间 caption（审计数字随近 7 天滚动窗口漂移，须可见评估时点）
+        caption = ""
+        if self._audit_time:
+            mins = int((datetime.now() - self._audit_time).total_seconds() / 60)
+            ago = "刚刚" if mins < 1 else f"{mins} 分钟前"
+            caption = f"评估时间：{self._audit_time.strftime('%m-%d %H:%M')}（{ago}）· 数字随近 7 天滚动窗口变化"
+
         cards = [self._build_audit_report_card(r) for r in self._audit_reports]
         return ft.Column([
             self._build_audit_overview(),
-            ft.Divider(height=10, color="transparent"),
+            ft.Row([
+                ft.Text(caption, size=11, color="onSurfaceVariant", expand=True),
+                ft.IconButton(
+                    icon=REFRESH_ROUNDED,
+                    icon_size=16,
+                    tooltip="重新评估",
+                    on_click=self._on_audit_refresh,
+                ),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Text("账号审计报告 / ACCOUNT AUDITS", size=13, weight=ft.FontWeight.W_500, color="primary"),
             ft.Column(cards, spacing=8, scroll=ft.ScrollMode.AUTO, expand=True),
         ], spacing=10, expand=True)
@@ -911,6 +1012,10 @@ class SurvivalPage:
         else:
             return ft.Column([
                 self._stat_cards_container,
+                ft.Container(
+                    content=self._freshness_text,
+                    padding=ft.padding.only(left=20, right=20),
+                ),
                 ft.Divider(height=10, color="transparent"),
                 ft.Container(
                     content=self._build_filter_bar(),
@@ -936,9 +1041,11 @@ class SurvivalPage:
         self._surv_check_btn = ft.OutlinedButton(
             "批量检测存活",
             icon=REFRESH_ROUNDED,
-            tooltip="逐一探测所有已发帖子是否仍然存活（限速执行）",
+            tooltip="并发 3 路逐一探测所有已发帖子是否仍然存活（单路限速执行）",
             on_click=lambda e: self.page.run_task(self._bulk_check_survival),
         )
+        # 检测新鲜度提示条（统计卡下方）
+        self._freshness_text = ft.Text("", size=11, color="onSurfaceVariant")
         # 创建统计卡片容器（保存引用以便后续更新）
         self._stat_cards_container = ft.Container(
             content=ft.Row(self._build_stat_cards(), spacing=10),
@@ -1005,8 +1112,12 @@ class SurvivalPage:
         )
 
     async def _bulk_check_survival(self, e=None):
-        """批量探测所有已发帖子的存活状态（逐条限速，避免高频请求触发风控）"""
-        from ...core.logger import log_info
+        """批量探测所有已发帖子的存活状态（并发 3 路、单路限速，避免高频请求触发风控）
+
+        只有拿到明确的 alive/dead 结论才落库；unknown（检测被验证码/网络拦截）
+        与基础设施异常一律不写库，保留物料原有状态，避免把"没测出来"写成长期档案。
+        """
+        from ...core.logger import log_info, log_warn
         from ...core.post import check_post_survival
         from ..components.toast import show_toast
 
@@ -1018,7 +1129,7 @@ class SurvivalPage:
             btn.disabled = True
         self._surv_progress.visible = True
         self.page.update()
-        alive = dead = 0
+        alive = dead = unconfirmed = failed = done = 0
         try:
             materials = await self.db.get_materials(status="success")
             targets = [m for m in materials if m.posted_tid and m.posted_tid != 0]
@@ -1026,25 +1137,43 @@ class SurvivalPage:
                 show_toast(self.page, "没有需要检测的帖子", "warning")
                 return
             total = len(targets)
-            for i, m in enumerate(targets, 1):
-                try:
-                    status, reason = await check_post_survival(m.posted_tid)
-                    await self.db.update_material_survival_status(m.id, status, reason)
-                    if status == "alive":
-                        alive += 1
-                    else:
-                        dead += 1
-                except Exception as ex:
-                    await self.db.update_material_survival_status(m.id, "dead", str(ex))
-                    dead += 1
-                self._surv_progress.value = i / total
-                self._surv_check_info.value = f"检测中 {i}/{total}：✅{alive} ❌{dead}"
-                self.page.update()
-                # 逐条限速，避免高频请求触发风控
-                await asyncio.sleep(0.3)
+            semaphore = asyncio.Semaphore(3)
 
-            show_toast(self.page, f"检测完成: 存活 {alive} 条, 阵亡 {dead} 条", "success")
-            await log_info(f"批量存活检测完成: 存活 {alive}, 阵亡 {dead}, 共 {total} 条")
+            async def _check_one(m):
+                nonlocal alive, dead, unconfirmed, failed, done
+                async with semaphore:
+                    try:
+                        status, reason = await check_post_survival(m.posted_tid)
+                        if status in ("alive", "dead"):
+                            await self.db.update_material_survival_status(m.id, status, reason)
+                        if status == "alive":
+                            alive += 1
+                        elif status == "dead":
+                            dead += 1
+                        else:
+                            unconfirmed += 1  # unknown：保留原状态不落库
+                        await asyncio.sleep(0.5)  # 单路限速
+                    except Exception as ex:
+                        failed += 1
+                        await log_warn(f"批量存活检测异常 tid={m.posted_tid}: {ex}")
+                    done += 1
+                    self._surv_progress.value = done / total
+                    info = f"检测中 {done}/{total}：✅{alive} ❌{dead} ❓{unconfirmed}"
+                    if failed:
+                        info += f" ⚠️{failed}"
+                    self._surv_check_info.value = info
+                    try:
+                        self.page.update()
+                    except Exception:
+                        pass  # 页面已离开等场景不影响后台检测
+
+            await asyncio.gather(*[_check_one(m) for m in targets])
+
+            result_msg = f"检测完成: 存活 {alive} 条, 阵亡 {dead} 条, 未确认 {unconfirmed} 条"
+            if failed:
+                result_msg += f", 失败 {failed} 条"
+            show_toast(self.page, result_msg, "success")
+            await log_info(f"批量存活检测完成: 存活 {alive}, 阵亡 {dead}, 未确认 {unconfirmed}, 失败 {failed}, 共 {total} 条")
         finally:
             self._check_running = False
             self._surv_progress.visible = False
@@ -1054,9 +1183,7 @@ class SurvivalPage:
                 btn.disabled = False
             # 刷新统计与列表
             try:
-                self._stats = await self.db.get_survival_stats()
-                if self._stat_cards_container:
-                    self._stat_cards_container.content = ft.Row(self._build_stat_cards(), spacing=10)
+                await self._refresh_stats()
                 await self._load_page(1)
             except Exception:
                 pass

@@ -405,93 +405,100 @@ async def add_post(
             return False, f"回复失败: {str(e)}"
 
 
+# 存活检测错误码语义（百度侧）
+_DELETION_SIGNAL_CODES = {273}  # 帖子已删除
+_NOT_FOUND_CODES = {269}        # 帖子不存在
+
+
+def _classify_death_reason(code: int | None, msg: str) -> str:
+    """根据百度错误码 + 消息细分删帖原因
+
+    百度接口不会告知删帖者，deleted_by_* 细分只能靠消息关键词启发式；
+    证据不足时返回 deleted_unknown。返回值不含 alive —— 本函数只在
+    "已确认不可访问"的语境下调用了才有效。
+    """
+    m = (msg or "").lower()
+
+    # 验证码拦截（检测者被拦，不是帖子死亡）
+    if "captcha" in m or "验证码" in (msg or ""):
+        return "captcha_required"
+
+    # 帖子已删除类（错误码 273 或含删除关键词）
+    if code in _DELETION_SIGNAL_CODES or "删除" in (msg or "") or "deleted" in m or "removed" in m:
+        if "系统" in msg or "system" in m or "违规" in msg or "spam" in m:
+            return "deleted_by_system"
+        if "吧务" in msg or "吧主" in msg or "mod" in m or "banned" in m or "blocked" in m:
+            return "deleted_by_mod"
+        if "用户" in msg or "楼主" in msg or "自删" in msg:
+            return "deleted_by_user"
+        return "deleted_unknown"
+
+    # 封禁类（账号/吧被封导致的不可见，按吧务侧处理）
+    if "banned" in m or "blocked" in m or "封禁" in (msg or ""):
+        return "deleted_by_mod"
+
+    # 帖子不存在
+    if "not found" in m or "404" in m or code in _NOT_FOUND_CODES:
+        return "auto_removed"
+
+    return "error"
+
+
 async def check_post_survival(tid: int) -> tuple[str, str]:
     """
     检测帖子是否存活
 
-    Args:
-        tid: 主题帖ID
+    判定以 thread 为主证据：thread 存在 → alive；
+    thread 缺失（正常响应但无 thread / 响应为空）→ dead（deleted_unknown）。
+    旧版"forum 有效即存活"的兜底会把"有 forum 无 thread"的中间态误判存活，已废除。
+
+    检测被拦 ≠ 帖子阵亡：验证码挑战、网络异常、未映射错误码一律返回
+    ("unknown", reason)，调用方不应将其落库（保留原状态，等下一轮检测）。
 
     Returns:
-        (存活状态: "alive"/"dead", 被删原因)
-        被删原因分类:
+        (存活状态: "alive"/"dead"/"unknown", 原因)
+        原因分类:
         - "": 存活
-        - "deleted_by_system": 系统风控删除（百度AI/反作弊自动删帖）
-        - "deleted_by_mod": 吧务手动删除
-        - "deleted_by_user": 用户自删/楼主删除
-        - "deleted_unknown": 帖子已删除但无法确定删除者
+        - "deleted_by_system": 系统风控删除（百度AI/反作弊自动删帖，仅错误消息可辨时）
+        - "deleted_by_mod": 吧务手动删除（含封禁类错误）
+        - "deleted_by_user": 用户自删/楼主删除（仅错误消息可辨时）
+        - "deleted_unknown": 帖子已删除但无法确定删除者（生产实测删帖基本落此）
         - "auto_removed": 帖子不存在/404
-        - "captcha_required": 验证码拦截
-        - "error": 其他异常
+        - "captcha_required": 检测者被验证码拦截（unknown）
+        - "error": 检测异常/未映射错误（unknown）
     """
     from aiotieba.exception import TiebaServerError
 
     try:
         async with aiotieba.Client() as client:
             res = await client.get_posts(tid)
-
-            # 检测验证码拦截
-            if res and hasattr(res, 'text') and '验证码' in str(res.text or ''):
-                return "dead", "captcha_required"
-
-            if res and res.forum and res.forum.fid > 0:
-                # 增强判断：检查帖子基本信息完整性
-                if res.thread:
-                    # 有回复数说明帖子健康（被删帖通常没有回复数据）
-                    if res.thread.reply_num is not None:
-                        return "alive", ""
-                    # 有标题但无回复数，也视为存活
-                    if res.thread.title:
-                        return "alive", ""
-                # 兜底：只要有有效的 forum fid 就视为存活
-                return "alive", ""
-            else:
-                return "dead", "deleted_unknown"
     except TiebaServerError as ex:
-        # 百度返回结构化错误，利用 code + msg 精细分类
-        code = ex.code
-        msg = (ex.msg or "").lower()
-
-        # 验证码拦截
-        if "captcha" in msg or "验证码" in msg:
-            return "dead", "captcha_required"
-
-        # 帖子已删除类（错误码 273 或其他含删除关键词）
-        if code == 273 or "删除" in msg or "deleted" in msg or "removed" in msg:
-            # 进一步细分删帖原因
-            if "系统" in msg or "system" in msg or "违规" in msg or "spam" in msg:
-                return "dead", "deleted_by_system"
-            elif "吧务" in msg or "吧主" in msg or "mod" in msg or "banned" in msg or "blocked" in msg:
-                return "dead", "deleted_by_mod"
-            elif "用户" in msg or "楼主" in msg or "自删" in msg:
-                return "dead", "deleted_by_user"
-            else:
-                # 错误码273但无法区分删除者 → 尝试二次确认
-                # 百度系统删帖通常无具体提示文本，吧务删帖可能有提示
-                if not msg.strip() or msg in ("", "帖子已删除", "帖子不存在"):
-                    return "dead", "deleted_by_system"  # 无提示文本倾向于系统删帖
-                return "dead", "deleted_unknown"
-
-        # 封禁类
-        if "banned" in msg or "blocked" in msg or "封禁" in msg:
-            if "本吧" in msg:
-                return "dead", "deleted_by_mod"
-            return "dead", "deleted_by_mod"
-
-        # 帖子不存在
-        if "not found" in msg or "404" in msg or code == 269:
-            return "dead", "auto_removed"
-
-        return "dead", "error"
+        reason = _classify_death_reason(ex.code, ex.msg or "")
+        if reason in ("captcha_required", "error"):
+            # 验证码挑战/未映射错误码：检测本身失败，不能断言帖子死亡
+            return "unknown", reason
+        from .logger import log_info
+        await log_info(
+            f"存活检测判定阵亡 tid={tid} code={ex.code} msg={ex.msg!r} → {reason}"
+        )
+        return "dead", reason
     except Exception as ex:
-        error_msg = str(ex).lower()
-        if "captcha" in error_msg or "验证码" in str(ex):
-            return "dead", "captcha_required"
-        elif "deleted" in error_msg or "removed" in error_msg:
-            return "dead", "deleted_unknown"
-        elif "banned" in error_msg or "blocked" in error_msg:
-            return "dead", "deleted_by_mod"
-        elif "not found" in error_msg or "404" in error_msg:
-            return "dead", "auto_removed"
-        else:
-            return "dead", "error"
+        # 网络抖动等基础设施异常：不判死，保留原状态等下一轮
+        from .logger import log_warn
+        await log_warn(f"存活检测异常 tid={tid}: {ex}")
+        return "unknown", "error"
+
+    # 正常响应：thread 是帖子可公开访问的唯一可靠证据
+    # (Posts.text 属性并不存在，旧版基于它的验证码检查是死代码，已删除)
+    if res and getattr(res, "thread", None):
+        return "alive", ""
+
+    # 正常响应但 thread 缺失 → 帖子已不可公开访问。
+    # 生产实测删帖响应常连 forum 一并无，forum 有无不影响结论，仅记录线索
+    hint = ""
+    forum = getattr(res, "forum", None) if res else None
+    if forum is not None:
+        hint = f" forum={getattr(forum, 'name', None) or '?'}"
+    from .logger import log_info
+    await log_info(f"存活检测判定阵亡 tid={tid}（正常响应无 thread{hint}）→ deleted_unknown")
+    return "dead", "deleted_unknown"

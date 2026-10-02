@@ -9,7 +9,8 @@ import flet as ft
 class MockDatabase:
     """模拟数据库"""
     def __init__(self):
-        self.stats = {"total": 72, "alive": 50, "dead": 21, "unknown": 1}
+        self.stats = {"total": 72, "alive": 50, "dead": 21, "unknown": 1,
+                      "last_checked_at": None}
         self.accounts = [
             MagicMock(id=1, name="测试账号1"),
             MagicMock(id=2, name="测试账号2"),
@@ -39,11 +40,29 @@ class MockDatabase:
             ),
         ]
 
-    async def get_survival_stats(self):
-        return self.stats
+    async def get_survival_stats(self, account_id=None, fname=None,
+                                 death_reason=None, date_from=None, date_to=None):
+        if not any((account_id, fname, death_reason, date_from, date_to)):
+            return self.stats
+        filtered = self.materials
+        if account_id:
+            filtered = [m for m in filtered if m.posted_account_id == account_id]
+        if fname:
+            filtered = [m for m in filtered if m.posted_fname == fname]
+        if death_reason:
+            filtered = [m for m in filtered if m.death_reason == death_reason]
+        stats = {"total": len(filtered), "alive": 0, "dead": 0, "unknown": 0,
+                 "last_checked_at": None}
+        for m in filtered:
+            stats[m.survival_status] = stats.get(m.survival_status, 0) + 1
+        return stats
 
     async def get_accounts(self):
         return self.accounts
+
+    async def get_posted_account_ids(self):
+        return sorted({m.posted_account_id for m in self.materials
+                       if m.posted_account_id is not None})
 
     async def get_distinct_fnames(self):
         return sorted({m.posted_fname for m in self.materials})
