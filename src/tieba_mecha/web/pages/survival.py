@@ -200,6 +200,10 @@ class SurvivalPage:
         if self._active_tab == "audit" and not self._audit_loaded:
             await self._load_audit_data()
         self._tab_panel.content = self._build_active_tab_content()
+        if self._active_tab == "survival":
+            # 切回存活页签会重建全新的空 _card_list/_page_info，必须重新填充，
+            # 否则列表永远空白（_build_* 只造壳，填壳是 _load_page 的事）
+            await self._load_page(self._current_page)
         self.page.update()
 
     def _collect_filters(self) -> dict:
@@ -647,7 +651,6 @@ class SurvivalPage:
             [self._prev_btn, self._page_info, self._next_btn, self._page_jump],
             alignment=ft.MainAxisAlignment.CENTER,
             spacing=10,
-            wrap=True,
         )
 
     def _update_pagination(self):

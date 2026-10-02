@@ -435,3 +435,34 @@ class TestNavigate:
 # 运行测试
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTabRoundTrip:
+    """页签往返：切回存活监控必须重新填充列表与页码（修复"切页签回来列表空白"）"""
+
+    @staticmethod
+    def _tab_event(index):
+        ev = MagicMock()
+        ev.control.selected_index = index
+        return ev
+
+    @pytest.mark.asyncio
+    async def test_switching_back_to_survival_repopulates_list(self, survival_page, mock_page):
+        survival_page.build()
+        await survival_page.load_data()
+        assert len(survival_page._card_list.controls) > 0
+        assert survival_page._page_info.value != ""
+
+        await survival_page._on_tab_change(self._tab_event(1))   # 行为审计
+        await survival_page._on_tab_change(self._tab_event(0))   # 切回存活监控
+
+        assert survival_page._active_tab == "survival"
+        # 重建后的新 _card_list/_page_info 必须被重新填充，否则列表永远空白
+        assert len(survival_page._card_list.controls) > 0
+        assert survival_page._page_info.value != ""
+
+    def test_pagination_row_not_wrap(self, survival_page):
+        """分页行禁用 wrap（flet wrap 破坏 MainAxisAlignment.CENTER 居中）"""
+        survival_page.build()
+        row = survival_page._build_pagination()
+        assert row.wrap in (False, None)
