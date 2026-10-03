@@ -758,6 +758,15 @@ class MaterialRepository:
                     m.bump_count = 0
                     m.last_bumped_at = None
 
+                # [修复] 新帖落库(posted_tid)/重置待发时，带链首评记录随旧帖作废：
+                # link_reply_* 只描述"当前 posted_tid 这一帖"的首评状态，重发不清
+                # 会被首评调度按已闭环跳过，新帖永远等不到首评（10-02 物料616
+                # reuse 重发电视剧资源吧事故：pid 还挂在已阵亡的旧电影吧帖上）
+                if posted_tid is not None or status == "pending":
+                    m.link_reply_at = None
+                    m.link_reply_pid = None
+                    m.link_reply_fail_count = 0
+
                 if last_error is not None: m.last_error = last_error
                 if posted_fname is not None: m.posted_fname = posted_fname
                 if posted_tid is not None: m.posted_tid = posted_tid

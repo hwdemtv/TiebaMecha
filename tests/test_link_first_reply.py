@@ -334,3 +334,47 @@ async def test_retry_content_carries_rewrite_and_pwd(db, manager):
     assert "pan.baidu.com/s/xyz 提取码 9q8z" in content
     assert "?pwd=" not in content
     assert "https://" not in content
+
+
+@pytest.mark.asyncio
+async def test_repost_resets_stale_link_reply_state(db):
+    """10-02 物料616事故：reuse 重发落新 posted_tid 时旧首评闭环记录不清，
+    首评调度按 link_reply_at IS NULL 捞候选会永久跳过该物料——新帖没有首评。"""
+    mid = await _add_material(db)
+    # 首轮闭环：首评已发出且确认可见（挂在旧帖上）
+    async with db.async_session() as session:
+        m = await session.get(MaterialPool, mid)
+        m.link_reply_at = datetime.now() - timedelta(days=2)
+        m.link_reply_pid = 153984149016
+        await session.commit()
+
+    # 重发：新帖落库 → 首评状态必须归零重装载
+    await db.update_material_status(
+        mid, "success", posted_fname="电视剧资源", posted_tid=999,
+        posted_account_id=1, posted_time=datetime.now(),
+    )
+
+    m = await _get_material(db, mid)
+    assert m.posted_tid == 999
+    assert m.link_reply_at is None
+    assert m.link_reply_pid is None
+    assert m.link_reply_fail_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reset_to_pending_clears_link_reply_state(db):
+    """手动/批量重置为待发：旧帖首评记录随行作废，重发后可重新获得首评。"""
+    mid = await _add_material(db)
+    async with db.async_session() as session:
+        m = await session.get(MaterialPool, mid)
+        m.link_reply_at = datetime.now() - timedelta(days=2)
+        m.link_reply_pid = 42
+        m.link_reply_fail_count = 1
+        await session.commit()
+
+    await db.update_material_status(mid, "pending")
+
+    m = await _get_material(db, mid)
+    assert m.link_reply_at is None
+    assert m.link_reply_pid is None
+    assert m.link_reply_fail_count == 0

@@ -182,6 +182,21 @@ class TestAIOptimizer:
         assert "占位符" in error
 
     @pytest.mark.asyncio
+    async def test_optimize_post_markdown_fake_link_rejected(self):
+        """输出门禁 markdown 假链变体（10-03 池内复扫 179 条中招）：种子无链接
+        时模型编造 "[标题](#)" 装饰链，贴吧不渲染 markdown 发出去即占位假链
+        → 首次重试、持续脏按失败回退。"""
+        dirty = {"title": "T", "content": "好看。\n\n链接：[《片名》资源下载](#)"}
+        optimizer, mock_session = self._make_optimizer_and_session([dirty, dirty])
+        with patch('tieba_mecha.core.ai_optimizer.require_pro', lambda f: f):
+            with patch('aiohttp.ClientSession', return_value=mock_session):
+                success, title, content, error = await optimizer.optimize_post(
+                    "原标题", "原始内容没有任何链接")
+
+        assert success is False
+        assert content == "原始内容没有任何链接"
+
+    @pytest.mark.asyncio
     async def test_optimize_post_preserves_legitimate_original_url(self):
         """输出门禁不误杀：原文自有 URL 经占位符恢复后仍在输出中 → 正常放行"""
         real_url = "https://pan.baidu.com/s/1abcDEF?pwd=xyz9"
