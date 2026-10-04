@@ -611,13 +611,12 @@ async def sign_account_forums(
                     if err_code == ERR_FORUM_BANNED:
                         await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
                         await db.update_target_pool_status(forum.fname, is_success=False, error_reason="矩阵全扫检测吧务封禁")
-                        message = f"贴吧已封禁 (3250004)"
-                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 已自动熔断标记")
+                        # 日志由下方统一失败分支记一条（此处另记会双行）
+                        message = "贴吧已封禁 (3250004)，已自动熔断标记"
                     else:
                         # 自动删除无效贴吧
                         await db.delete_forum(forum.id)
                         message = f"贴吧已失效 ({err_code})，已自动移除"
-                        await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: {message}")
 
                 # 写入日志与数据库
                 await db.add_sign_log(

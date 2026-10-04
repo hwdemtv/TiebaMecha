@@ -27,6 +27,7 @@ from tieba_mecha.core.sign import (
     SIGN_SKIP_DEFAULT,
     SIGN_SKIP_MAX,
     SIGN_SKIP_MESSAGE,
+    sign_account_forums,
     sign_all_forums,
     sign_all_accounts,
     sync_forums_to_db,
@@ -936,3 +937,32 @@ class TestDaemonReload:
         await d.reload(db)
 
         assert d.scheduler.get_job(d.sign_job_id) is None
+
+
+@pytest.mark.asyncio
+class TestMatrixAccountForumsErrorPaths:
+    """矩阵流 sign_account_forums（矩阵全扫与守护错峰的生产路径）失效码处理"""
+
+    async def _setup(self, db):
+        from tieba_mecha.core.account import add_account
+
+        acc = await add_account(db=db, name="acc_matrix", bduss="a" * 192, stoken="b" * 64)
+        forum = await db.add_forum(fid=2, fname="matrix_forum", account_id=acc.id)
+        return acc, forum
+
+    async def test_invalid_forum_removed_single_warn(self, db):
+        """340006 失效 -> 自动删除 + 移除 WARN 恰好一条（回归：invalid 分支与统一失败分支曾同文双记）"""
+        acc, forum = await self._setup(db)
+        client = make_client([FakeSignResponse(code=340006, truthy=False)])
+
+        with patch("tieba_mecha.core.sign.create_client", return_value=client):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                with patch("tieba_mecha.core.sign.log_warn", new_callable=AsyncMock) as mock_warn:
+                    async for _ in sign_account_forums(db, account_id=acc.id, delay_min=0, delay_max=0):
+                        pass
+
+        async with db.async_session() as session:
+            assert await session.get(Forum, forum.id) is None, "失效贴吧应被删除"
+        warn_msgs = [str(c.args[0]) for c in mock_warn.await_args_list]
+        removed = [m for m in warn_msgs if "已自动移除" in m]
+        assert len(removed) == 1, f"失效移除 WARN 应恰好 1 条，实际: {warn_msgs}"

@@ -245,6 +245,31 @@ async def test_add_harvested_material_and_dedup(db):
 
 
 @pytest.mark.asyncio
+async def test_harvest_seen_ledger_survives_row_deletion(db):
+    """已见账本不随物料行删除失效（回归：2026-10-04 #830 被人工删除后同源 tid 重采成 #1845）"""
+    from tieba_mecha.db.models import MaterialPool
+
+    mid = await db.add_harvested_material(
+        title="吧规导航", content="正文", source_tid=3453368492, source_fname="俊男坊",
+        source_link_url="http://pan.baidu.com/s/1sj8tMxR", source_link_type="baidu",
+    )
+    assert mid > 0
+    # 人工删除物料行（误采清理路径）
+    async with db.async_session() as session:
+        m = await session.get(MaterialPool, mid)
+        await session.delete(m)
+        await session.commit()
+    # 表内行已没了，账本仍拦截
+    assert await db.get_harvested_by_source_tid(3453368492) is True
+    assert await db.add_harvested_material(
+        title="吧规导航", content="正文", source_tid=3453368492,
+        source_link_url="http://pan.baidu.com/s/2other", source_link_type="baidu",
+    ) == 0
+    # 账本只拦已见 tid，不影响新帖
+    assert await db.get_harvested_by_source_tid(3453368493) is False
+
+
+@pytest.mark.asyncio
 async def test_promote_gate_blocks_untransferred_source_link(db):
     mid = await db.add_harvested_material(
         title="待转存物料", content="正文", source_tid=22222, source_fname="电影吧",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Optional
@@ -27,6 +28,11 @@ from ..models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 采集已见账本：settings 表持久化已采 source_tid。material_pool 里的行会被人工删除
+# （如误采清理），只按表去重会让同一烂帖反复入池（2026-10-04 #830 删后 #1845 重采）。
+HARVEST_SEEN_KEY = "maint_harvest_seen_tids"
+_HARVEST_SEEN_LIMIT = 1000  # 账本裁剪上限（每天 1-3 条，1000 条≈一年，防无限增长）
 
 
 class MaterialRepository:
@@ -181,17 +187,15 @@ class MaterialRepository:
     ) -> int:
         """采集入库一条 harvested 物料（别人的链）。
 
-        source_tid 去重：同源帖已存在则跳过（返回 0），防止矩阵号
-        反复看到同一个热帖重复入库。插入失败也返回 0。
+        source_tid 去重：同源帖已存在（material_pool 存活行 OR 已见账本）则跳过
+        （返回 0），防止矩阵号反复看到同一个热帖重复入库；账本不随物料行删除失效。
+        插入失败也返回 0。
         """
         if not source_tid or not source_link_url:
             return 0
         try:
             async with self.async_session() as session:
-                dup = await session.execute(
-                    select(MaterialPool.id).where(MaterialPool.source_tid == source_tid)
-                )
-                if dup.first() is not None:
+                if await self._is_source_tid_seen(session, source_tid):
                     return 0
                 m = MaterialPool(
                     title=title,
@@ -205,21 +209,50 @@ class MaterialRepository:
                     source_link_type=source_link_type,
                 )
                 session.add(m)
+                # 已见账本与物料同事务落库
+                setting = await session.get(Setting, HARVEST_SEEN_KEY)
+                seen: list = []
+                if setting and setting.value:
+                    try:
+                        seen = json.loads(setting.value)
+                    except (ValueError, TypeError):
+                        seen = []
+                if source_tid not in seen:
+                    seen.append(source_tid)
+                    seen = seen[-_HARVEST_SEEN_LIMIT:]
+                payload = json.dumps(seen)
+                if setting:
+                    setting.value = payload
+                else:
+                    session.add(Setting(key=HARVEST_SEEN_KEY, value=payload))
                 await session.commit()
                 await session.refresh(m)
                 return m.id
         except Exception:
             return 0
 
+    async def _is_source_tid_seen(self, session, source_tid: int) -> bool:
+        """已见判定：material_pool 存活行 OR settings 已见账本（须在调用方 session 内执行）"""
+        row = await session.execute(
+            select(MaterialPool.id).where(MaterialPool.source_tid == source_tid)
+        )
+        if row.first() is not None:
+            return True
+        setting = await session.get(Setting, HARVEST_SEEN_KEY)
+        if not setting or not setting.value:
+            return False
+        try:
+            seen = json.loads(setting.value)
+        except (ValueError, TypeError):
+            return False
+        return source_tid in seen
+
     async def get_harvested_by_source_tid(self, source_tid: int) -> bool:
-        """该来源帖是否已被采集过（用于养号侧避免重复偏置浏览候选）"""
+        """该来源帖是否已被采集过（表内存活行 OR 已见账本，用于养号侧避免重复偏置浏览候选）"""
         if not source_tid:
             return False
         async with self.async_session() as session:
-            result = await session.execute(
-                select(MaterialPool.id).where(MaterialPool.source_tid == source_tid)
-            )
-            return result.first() is not None
+            return await self._is_source_tid_seen(session, source_tid)
 
     async def mark_link_transferred(
         self, material_id: int, new_link_url: str, *, new_note: str = ""
