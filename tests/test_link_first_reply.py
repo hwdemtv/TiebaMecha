@@ -130,6 +130,35 @@ async def test_first_reply_uses_poster_and_rewrites_link(db, manager):
 
 
 @pytest.mark.asyncio
+async def test_no_selfreply_config_skips_poster_rotation(db, manager):
+    """link_reply_no_selfreply 排除楼主自评：其帖子首评首轮直接轮换其他矩阵号。
+
+    回归背景：2026-10-04 实证 hwdemtv187 楼主自评首评 4/4 被百度系统硬吞
+    （作者视角不可见+reply_num 残影），同吧同内容其他号存活。
+    """
+    poster_id = await _add_account(db, "poster")     # 矩阵池序在前，无配置时会被选为楼主自评
+    await _add_account(db, "helper")
+    await db.set_setting("link_reply_no_selfreply", str(poster_id))
+    mid = await _add_material(db, posted_account_id=poster_id)
+
+    count = await manager.process_link_first_replies()
+
+    assert count == 1
+    args = manager.post_manager.reply_to_thread.await_args.args
+    assert args[0] != poster_id, "被排除楼主自评的账号，其帖子首评不得由楼主自评发出"
+    m = await _get_material(db, mid)
+    assert m.link_reply_at is not None
+
+    # 配置清空后行为回归：楼主自评优先恢复
+    await db.set_setting("link_reply_no_selfreply", "")
+    mid2 = await _add_material(db, posted_account_id=poster_id, posted_tid=654321)
+    count2 = await manager.process_link_first_replies()
+    assert count2 == 1
+    args2 = manager.post_manager.reply_to_thread.await_args_list[-1].args
+    assert args2[0] == poster_id, "配置清空后必须恢复楼主自评优先"
+
+
+@pytest.mark.asyncio
 async def test_verify_confirms_visibility_and_closes_loop(db, manager):
     poster_id = await _add_account(db, "poster")
     mid = await _add_material(db, posted_account_id=poster_id)

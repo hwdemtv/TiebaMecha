@@ -2509,10 +2509,21 @@ class AutoBumpManager:
             await log_warn(f"带链首评：{len(candidates)} 条物料待发，但矩阵号池为空，本轮跳过")
             return 0
 
+        # 排除出楼主自评的账号（settings 键，值=账号id列表，空=不排除）。
+        # 背景：2026-10-04 实证 hwdemtv187 楼主自评首评 4/4 被百度系统硬吞（作者视角
+        # 也不可见、reply_num 留残影），同吧同内容其他矩阵号存活——其帖子首评直接轮换。
+        try:
+            _no_self_raw = await self.db.get_setting("link_reply_no_selfreply", "")
+        except Exception:
+            _no_self_raw = ""
+        no_self_ids = {int(x) for x in re.findall(r"\d+", _no_self_raw or "")}
+
         success_count = 0
         for material in candidates:
             fail_count = material.link_reply_fail_count or 0
             poster_acc = next((a for a in matrix_pool if a.id == material.posted_account_id), None)
+            if poster_acc and poster_acc.id in no_self_ids:
+                poster_acc = None  # 被排除出楼主自评：直接走矩阵号轮换
             pool_wo_poster = [a for a in matrix_pool if a.id != material.posted_account_id]
             # 楼主自评优先（首轮无失败记录时）；已有失败记录则按失败次数轮换矩阵号，
             # 不再重复押注同一个号
