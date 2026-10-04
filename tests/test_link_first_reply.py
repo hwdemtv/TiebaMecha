@@ -67,7 +67,7 @@ def _no_real_sleep(monkeypatch):
 def manager(db):
     mgr = AutoBumpManager(db)
     mgr.post_manager.reply_to_thread = AsyncMock(return_value=(True, ""))
-    mgr._find_link_reply = AsyncMock(return_value=(True, None))
+    mgr._find_link_reply = AsyncMock(return_value=("empty", None))
     return mgr
 
 
@@ -166,7 +166,7 @@ async def test_verify_confirms_visibility_and_closes_loop(db, manager):
     await manager.process_link_first_replies()
     await _backdate_link_reply(db, mid)
 
-    manager._find_link_reply = AsyncMock(return_value=(True, 999))
+    manager._find_link_reply = AsyncMock(return_value=("found", 999))
     count2 = await manager.process_link_first_replies()
     assert count2 == 0
     manager._find_link_reply.assert_awaited_once()
@@ -195,7 +195,7 @@ async def test_verify_swallow_clears_and_retries_with_rotation(db, manager):
 
     # 越过校验延迟后查不到含链楼层 → 判定被吞
     await _backdate_link_reply(db, mid)
-    manager._find_link_reply = AsyncMock(return_value=(True, None))
+    manager._find_link_reply = AsyncMock(return_value=("empty", None))
     count2 = await manager.process_link_first_replies()
     assert count2 == 1, "被吞清空后应立即进入重发"
 
@@ -211,7 +211,7 @@ async def test_verify_swallow_clears_and_retries_with_rotation(db, manager):
 
     # 换号重发后校验可见 → 闭环
     await _backdate_link_reply(db, mid)
-    manager._find_link_reply = AsyncMock(return_value=(True, 1001))
+    manager._find_link_reply = AsyncMock(return_value=("found", 1001))
     await manager.process_link_first_replies()
     m = await _get_material(db, mid)
     assert m.link_reply_pid == 1001
@@ -255,7 +255,7 @@ async def test_verify_transient_error_keeps_state(db, manager):
     await _backdate_link_reply(db, mid)
 
     # 楼层查询异常（风控/网络）：不得误判被吞、不得动状态
-    manager._find_link_reply = AsyncMock(return_value=(False, None))
+    manager._find_link_reply = AsyncMock(return_value=("error", None))
     count2 = await manager.process_link_first_replies()
     assert count2 == 0
 
@@ -263,6 +263,29 @@ async def test_verify_transient_error_keeps_state(db, manager):
     assert m.link_reply_at is not None, "查询异常时保持已发出状态待下轮校验"
     assert m.link_reply_fail_count == 0
     manager.post_manager.reply_to_thread.assert_awaited_once()  # 查询异常不得触发重发
+
+
+@pytest.mark.asyncio
+async def test_dead_thread_skips_swallow_judgement(db, manager):
+    """主帖阵亡（get_posts 内嵌错误码 350008/4）：不得判被吞、不动状态、不重发。
+
+    回归背景：2026-10-04 #626 主帖阵亡后三次"被吞"误判白耗 3 次换号重发——
+    主帖搜不到楼层与回复被吞同表象，必须先分清。
+    """
+    await _add_account(db, "poster")
+    mid = await _add_material(db)
+
+    await manager.process_link_first_replies()
+    await _backdate_link_reply(db, mid)
+
+    manager._find_link_reply = AsyncMock(return_value=("dead", None))
+    count2 = await manager.process_link_first_replies()
+    assert count2 == 0
+
+    m = await _get_material(db, mid)
+    assert m.link_reply_at is not None, "主帖阵亡时保持已发出状态，不触发被吞清空"
+    assert m.link_reply_fail_count == 0, "主帖阵亡不得累计 fail_count"
+    manager.post_manager.reply_to_thread.assert_awaited_once()  # 不得重发（重发也只会再失败）
 
 
 @pytest.mark.asyncio

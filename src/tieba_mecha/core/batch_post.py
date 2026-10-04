@@ -2599,8 +2599,13 @@ class AutoBumpManager:
             link_token = self.format_link_for_share(material.link_url)
             if not link_token:
                 continue
-            ok, pid = await self._find_link_reply(material.posted_tid, link_token)
-            if not ok:
+            status, pid = await self._find_link_reply(material.posted_tid, link_token)
+            if status == "dead":
+                # 主帖阵亡/异常：跳过被吞判定，不动状态（fail_count 不累计），
+                # 存活检测会另行落库 death_reason
+                await log_info(f"物料 [{material.id}] 主帖异常，首评校验本轮跳过（不判被吞）")
+                continue
+            if status == "error":
                 # 楼层查询异常（风控/网络）：不动状态，下轮再校验，避免误判被吞浪费重试
                 await log_warn(f"物料 [{material.id}] 带链首评可见性校验查询失败，本轮跳过")
                 continue
@@ -2627,22 +2632,33 @@ class AutoBumpManager:
                     await log_warn(f"物料 [{material.id}] 带链首评发出后楼层不可见，判定被吞({new_fail}/{max_fail})，将换号重发")
         return confirmed
 
-    async def _find_link_reply(self, tid: int, link_token: str) -> tuple[bool, int | None]:
+    async def _find_link_reply(self, tid: int, link_token: str) -> tuple[str, int | None]:
         """在帖子可见楼层中搜索含链接 token 的首评。
 
-        返回 (查询是否成功, 楼层pid)：查询异常返回 (False, None)；
-        查询成功但无可可见含链楼层返回 (True, None)——即被吞判定依据。
+        返回 (status, pid)：
+        - "found"：命中含链楼层（pid 有效）→ 确认可见闭环
+        - "empty"：查询成功但无可可见含链楼层 → 被吞判定依据
+        - "dead"：主帖异常（阵亡/审核屏蔽）→ 不得判被吞（#626 误判根因：主帖阵亡
+          时搜不到楼层与回复被吞同表象，误判会白耗 3 次换号重发）
+        - "error"：查询异常（风控/网络）→ 不动状态下轮再校验
         """
-        from .post import get_posts
+        creds = await get_account_credentials(self.db)
+        if not creds:
+            return "error", None
+        _, bduss, stoken, proxy_id, cuid, ua = creds
         try:
-            posts = await get_posts(self.db, tid, pn=1)
+            async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
+                res = await client.get_posts(tid, pn=1)
         except Exception as e:
             await log_warn(f"带链首评可见性校验拉取楼层失败 TID:{tid}: {e}")
-            return False, None
-        for p in posts:
+            return "error", None
+        # aiotieba 4.6.4 对已删帖不抛异常而是内嵌错误码（350008/4）
+        if getattr(res, "err", None) is not None:
+            return "dead", None
+        for p in (res.objs or []):
             if link_token in (p.text or ""):
-                return True, p.pid
-        return True, None
+                return "found", p.pid
+        return "empty", None
 
     async def process_all_candidates(self):
         """扫描并处理所有待自顶的物料"""
