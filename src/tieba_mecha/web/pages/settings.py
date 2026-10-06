@@ -47,7 +47,9 @@ class SettingsPage:
             # 顺手采集热门资源（与 core/harvest.py 的 HARVEST_DEFAULTS 保持一致）
             "maint_harvest_enabled": "true",
             "maint_harvest_min_reply": "30",
+            "maint_harvest_min_agree": "5",
             "maint_harvest_max_per_cycle": "1",
+            "maint_harvest_max_age_days": "90",
         }
         
         # 守护任务状态
@@ -321,7 +323,9 @@ class SettingsPage:
             ft.Row([
                 self.maint_harvest_switch,
                 self.maint_fields["maint_harvest_min_reply"],
+                self.maint_fields["maint_harvest_min_agree"],
                 self.maint_fields["maint_harvest_max_per_cycle"],
+                self.maint_fields["maint_harvest_max_age_days"],
             ], spacing=10),
             self._create_section_title("自动关注 / AUTO FOLLOW（左：无吧主吧 · 右：热门吧）", ft.icons.GROUP_ADD_ROUNDED),
             ft.Text(
@@ -476,12 +480,20 @@ class SettingsPage:
             "maint_autofollow_hot_max_per_acc": ft.TextField(label="热门单账号关注上限", expand=True),
             "maint_autofollow_hot_square_cats": ft.TextField(label="热门吧广场分类(|分隔)", expand=True),
             "maint_harvest_min_reply": ft.TextField(
-                label="采集回复数阈值", expand=True,
+                label="回复阈值", expand=True,
                 tooltip="养号浏览时顺手采集回复数≥阈值的资源帖入物料池（harvested 待审）；链接仅取楼主正文与首评楼层，不增加任何请求",
+            ),
+            "maint_harvest_min_agree": ft.TextField(
+                label="点赞阈值", expand=True,
+                tooltip="点赞数≥该值才采集（与回复阈值同时满足）：水贴盖楼回复多点赞少，点赞是比回复更准的资源价值信号；0=不限制",
             ),
             "maint_harvest_max_per_cycle": ft.TextField(
                 label="每轮采集上限", expand=True,
                 tooltip="单次养号周期最多入库的采集物料条数（每轮 1 条即够，攒料靠周期轮转）",
+            ),
+            "maint_harvest_max_age_days": ft.TextField(
+                label="采集帖龄上限(天)", expand=True,
+                tooltip="超过该天数的帖子不再采集（老帖网盘链接基本失效）；标题含'持续更新'的合集帖豁免；0=不限制",
             ),
         }
         self.maint_autofollow_switch = ft.Switch(label="自动关注无吧主吧", value=False)
@@ -573,7 +585,9 @@ class SettingsPage:
                 "maint_autofollow_hot_square_cats": self.maint_fields["maint_autofollow_hot_square_cats"].value,
                 "maint_harvest_enabled": "true" if self.maint_harvest_switch.value else "false",
                 "maint_harvest_min_reply": self.maint_fields["maint_harvest_min_reply"].value,
+                "maint_harvest_min_agree": self.maint_fields["maint_harvest_min_agree"].value,
                 "maint_harvest_max_per_cycle": self.maint_fields["maint_harvest_max_per_cycle"].value,
+                "maint_harvest_max_age_days": self.maint_fields["maint_harvest_max_age_days"].value,
             }
             await self.db.set_settings_bulk(config)
             await daemon_instance.reload(self.db) # 强制刷新调度器

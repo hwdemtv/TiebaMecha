@@ -79,6 +79,9 @@ class TestHarvestViewControls:
         # 查询口径带 harvested
         call_kwargs = bp.db.get_materials_by_status_paginated.call_args.kwargs
         assert call_kwargs["statuses"] == ["harvested"]
+        # 表头文案随视图联动（同一列两视图语义不同：采集=别人的原链，排期池=自有链）
+        assert bp._col_source_label.value == "来源吧"
+        assert bp._col_link_label.value == "原链(悬停看提取码)"
 
     @pytest.mark.asyncio
     async def test_refresh_schedule_view_restores_buttons(self, bp):
@@ -87,6 +90,9 @@ class TestHarvestViewControls:
         assert bp._bulk_reset_btn.visible is True
         # 排期池视图：同一张表填排期池行（切换=换数据不换结构）
         assert bp._material_table.rows == []
+        # 表头切回排期池口径（自有链≠原链）
+        assert bp._col_source_label.value == "来源"
+        assert bp._col_link_label.value == "网盘链接(楼中楼首评)"
 
     def test_harvest_row_states_pure(self, bp):
         # 行状态判定抽成纯函数（不依赖 flet 控件内部结构，桩环境下同样可测）
@@ -177,6 +183,7 @@ class TestSettingsHarvestFields:
 
         sp = SettingsPage.__new__(SettingsPage)  # 跳过 __init__ 的 db/异步依赖
         sp._init_maint_fields()
-        for key in ("maint_harvest_min_reply", "maint_harvest_max_per_cycle"):
+        for key in ("maint_harvest_min_reply", "maint_harvest_min_agree",
+                    "maint_harvest_max_per_cycle", "maint_harvest_max_age_days"):
             assert key in sp.maint_fields
         assert hasattr(sp, "maint_harvest_switch")

@@ -159,15 +159,19 @@ class MaintManager:
                         )
                         if str(raw.get("maint_harvest_enabled", "true")).strip().lower() != "false":
                             min_reply = max(int(float(raw.get("maint_harvest_min_reply", "30") or 30)), 1)
+                            min_agree = max(int(float(raw.get("maint_harvest_min_agree", "5") or 5)), 0)
                             max_per_cycle = max(int(float(raw.get("maint_harvest_max_per_cycle", "1") or 1)), 0)
+                            max_age_days = max(int(float(raw.get("maint_harvest_max_age_days", "90") or 90)), 0)
                             if max_per_cycle >= 1:
-                                hcfg = {"min_reply": min_reply, "max_per_cycle": max_per_cycle}
+                                hcfg = {"min_reply": min_reply, "max_per_cycle": max_per_cycle,
+                                        "max_age_days": max_age_days, "min_agree": min_agree}
                     except Exception:
                         hcfg = None
                     harvest_candidate = None
                     if hcfg is not None:
                         try:
-                            harvest_candidate = pick_harvest_candidate(threads.objs, hcfg["min_reply"])
+                            harvest_candidate = pick_harvest_candidate(
+                                threads.objs, hcfg["min_reply"], hcfg["max_age_days"], hcfg["min_agree"])
                             if harvest_candidate is not None and await self.db.get_harvested_by_source_tid(harvest_candidate.tid):
                                 harvest_candidate = None  # 同源帖已采过，不再偏置浏览
                         except Exception:
@@ -191,7 +195,10 @@ class MaintManager:
                         # 顺手采集：仅候选帖、每轮限量、只扫本页楼层（楼主+首评），零额外请求
                         if hcfg is not None and harvest_candidate is not None and target_thread.tid == harvest_candidate.tid:
                             try:
-                                new_id = await harvest_from_posts(self.db, posts_page, target_thread, target_forum_name)
+                                new_id = await harvest_from_posts(
+                                    self.db, posts_page, target_thread, target_forum_name,
+                                    log_info=log_info, log_warn=log_warn,
+                                )
                             except Exception as e:
                                 new_id = None
                                 await log_warn(f"[BioWarming] {account_name} 采集入库异常: {type(e).__name__}: {str(e)[:80]}")

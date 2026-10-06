@@ -659,10 +659,35 @@ class BatchPostPage:
         await self._refresh_material_table()
         self._show_snackbar(f"已批量重置 {count} 条物料到待发状态", "success")
 
+    # 表头文案按视图取值（来源/链接两列语义随视图切换，见 _init_controls 注释）
+    _VIEW_HEADERS = {
+        "schedule": ("来源", "网盘链接(楼中楼首评)",
+                     "排期池物料无采集来源；采集待审视图此列为来源吧",
+                     "物料自有网盘链接，主帖发布成功后由矩阵号楼中楼首评发出"),
+        "harvest": ("来源吧", "原链(悬停看提取码)",
+                    "采集来源吧名",
+                    "别人的链(悬停看提取码/上下文)；须转存替换为自有链后才能放行"),
+    }
+
+    def _apply_material_view_headers(self):
+        """视图联动表头：仅 Text.value/tooltip 简单属性更新（可靠白名单），不动列结构"""
+        view = getattr(self, "_material_view", "schedule")
+        src, link, src_tip, link_tip = self._VIEW_HEADERS.get(view, self._VIEW_HEADERS["schedule"])
+        self._col_source_label.value = src
+        self._col_link_label.value = link
+        self._col_source_label.tooltip = src_tip
+        self._col_link_label.tooltip = link_tip
+        try:
+            self._col_source_label.update()
+            self._col_link_label.update()
+        except Exception:
+            pass
+
     async def _refresh_material_table(self):
         """分页刷新物料排期池表，服务端过滤+分页（已发归档在运行中心页）"""
         if not hasattr(self, "_material_table"):
             return
+        self._apply_material_view_headers()
 
         # 获取状态计数（用于统计显示）
         self._status_counts = await self.db.get_materials_status_counts()
@@ -840,6 +865,46 @@ class BatchPostPage:
             actions=[
                 ft.TextButton("算了吧", on_click=close_dialog),
                 ft.FilledButton("保存干预修剪", icon=icons.SAVE, on_click=save_changes),
+            ]
+        )
+        self.page.open(dialog)
+
+    async def _on_edit_material_link_click(self, e):
+        m = e.control.data
+        cur_link = (m.link_url or "").strip()
+        link_input = ft.TextField(
+            label="网盘链接(发帖成功后由矩阵号楼中楼首评发出)",
+            value=cur_link,
+            width=500,
+            hint_text="https://pan.baidu.com/s/xxx?pwd=xxxx",
+        )
+
+        def close_dialog(_):
+            self.page.close(dialog)
+
+        async def save_link(_):
+            new_link = link_input.value.strip() if link_input.value else ""
+            if new_link == cur_link:
+                self._show_snackbar("链接未变化，无需保存", "info")
+                return
+            ok = await self.db.update_material_link(m.id, new_link)
+            if not ok:
+                self._show_snackbar("保存失败：物料不存在或为采集待审行（其链接须走转存流程）", "error")
+                return
+            await self._refresh_material_table()
+            self._show_snackbar(f"物料 [{m.id}] 网盘链接已{'清空(纯内容帖)' if not new_link else '更新'}", "success")
+            self.page.close(dialog)
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.LINK_ROUNDED, color="orange"), ft.Text("网盘链接管理")]),
+            content=ft.Column([
+                ft.Text(f"物料 #{m.id}  {m.title or ''}", size=12, color="onSurfaceVariant", max_lines=1),
+                link_input,
+                ft.Text("- 该链接不进主帖，主帖发布成功后由矩阵号以楼中楼首评发出\n- 清空并保存 = 转为纯内容帖，不再发带链首评\n- 链接失效(资源被删)时在此换新链即可，不影响其他字段"),
+            ], tight=True, spacing=15),
+            actions=[
+                ft.TextButton("算了吧", on_click=close_dialog),
+                ft.FilledButton("保存链接", icon=icons.SAVE, on_click=save_link),
             ]
         )
         self.page.open(dialog)
@@ -1051,6 +1116,8 @@ class BatchPostPage:
         status_color = "onSurfaceVariant" if m.status == "pending" else "error"
         status_icon = icons.SCHEDULE if m.status == "pending" else icons.ERROR
         status_text = "待发送" if m.status == "pending" else "遭遇拒稿"
+        own_link = (m.link_url or "").strip()
+        link_disp = own_link if len(own_link) <= 30 else own_link[:30] + "..."
         return ft.DataRow(
             selected=m.id in self._selected_material_ids,
             on_select_changed=lambda e, mid=m.id: self.page.run_task(self._on_material_row_select, mid, e.data),
@@ -1077,15 +1144,22 @@ class BatchPostPage:
                         )
                     ], spacing=4)
                 ),
-                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
-                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
-                ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
+                ft.DataCell(ft.Container(ft.Text("-", size=12, color="onSurfaceVariant"), width=56)),
+                ft.DataCell(
+                    ft.Container(
+                        ft.Text(link_disp, size=11, tooltip=f"网盘链接(楼中楼首评发出): {own_link or '无'}") if own_link
+                        else ft.Text("无链", size=12, color="onSurfaceVariant", tooltip="该物料未配网盘链接，发布后不会有带链首评"),
+                        width=210,
+                    )
+                ),
+                ft.DataCell(ft.Container(ft.Text("-", size=12, color="onSurfaceVariant"), width=44)),
                 ft.DataCell(ft.Row([
                     ft.Text(ai_text, color=ai_color, size=12),
                     ft.IconButton(icons.VISIBILITY, icon_size=16, icon_color="primary", data=m, on_click=self._on_preview_ai_click, visible=(m.ai_status=="rewritten"))
                 ], spacing=2)),
                 ft.DataCell(ft.Row([
                     ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="手动微调文案"),
+                    ft.IconButton(icons.LINK_ROUNDED, icon_color="orange", data=m, on_click=self._on_edit_material_link_click, tooltip="查看/修改网盘链接（楼中楼首评发出）"),
                     ft.IconButton(icons.AUTO_AWESOME, icon_color="primary", data=m.id, on_click=self._on_single_ai_rewrite_click, tooltip="触发AI改写"),
                     ft.IconButton(icons.DELETE, icon_color="error", data=m.id, on_click=self._delete_material_row, tooltip="永久销毁该行"),
                 ], spacing=0)),
@@ -1118,9 +1192,9 @@ class BatchPostPage:
                     ft.Icon(st_icon, color=st_color, size=14),
                     ft.Text(st_text, color=st_color, size=12),
                 ], spacing=4)),
-                ft.DataCell(ft.Text(m.source_fname or "-", size=12)),
+                ft.DataCell(ft.Container(ft.Text(m.source_fname or "-", size=12), width=56)),
                 ft.DataCell(ft.Container(ft.Text(link_disp, size=11, tooltip=link_tooltip), width=210)),
-                ft.DataCell(ft.Text(m.source_link_type or "other", size=12)),
+                ft.DataCell(ft.Container(ft.Text(m.source_link_type or "other", size=12), width=44)),
                 ft.DataCell(ft.Text("-", size=12, color="onSurfaceVariant")),
                 ft.DataCell(ft.Row([
                     ft.IconButton(icons.EDIT, icon_color="blue", data=m, on_click=self._on_edit_material_click, tooltip="先修剪文案再放行"),
@@ -2101,14 +2175,18 @@ class BatchPostPage:
         
         # 物料池单表（静态列=排期池∪采集并集，视图切换只换 rows 数据——
         # 动态换表/换列/换 style 在 flet 0.23.2 的客户端 patch 不可靠，连踩四坑后的定论）
+        # 表头文案随视图联动（text 简单属性=可靠白名单）：同一列在两个视图语义不同——
+        # 排期池"原链"位置放的是自有链(楼中楼首评发出)，采集视图才是别人的原链(悬停看提取码)
+        self._col_source_label = ft.Text("来源", size=11, weight=ft.FontWeight.BOLD, tooltip="排期池物料无采集来源；采集待审视图此列为来源吧")
+        self._col_link_label = ft.Text("网盘链接(楼中楼首评)", size=11, weight=ft.FontWeight.BOLD, tooltip="物料自有网盘链接，主帖发布成功后由矩阵号楼中楼首评发出")
         self._material_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("ID", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("标题", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("正文摘要", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("状态", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("来源吧", size=11, weight=ft.FontWeight.BOLD)),
-                ft.DataColumn(ft.Text("原链(悬停看提取码)", size=11, weight=ft.FontWeight.BOLD)),
+                ft.DataColumn(self._col_source_label),
+                ft.DataColumn(self._col_link_label),
                 ft.DataColumn(ft.Text("类型", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("AI", size=11, weight=ft.FontWeight.BOLD)),
                 ft.DataColumn(ft.Text("操作", size=11, weight=ft.FontWeight.BOLD)),

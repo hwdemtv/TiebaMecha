@@ -231,6 +231,31 @@ class MaterialRepository:
         except Exception:
             return 0
 
+    async def mark_harvest_seen(self, source_tid: int) -> None:
+        """仅记已见账本、不入库（采集死链跳过场景）：防同一死链候选每轮重复检测。
+
+        与 add_harvested_material 的记账同一 settings 键与裁剪口径（上限 1000）。
+        """
+        if not source_tid:
+            return
+        async with self.async_session() as session:
+            setting = await session.get(Setting, HARVEST_SEEN_KEY)
+            seen: list = []
+            if setting and setting.value:
+                try:
+                    seen = json.loads(setting.value)
+                except (ValueError, TypeError):
+                    seen = []
+            if source_tid not in seen:
+                seen.append(source_tid)
+                seen = seen[-_HARVEST_SEEN_LIMIT:]
+                payload = json.dumps(seen)
+                if setting:
+                    setting.value = payload
+                else:
+                    session.add(Setting(key=HARVEST_SEEN_KEY, value=payload))
+                await session.commit()
+
     async def _is_source_tid_seen(self, session, source_tid: int) -> bool:
         """已见判定：material_pool 存活行 OR settings 已见账本（须在调用方 session 内执行）"""
         row = await session.execute(
@@ -899,6 +924,18 @@ class MaterialRepository:
                 m.title = new_title
                 m.content = new_content
                 await session.commit()
+    async def update_material_link(self, material_id: int, link_url: str | None) -> bool:
+        """手动修改物料的网盘链接（排期池 pending/failed 行专用；清空=纯内容帖不发带链首评）。
+
+        harvested 行拒绝直写——源链替换的唯一合法写路径是 mark_link_transferred。
+        """
+        async with self.async_session() as session:
+            m = await session.get(MaterialPool, material_id)
+            if not m or m.status == "harvested":
+                return False
+            m.link_url = (link_url or "").strip() or None
+            await session.commit()
+            return True
     async def clear_materials(self, only_status: str | None = None) -> None:
         from sqlalchemy import delete
         async with self.async_session() as session:
