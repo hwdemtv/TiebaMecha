@@ -190,7 +190,7 @@ class PreflightService:
         stats = report.stats
 
         accounts_info = await self._check_accounts(config, report, stats)
-        fnames = await self._check_forums_async(config, report, stats)
+        fnames = await self._check_forums_async(config, report, stats, accounts_info)
         report.effective_fnames = fnames
         await self._check_parachute_async(report, stats, accounts_info["effective"], fnames)
         materials = await self._check_materials(config, report, stats)
@@ -265,7 +265,7 @@ class PreflightService:
         return {"effective": effective_ids, "no_proxy": no_proxy, "all": all_accounts}
 
     # ------------------------------------------------------------------
-    async def _check_forums_async(self, config, report: PreflightReport, stats: dict) -> list[str]:
+    async def _check_forums_async(self, config, report: PreflightReport, stats: dict, accounts_info: dict) -> list[str]:
         merged = config.get_fnames()
         stats["forums_selected"] = len(merged)
         if not merged:
@@ -273,21 +273,60 @@ class PreflightService:
             return []
 
         all_forums = await self.db.get_all_unique_forums()
-        valid = {f["fname"]: f for f in all_forums if not f["is_banned"]}
+        known = {f["fname"] for f in all_forums}
         safe = {f["fname"] for f in all_forums if f["is_post_target"]}
 
-        effective = [fn for fn in merged if fn in valid]
-        banned_removed = [fn for fn in merged if fn not in valid]
+        # 封禁按任务账号集判定（与引擎 _build_banned_pairs 同口径：Forum 行 ∪ 黑名单账本）。
+        # 旧口径用全库 max(is_banned) 聚合——任何一个账号（哪怕不在本次任务里）在某吧
+        # 被封就把整吧从任务剔除，而引擎本会绕开封禁组合派其他账号继续投（连坐误伤）。
+        # 新口径：选中账号全部被封才剔除；部分封禁降级为 info 提示。
+        effective_ids = accounts_info.get("effective") or []
+        banned_map: dict[str, set[int]] = {}
+        if effective_ids:
+            merged_set = set(merged)
+            try:
+                for aid, fname in await self.db.get_banned_forum_pairs(effective_ids, merged):
+                    banned_map.setdefault(fname, set()).add(aid)
+            except Exception:
+                pass  # 封禁查询失败不阻断预检（fail-open，与空降查询同口径）
+            try:
+                for aid, fname in await self.db.get_permission_denied_ledger(effective_ids):
+                    if fname in merged_set:
+                        banned_map.setdefault(fname, set()).add(aid)
+            except Exception:
+                pass
+
+        effective: list[str] = []
+        banned_removed: list[str] = []
+        partial_banned: list[str] = []
+        effective_set = set(effective_ids)
+        for fn in merged:
+            banned_here = banned_map.get(fn, set()) & effective_set
+            if fn not in known:
+                banned_removed.append(fn)  # 不在库（已删除/失效）维持原剔除口径
+            elif effective_ids and len(banned_here) >= len(effective_ids):
+                banned_removed.append(fn)  # 选中账号全部被封 → 整吧剔除
+            else:
+                effective.append(fn)
+                if banned_here:
+                    partial_banned.append(fn)
+
         unsafe = [fn for fn in effective if fn not in safe]
 
         stats["forums_effective"] = effective
         stats["forums_banned_removed"] = banned_removed
+        stats["forums_banned_partial"] = partial_banned
         stats["forums_unsafe"] = unsafe
 
         if banned_removed:
             report.issues.append(PreflightIssue(
                 "warning", "forums_banned_removed",
                 f"{len(banned_removed)} 个已封禁/失效贴吧将被自动移除：{'、'.join(banned_removed[:8])}{'…' if len(banned_removed) > 8 else ''}"))
+        if partial_banned:
+            report.issues.append(PreflightIssue(
+                "info", "forums_banned_partial",
+                f"{len(partial_banned)} 个贴吧有执行账号被封禁，引擎将绕开对应组合继续投放："
+                f"{'、'.join(partial_banned[:8])}{'…' if len(partial_banned) > 8 else ''}"))
         if not effective:
             report.issues.append(PreflightIssue("error", "no_effective_forums", "目标贴吧全部已封禁/失效"))
         if unsafe:

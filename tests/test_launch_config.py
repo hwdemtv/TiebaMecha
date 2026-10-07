@@ -72,6 +72,10 @@ class TestPreflightService:
         db.get_accounts = AsyncMock(return_value=accounts or [])
         db.get_all_unique_forums = AsyncMock(return_value=forums or [])
         db.get_materials = AsyncMock(return_value=materials or [])
+        # 封禁口径（2026-10-07 连坐修复）：预检按任务账号集查封禁组合 + 黑名单账本，
+        # 默认空集；个别用例按需覆写返回值
+        db.get_banned_forum_pairs = AsyncMock(return_value=[])
+        db.get_permission_denied_ledger = AsyncMock(return_value=[])
         return db
 
     def _material(self, mid, title="标题", content="正文内容"):
@@ -151,6 +155,7 @@ class TestPreflightService:
             ],
             materials=[self._material(1)],
         )
+        db.get_banned_forum_pairs = AsyncMock(return_value=[(1, "封禁吧")])
         svc = PreflightService(db)
         report = await svc.run(LaunchConfig(
             account_ids=[1], local_fnames=["安全吧", "封禁吧"],

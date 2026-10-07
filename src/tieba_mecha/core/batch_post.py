@@ -26,7 +26,9 @@ from .auth import get_auth_manager, AuthStatus
 # 进程级“账号×贴吧”发帖权限黑名单：(account_id, fname) -> 原因。
 # mark_forum_banned 只在 forums 表已有该行时落库，账号未在应用内关注过该吧时
 # 标记会落空，导致同一组合每轮重复撞墙（实测：同一账号同一吧连续两轮报权限不足）。
-# 此表作为兜底，进程存活期内持续有效，选号空降回落时据此跳过。
+# 此表作为任务内兜底，进程存活期内持续有效，选号空降回落时据此跳过；
+# 跨重启持久化由 settings 黑名单账本承接（persist_permission_denied →
+# forum_repo.record_permission_denied_ledger，_build_banned_pairs 读取时合并）。
 _PERMISSION_DENIED: dict[tuple[int, str], str] = {}
 # 同一组合的顺延次数：首次与每第 5 次记 WARN，其余降级 INFO，避免刷屏
 _PERMISSION_SKIP_COUNT: dict[tuple[int, str], int] = {}
@@ -46,6 +48,19 @@ def record_permission_denied(account_id: int, fname: str, reason: str) -> bool:
 
 def is_permission_denied(account_id: int, fname: str) -> bool:
     return (account_id, fname) in _PERMISSION_DENIED
+
+
+async def persist_permission_denied(db, account_id: int, fname: str, reason: str) -> None:
+    """封禁知识跨重启持久化：落 settings 黑名单账本（forum_repo）。
+
+    空降吧（该账号无 Forum 行）的 mark_forum_banned 会落空，进程级
+    _PERMISSION_DENIED 又随重启失忆——不落账本则同一组合重启后会再次撞墙。
+    fail-open：落库失败只告警，不影响本次拦截。
+    """
+    try:
+        await db.record_permission_denied_ledger(account_id, fname, reason)
+    except Exception as ex:
+        await log_warn(f"权限黑名单账本落库失败（不影响本次拦截）: {ex}")
 
 
 async def log_permission_denied(account_id: int, acc_display: str, fname: str, reason: str):
@@ -1131,7 +1146,14 @@ class BatchPostManager:
                 Forum.account_id.in_(accounts)
             )
             result = await session.execute(stmt)
-            return {(aid, fname) for aid, fname in result.all()}
+            pairs = {(aid, fname) for aid, fname in result.all()}
+            # 跨重启兜底：合并 settings 黑名单账本（空降组合的封禁标记落不了 Forum 行，
+            # 只存在于账本；读取失败不阻断任务，退化为仅 Forum 表口径）
+            try:
+                pairs |= set(await self.db.get_permission_denied_ledger(accounts))
+            except Exception:
+                pass
+            return pairs
 
     async def _pick_optimal_account_for_target(self, task: BatchPostTask, target_fname: str, step: int, weights: list[tuple[int, int]], native_map: dict[str, list[int]], followed_map: dict[str, list[int]], banned_pairs: set[tuple[int, str]] | None = None) -> int | None:
         """
@@ -1618,6 +1640,10 @@ class BatchPostManager:
                                     if "本吧" in err_msg:
                                         await self.db.mark_forum_banned(account_id, current_target_fname, reason="发射检测吧封")
                                         await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="发射检测吧封")
+                                        # 本吧封禁与权限不足同属 (账号,吧) 组合级拦截：补进程内
+                                        # 标记 + 账本落库，否则本任务内与重启后都会再撞同一堵墙
+                                        record_permission_denied(account_id, current_target_fname, "发射检测吧封")
+                                        await persist_permission_denied(self.db, account_id, current_target_fname, "发射检测吧封")
                                     else:
                                         await self.db.update_account_status(account_id, "banned")
                                         # 同步剔除内存态：后续物料仍会按 task.accounts/加权池
@@ -1632,6 +1658,7 @@ class BatchPostManager:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason="用户没有权限")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason="用户没有权限")
                                     record_permission_denied(account_id, current_target_fname, "用户没有权限")
+                                    await persist_permission_denied(self.db, account_id, current_target_fname, "用户没有权限")
                                     await log_permission_denied(account_id, acc_display, current_target_fname, "用户没有权限")
                                     forum_skip_reason = "权限不足"
                                     break  # 退出账号重试循环，让外层顺延物料
@@ -1639,6 +1666,7 @@ class BatchPostManager:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason=f"等级限制: {err_msg}")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason=f"等级限制: {err_msg}")
                                     record_permission_denied(account_id, current_target_fname, err_msg)
+                                    await persist_permission_denied(self.db, account_id, current_target_fname, "等级限制")
                                     await log_permission_denied(account_id, acc_display, current_target_fname, err_msg)
                                     forum_skip_reason = "等级限制"
                                     break  # 退出账号重试循环，让外层顺延物料
@@ -1651,6 +1679,7 @@ class BatchPostManager:
                                     await self.db.mark_forum_banned(account_id, current_target_fname, reason=f"发帖静默拦截({err_code})疑似吧务封禁")
                                     await self.db.update_target_pool_status(current_target_fname, is_success=False, error_reason=f"发帖静默拦截({err_code})")
                                     record_permission_denied(account_id, current_target_fname, f"发帖静默拦截({err_code})")
+                                    await persist_permission_denied(self.db, account_id, current_target_fname, f"发帖静默拦截({err_code})")
                                     await log_permission_denied(account_id, acc_display, current_target_fname, f"发帖静默拦截({err_code})")
                                     forum_skip_reason = f"发帖静默拦截({err_code})疑似吧务封禁"
                                     break  # 退出账号重试循环，让外层顺延物料

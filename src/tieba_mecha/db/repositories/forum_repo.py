@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import delete, func, select, text, update
@@ -27,6 +28,15 @@ from ..models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 发帖权限黑名单账本：settings 表持久化 (账号, 贴吧) 封禁组合。
+# mark_forum_banned 只在 forums 表已有该行时落库——空降吧（该账号未关注过）被封时
+# 标记落空，封禁知识只活在 batch_post 的进程级 _PERMISSION_DENIED 里，服务重启即
+# 失忆，同一组合会再次空降撞墙（实测连续两轮报权限不足）。本账本为跨重启兜底，
+# 引擎 _build_banned_pairs 与预检封禁判定均合并此口径；解封时联动清理。
+PERMISSION_DENIED_LEDGER_KEY = "post_permission_denied_ledger"
+_PERMISSION_LEDGER_LIMIT = 500        # FIFO 裁剪上限（防无限增长）
+_PERMISSION_LEDGER_TTL_DAYS = 30      # 过期条目读取/写入时裁剪（权限限制类封禁可能随等级变化解除）
 
 
 class ForumRepository:
@@ -327,6 +337,8 @@ class ForumRepository:
                 forum.ban_reason = ""
                 forum.is_post_target = True
                 await session.commit()
+                # 解封联动：清掉黑名单账本里的同一组合，否则跨重启兜底会继续拦截
+                await self.clear_permission_denied_ledger([fname], account_id=account_id)
                 return True
             return False
     async def unban_forum_globally(self, fname: str) -> int:
@@ -339,7 +351,112 @@ class ForumRepository:
                 .values(is_banned=False, ban_reason="", is_post_target=True)
             )
             await session.commit()
+            await self.clear_permission_denied_ledger([fname])
             return result.rowcount or 0
+
+    # ------------------------------------------------------------------
+    # 发帖权限黑名单账本（settings 表 JSON，跨重启兜底，详见常量处注释）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _prune_permission_ledger(entries: list) -> list:
+        """裁剪黑名单账本：丢弃过期/损坏条目，FIFO 限长。"""
+        cutoff = datetime.now() - timedelta(days=_PERMISSION_LEDGER_TTL_DAYS)
+        kept = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            try:
+                ts = datetime.fromisoformat(e["ts"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ts >= cutoff:
+                kept.append(e)
+        return kept[-_PERMISSION_LEDGER_LIMIT:]
+
+    async def record_permission_denied_ledger(self, account_id: int, fname: str, reason: str) -> None:
+        """封禁组合落账本（发帖引擎的跨重启兜底；调用方已做进程内标记与 Forum 落库）。"""
+        if not account_id or not fname:
+            return
+        async with self.async_session() as session:
+            setting = await session.get(Setting, PERMISSION_DENIED_LEDGER_KEY)
+            entries: list = []
+            if setting and setting.value:
+                try:
+                    entries = json.loads(setting.value)
+                except (ValueError, TypeError):
+                    entries = []
+            entries.append({
+                "aid": account_id, "fname": fname, "reason": str(reason)[:100],
+                "ts": datetime.now().isoformat(timespec="seconds"),
+            })
+            payload = json.dumps(self._prune_permission_ledger(entries), ensure_ascii=False)
+            if setting:
+                setting.value = payload
+            else:
+                session.add(Setting(key=PERMISSION_DENIED_LEDGER_KEY, value=payload))
+            await session.commit()
+
+    async def get_permission_denied_ledger(self, account_ids: list[int] | None = None) -> list[tuple[int, str]]:
+        """读取黑名单组合（可按账号集过滤）。损坏数据静默返回空，fail-open 由调用方兜底。"""
+        async with self.async_session() as session:
+            setting = await session.get(Setting, PERMISSION_DENIED_LEDGER_KEY)
+            raw = setting.value if setting and setting.value else None
+        if not raw:
+            return []
+        try:
+            entries = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(entries, list):
+            return []
+        allowed = set(account_ids) if account_ids is not None else None
+        return [
+            (e["aid"], e["fname"]) for e in self._prune_permission_ledger(entries)
+            if isinstance(e.get("aid"), int) and e.get("fname")
+            and (allowed is None or e["aid"] in allowed)
+        ]
+
+    async def clear_permission_denied_ledger(self, fnames: list[str], account_id: int | None = None) -> int:
+        """解封联动清理：移除账本中匹配的组合（fnames 必填，可限定单账号）。返回移除数。"""
+        if not fnames:
+            return 0
+        async with self.async_session() as session:
+            setting = await session.get(Setting, PERMISSION_DENIED_LEDGER_KEY)
+            if not setting or not setting.value:
+                return 0
+            try:
+                entries = json.loads(setting.value)
+            except (ValueError, TypeError):
+                return 0
+            fname_set = set(fnames)
+            kept, removed = [], 0
+            for e in entries:
+                hit = (
+                    isinstance(e, dict) and e.get("fname") in fname_set
+                    and (account_id is None or e.get("aid") == account_id)
+                )
+                if hit:
+                    removed += 1
+                else:
+                    kept.append(e)
+            if removed:
+                setting.value = json.dumps(kept, ensure_ascii=False)
+                await session.commit()
+            return removed
+
+    async def get_banned_forum_pairs(self, account_ids: list[int], fnames: list[str]) -> list[tuple[int, str]]:
+        """指定账号集在指定贴吧内的已封禁组合（预检封禁判定与引擎 banned_pairs 同口径）。"""
+        if not account_ids or not fnames:
+            return []
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Forum.account_id, Forum.fname).where(
+                    Forum.account_id.in_(account_ids),
+                    Forum.fname.in_(fnames),
+                    Forum.is_banned == True,
+                )
+            )
+            return [(r.account_id, r.fname) for r in result.all()]
     async def delete_forum_by_name(self, account_id: int, fname: str) -> bool:
         """根据贴吧名删除指定账号的贴吧记录"""
         from sqlalchemy import delete
