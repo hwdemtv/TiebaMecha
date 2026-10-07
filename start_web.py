@@ -193,6 +193,10 @@ def run_app(port: int = 9006):
 
     asgi_app.router.lifespan_context = _chained_lifespan
 
+    # 物料导出下载通道：/downloads/{fname} 附件路由（见 tieba_mecha/web/downloads.py）
+    from tieba_mecha.web.downloads import register_download_routes
+    register_download_routes(asgi_app)
+
     # Windows 开发环境保留自动打开浏览器的旧行为；服务器由 systemd 托管无需
     if sys.platform == "win32":
         import threading as _threading

@@ -721,6 +721,29 @@ class MaterialRepository:
             )
             result = await session.execute(data_stmt)
             return list(result.scalars().all()), total
+    async def get_materials_for_export(
+        self,
+        statuses: list[str],
+        search_text: str | None = None,
+    ) -> list[MaterialPool]:
+        """导出用全量查询（不分页；采集待审导出场景量级小）。
+
+        与 get_materials_by_status_paginated 同款过滤口径，但不含归档库的
+        success→posted_tid 附加条件（导出需要原样全集，调用方限 harvested）。
+        """
+        async with self.async_session() as session:
+            from sqlalchemy import select as sa_select, or_
+            where = [MaterialPool.status.in_(statuses)]
+            if search_text:
+                keyword = f"%{search_text}%"
+                where.append(or_(
+                    MaterialPool.title.ilike(keyword),
+                    MaterialPool.content.ilike(keyword),
+                    MaterialPool.posted_fname.ilike(keyword),
+                ))
+            stmt = sa_select(MaterialPool).where(*where).order_by(MaterialPool.id.asc())
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
     async def get_material_ids_by_status(
         self,
         statuses: list[str] | None = None,

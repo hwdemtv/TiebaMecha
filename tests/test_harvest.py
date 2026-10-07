@@ -413,6 +413,67 @@ def test_judge_gbk_body_still_matches():
     assert judge_link_body("lanzou", 200, body).alive is False
 
 
+# ---------- 采集待审导出（web/pages/batch_post/harvest_export.py） ----------
+
+def test_build_harvest_export_csv_rows_and_states():
+    import csv as _csv
+    import io
+    from datetime import datetime
+    from types import SimpleNamespace as _NS
+
+    from tieba_mecha.web.pages.batch_post.harvest_export import (
+        EXPORT_HEADERS,
+        build_harvest_export_csv,
+    )
+
+    rows = [
+        _NS(id=1, title="《X》合集", content="正文,带逗号", source_fname="电影吧",
+            source_link_url="https://pan.baidu.com/s/1A?pwd=ab12",
+            source_link_note="提取码 ab12 | 楼层上下文", source_link_type="baidu",
+            link_url=None, created_at=datetime(2026, 10, 6, 10, 0, 0)),
+        _NS(id=2, title="纯内容帖", content="无链", source_fname="",
+            source_link_url=None, source_link_note=None, source_link_type=None,
+            link_url="https://pan.baidu.com/s/1OWN?pwd=own1", created_at=None),
+    ]
+    csv_text = build_harvest_export_csv(rows)
+    parsed = list(_csv.reader(io.StringIO(csv_text)))
+    assert parsed[0] == EXPORT_HEADERS
+    # 待转存行：note 提取码优先、状态派生、时间格式化
+    assert parsed[1][0] == "1" and parsed[1][4] == "https://pan.baidu.com/s/1A?pwd=ab12"
+    assert parsed[1][5] == "ab12" and parsed[1][8] == "待转存"
+    assert parsed[1][2] == "正文,带逗号"  # 逗号进引号不破列
+    assert parsed[1][9] == "2026-10-06 10:00:00"
+    # 纯内容行：note 为空时自有链 ?pwd= 兜底提取码
+    assert parsed[2][5] == "own1" and parsed[2][8] == "纯内容·可放行"
+
+
+def test_export_csv_filename_pattern():
+    from datetime import datetime
+
+    from tieba_mecha.web.pages.batch_post.harvest_export import export_csv_filename
+
+    assert export_csv_filename(datetime(2026, 10, 6, 9, 30, 5)) == "harvest_export_20261006_093005.csv"
+
+
+@pytest.mark.asyncio
+async def test_get_materials_for_export_filters(db):
+    """导出全量查询：只取 harvested（排期池不混入）+ 搜索词过滤 + id 升序"""
+    await db.add_harvested_material(
+        title="4K合集", content="正文A", source_tid=70001, source_fname="电影吧",
+        source_link_url="https://pan.baidu.com/s/1A", source_link_type="baidu",
+    )
+    await db.add_harvested_material(
+        title="蓝光整理", content="正文B", source_tid=70002, source_fname="剧集吧",
+        source_link_url="https://pan.quark.cn/s/1B", source_link_type="quark",
+    )
+    await db.add_materials_bulk([("排期池物料", "正文C")])
+
+    rows = await db.get_materials_for_export(["harvested"])
+    assert [m.title for m in rows] == ["4K合集", "蓝光整理"]
+    rows2 = await db.get_materials_for_export(["harvested"], search_text="蓝光")
+    assert [m.title for m in rows2] == ["蓝光整理"]
+
+
 # ---------- DB 层：入库去重 / 次序门 / 转存预留口 ----------
 
 @pytest.mark.asyncio

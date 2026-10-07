@@ -19,6 +19,8 @@ class _FakePage:
         self.run_task = MagicMock()
         self.open = MagicMock()
         self.close = MagicMock()
+        self.launch_url = MagicMock()
+        self.web = None  # 桌面模式；web 模式测试里置 object()
         self.overlay = []
 
 
@@ -129,6 +131,43 @@ class TestHarvestViewControls:
         bp._material_view = "schedule"
         await bp._on_material_select_all(SimpleNamespace(data="false"))
         assert bp._selected_material_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_export_button_visibility_follows_view(self, bp):
+        # 导出按钮是采集视图专属：刷新联动可见性（桩控件走属性赋值断言）
+        mat = _harvested_material()
+        bp.db.get_materials_by_status_paginated = AsyncMock(return_value=([mat], 1))
+
+        bp._material_view = "harvest"
+        await bp._refresh_material_table()
+        assert bp._export_harvest_btn.visible is True
+
+        bp._material_view = "schedule"
+        await bp._refresh_material_table()
+        assert bp._export_harvest_btn.visible is False
+
+    @pytest.mark.asyncio
+    async def test_export_click_writes_file_and_opens_dialog(self, bp, tmp_path, monkeypatch):
+        import tieba_mecha.web.downloads as dl
+
+        monkeypatch.setattr(dl, "EXPORTS_DIR", tmp_path)
+        mat = _harvested_material()
+        bp.db.get_materials_for_export = AsyncMock(return_value=[mat])
+        bp.page.web = object()  # web 模式 → 弹窗带下载按钮（点击才 launch_url，此处只验处理器本身）
+
+        await bp._on_export_harvest_click(None)
+
+        bp.page.open.assert_called_once()
+        written = list(tmp_path.glob("harvest_export_*.csv"))
+        assert len(written) == 1
+        text = written[0].read_text(encoding="utf-8-sig")
+        assert "源链" in text and mat.source_link_url in text
+
+    @pytest.mark.asyncio
+    async def test_export_click_empty_shows_warning_no_dialog(self, bp):
+        bp.db.get_materials_for_export = AsyncMock(return_value=[])
+        await bp._on_export_harvest_click(None)
+        bp.page.open.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_view_click_switch_and_noop(self, bp):

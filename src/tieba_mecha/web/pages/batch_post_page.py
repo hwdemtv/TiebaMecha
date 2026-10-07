@@ -18,6 +18,8 @@ from ...core.harvest import (
 )
 from .batch_post.launch_config import LaunchConfig, LaunchConfigError, calc_next_weekly
 from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport, scan_import_pairs
+from .batch_post.harvest_export import build_harvest_export_csv, export_csv_filename
+from ..downloads import EXPORTS_DIR, save_export_file
 
 def _format_schedule_display(task) -> str:
     """格式化任务的调度信息显示"""
@@ -722,12 +724,17 @@ class BatchPostPage:
                 except Exception:
                     continue
             self._material_table.rows = harvest_rows
-            # 采集视图只保留批量删除（重置/自顶/AI改写是排期池语义）
+            # 采集视图只保留批量删除（重置/自顶/AI改写是排期池语义）；导出按钮采集专属
             self._bulk_reset_btn.visible = False
             self._bulk_bump_btn.visible = False
             self._bulk_ai_btn.visible = False
+            self._export_harvest_btn.visible = True
             self._update_material_pagination()
             self._update_bulk_visibility()
+            try:
+                self._export_harvest_btn.update()
+            except Exception:
+                pass
             try:
                 if hasattr(self, "_material_table"):
                     self._material_table.update()
@@ -739,6 +746,7 @@ class BatchPostPage:
         self._bulk_reset_btn.visible = True
         self._bulk_bump_btn.visible = True
         self._bulk_ai_btn.visible = True
+        self._export_harvest_btn.visible = False
         mat_items, self._material_total = await self.db.get_materials_by_status_paginated(
             statuses=["pending", "failed"],
             search_text=mat_search,
@@ -1226,6 +1234,49 @@ class BatchPostPage:
         self._material_page = 1
         self._selected_material_ids.clear()
         await self._refresh_material_table()
+
+    async def _on_export_harvest_click(self, e):
+        """导出采集待审列表为 CSV：Web 端经 /downloads/ 路由附件下载，桌面端提示本地路径。
+
+        导出范围=当前视图全集（harvested，随当前搜索词过滤），非仅当前页。
+        """
+        mat_search = self._material_search_text if self._material_search_text.strip() else None
+        try:
+            rows = await self.db.get_materials_for_export(["harvested"], mat_search)
+        except Exception as ex:
+            self._show_snackbar(f"导出查询失败: {ex}", "error")
+            return
+        if not rows:
+            self._show_snackbar("采集待审列表为空（或当前搜索无命中），无内容可导出", "warning")
+            return
+        try:
+            fname = save_export_file(build_harvest_export_csv(rows), export_csv_filename())
+        except Exception as ex:
+            self._show_snackbar(f"导出落盘失败: {ex}", "error")
+            return
+
+        def close_dialog(_):
+            self.page.close(dialog)
+
+        def download(_):
+            try:
+                self.page.launch_url(f"/downloads/{fname}")
+            except Exception as ex:
+                self._show_snackbar(f"打开下载失败: {ex}", "error")
+
+        is_web = getattr(self.page, "web", None) is not None
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(icons.DOWNLOAD_ROUNDED, color="primary"), ft.Text("导出采集待审")]),
+            content=ft.Column([
+                ft.Text(f"已导出 {len(rows)} 条采集物料为 CSV（UTF-8 BOM，Excel 可直接打开）。", size=12),
+                ft.Text(f"文件名: {fname}", size=12, selectable=True),
+                ft.Text(f"服务端路径: {EXPORTS_DIR / fname}", size=11, color="onSurfaceVariant", selectable=True),
+                ft.Text("下载链接 24 小时有效，过期自动清理后需重新导出。", size=11, color="onSurfaceVariant"),
+                ft.TextButton("下载 CSV", icon=icons.DOWNLOAD_ROUNDED, on_click=download, visible=is_web),
+            ], tight=True, spacing=12),
+            actions=[ft.TextButton("关闭", on_click=close_dialog)],
+        )
+        self.page.open(dialog)
 
     def _update_view_buttons(self, pending: int, failed: int, harvested: int):
         """视图按钮的计数与激活态同步——当前视图 ✓前缀+全亮，另一按钮半透明。
@@ -2075,6 +2126,7 @@ class BatchPostPage:
                     material_search,
                     self._view_btn_schedule,
                     self._view_btn_harvest,
+                    self._export_harvest_btn,
                     self._material_bulk_actions,
                 ], spacing=10),
                 ft.Container(
@@ -2215,6 +2267,12 @@ class BatchPostPage:
             "🌾 采集待审", opacity=0.5,
             on_click=lambda e: self.page.run_task(self._on_material_view_click, "harvest"),
             tooltip="养号采集的热门资源物料（转存替换/审核后才进排期池）",
+        )
+        self._export_harvest_btn = ft.IconButton(
+            icons.DOWNLOAD_ROUNDED, icon_size=18, icon_color="primary",
+            tooltip="导出采集待审列表为 CSV（含源链/提取码/自有链/状态）",
+            on_click=lambda e: self.page.run_task(self._on_export_harvest_click, e),
+            visible=False,
         )
 
         # 3. 参数配置
