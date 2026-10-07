@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable
 
@@ -1115,70 +1114,44 @@ class SurvivalPage:
         )
 
     async def _bulk_check_survival(self, e=None):
-        """批量探测所有已发帖子的存活状态（并发 3 路、单路限速，避免高频请求触发风控）
+        """批量探测所有已发帖子的存活状态（调 core 统一入口，进度经回调刷新）
 
-        只有拿到明确的 alive/dead 结论才落库；unknown（检测被验证码/网络拦截）
-        与基础设施异常一律不写库，保留物料原有状态，避免把"没测出来"写成长期档案。
+        与 daemon 定时轮转共用 run_survival_check：互斥锁防并发重复打 API；
+        unknown（检测被验证码/网络拦截）不写存活档案，仅推进检测时间。
         """
-        from ...core.logger import log_info, log_warn
-        from ...core.post import check_post_survival
+        from ...core.survival_feedback import run_survival_check
         from ..components.toast import show_toast
 
-        if getattr(self, "_check_running", False):
-            return
-        self._check_running = True
         btn = getattr(self, "_surv_check_btn", None)
         if btn:
             btn.disabled = True
         self._surv_progress.visible = True
         self.page.update()
-        alive = dead = unconfirmed = failed = done = 0
+
+        async def _progress(counts: dict):
+            self._surv_progress.value = counts["checked"] / max(counts["total"], 1)
+            info = f"检测中 {counts['checked']}/{counts['total']}：✅{counts['alive']} ❌{counts['dead']} ❓{counts['unknown']}"
+            if counts["failed"]:
+                info += f" ⚠️{counts['failed']}"
+            self._surv_check_info.value = info
+            try:
+                self.page.update()
+            except Exception:
+                pass  # 页面已离开等场景不影响后台检测
+
         try:
-            materials = await self.db.get_materials(status="success")
-            targets = [m for m in materials if m.posted_tid and m.posted_tid != 0]
-            if not targets:
+            result = await run_survival_check(self.db, limit=None, progress_cb=_progress)
+            if result.get("skipped"):
+                show_toast(self.page, "已有存活检测在后台进行中，请稍后再试", "warning")
+                return
+            if result["total"] == 0:
                 show_toast(self.page, "没有需要检测的帖子", "warning")
                 return
-            total = len(targets)
-            semaphore = asyncio.Semaphore(3)
-
-            async def _check_one(m):
-                nonlocal alive, dead, unconfirmed, failed, done
-                async with semaphore:
-                    try:
-                        status, reason = await check_post_survival(m.posted_tid)
-                        if status in ("alive", "dead"):
-                            await self.db.update_material_survival_status(m.id, status, reason)
-                        if status == "alive":
-                            alive += 1
-                        elif status == "dead":
-                            dead += 1
-                        else:
-                            unconfirmed += 1  # unknown：保留原状态不落库
-                        await asyncio.sleep(0.5)  # 单路限速
-                    except Exception as ex:
-                        failed += 1
-                        await log_warn(f"批量存活检测异常 tid={m.posted_tid}: {ex}")
-                    done += 1
-                    self._surv_progress.value = done / total
-                    info = f"检测中 {done}/{total}：✅{alive} ❌{dead} ❓{unconfirmed}"
-                    if failed:
-                        info += f" ⚠️{failed}"
-                    self._surv_check_info.value = info
-                    try:
-                        self.page.update()
-                    except Exception:
-                        pass  # 页面已离开等场景不影响后台检测
-
-            await asyncio.gather(*[_check_one(m) for m in targets])
-
-            result_msg = f"检测完成: 存活 {alive} 条, 阵亡 {dead} 条, 未确认 {unconfirmed} 条"
-            if failed:
-                result_msg += f", 失败 {failed} 条"
+            result_msg = f"检测完成: 存活 {result['alive']} 条, 阵亡 {result['dead']} 条, 未确认 {result['unknown']} 条"
+            if result["failed"]:
+                result_msg += f", 失败 {result['failed']} 条"
             show_toast(self.page, result_msg, "success")
-            await log_info(f"批量存活检测完成: 存活 {alive}, 阵亡 {dead}, 未确认 {unconfirmed}, 失败 {failed}, 共 {total} 条")
         finally:
-            self._check_running = False
             self._surv_progress.visible = False
             self._surv_progress.value = 0
             self._surv_check_info.value = ""

@@ -38,7 +38,28 @@ def temp_db_path() -> Generator[Path, None, None]:
     yield db_path
     # Cleanup
     if db_path.exists():
-        db_path.unlink()
+        try:
+            db_path.unlink()
+        except PermissionError:
+            # Windows 上新写的 .db 可能被杀软/索引器短暂锁定，也可能是进程内泄漏的
+            # aiosqlite 连接线程：先短暂重试（前者可解），仍失败则取证再抛
+            import time
+            for _ in range(5):
+                time.sleep(0.2)
+                try:
+                    db_path.unlink()
+                    break
+                except PermissionError:
+                    continue
+            else:
+                import threading
+
+                import psutil
+
+                hits = [f.path for f in psutil.Process().open_files() if Path(f.path) == db_path]
+                threads = [t.name for t in threading.enumerate() if "aiosqlite" in t.name.lower()]
+                print(f"\n[CONFTEST-DBG] unlink仍失败 hits={hits} aiosqlite_threads={threads}")
+                raise
 
 
 @pytest_asyncio.fixture
@@ -55,6 +76,18 @@ async def db(temp_db_path: Path) -> AsyncGenerator:
     # 测试环境固定为 0（串行旧路径）；错峰行为由 daemon 套路的错峰用例显式设置窗口覆盖
     await database.set_setting("sign_stagger_minutes", "0")
     yield database
+    # 先取消本测试 loop 内残留的后台任务（错峰 worker / 批量派发等 daemon
+    # spawn 的 task 会在 teardown 的 await 窗口被调度、摸库检出连接），再关库：
+    # 保证 engine dispose 时没有会话仍在途中，Windows 上临时 db 文件不被占用
+    try:
+        loop = asyncio.get_running_loop()
+        strays = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+        for t in strays:
+            t.cancel()
+        if strays:
+            await asyncio.gather(*strays, return_exceptions=True)
+    except RuntimeError:
+        pass  # 无运行中 loop（纯同步收尾）时无事可做
     await database.close()
 
 

@@ -374,6 +374,149 @@ class TestSurvivalFeedback:
 
 
 # ========================================================================
+# 存活检测统一入口：定时轮转 + 手动按钮共用（run_survival_check）
+# ========================================================================
+
+class TestSurvivalDetection:
+    async def _add_posted(self, title, posted_hours_ago=72):
+        """造一个已发帖成功的物料，返回 (mid, tid)"""
+        await self.db.add_materials_bulk([(title, f"{title}的正文内容，" * 5)])
+        from tieba_mecha.db.models import MaterialPool
+        from sqlalchemy import select
+        async with self.db.async_session() as session:
+            mid = (await session.execute(
+                select(MaterialPool.id)
+                .where(MaterialPool.title == title)
+                .order_by(MaterialPool.id.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+        assert mid is not None, f"物料未插入: {title}"
+        tid = 9000 + mid
+        await self.db.update_material_status(
+            mid, "success",
+            posted_fname="存活测试吧", posted_tid=tid,
+            posted_account_id=1, posted_time=datetime.now() - timedelta(hours=posted_hours_ago),
+        )
+        return mid, tid
+
+    async def _set_checked(self, mid, hours_ago):
+        from tieba_mecha.db.models import MaterialPool
+        from sqlalchemy import update as sa_update
+        async with self.db.async_session() as session:
+            await session.execute(
+                sa_update(MaterialPool).where(MaterialPool.id == mid)
+                .values(last_checked_at=datetime.now() - timedelta(hours=hours_ago))
+            )
+            await session.commit()
+
+    async def _get_material(self, mid):
+        from tieba_mecha.db.models import MaterialPool
+        async with self.db.async_session() as session:
+            return await session.get(MaterialPool, mid)
+
+    @pytest.mark.asyncio
+    async def test_writes_verdict_and_counts(self, db, monkeypatch):
+        """alive/dead 结论写入 survival_status/death_reason 并推进检测时间"""
+        self.db = db
+        mid1, tid1 = await self._add_posted("轮转甲帖")
+        mid2, tid2 = await self._add_posted("轮转乙帖")
+
+        async def fake_check(tid):
+            return {tid1: ("alive", ""), tid2: ("dead", "deleted_unknown")}[tid]
+
+        monkeypatch.setattr("tieba_mecha.core.post.check_post_survival", fake_check)
+        from tieba_mecha.core.survival_feedback import run_survival_check
+        result = await run_survival_check(db)
+
+        assert result["skipped"] is False
+        assert (result["total"], result["checked"], result["alive"], result["dead"]) == (2, 2, 1, 1)
+        assert result["unknown"] == 0 and result["failed"] == 0
+        m1, m2 = await self._get_material(mid1), await self._get_material(mid2)
+        assert m1.survival_status == "alive"
+        assert m2.survival_status == "dead" and m2.death_reason == "deleted_unknown"
+        assert m1.last_checked_at is not None and m2.last_checked_at is not None
+
+    @pytest.mark.asyncio
+    async def test_unknown_keeps_status_but_advances_rotation(self, db, monkeypatch):
+        """unknown（验证码/网络拦截）不写存活档案，仅推进 last_checked_at 防轮转卡头"""
+        self.db = db
+        mid, tid = await self._add_posted("验证码钉子户")
+        await db.update_material_survival_status(mid, "alive")
+        checked_before = (await self._get_material(mid)).last_checked_at
+
+        async def fake_check(tid_):
+            return "unknown", "captcha_required"
+
+        monkeypatch.setattr("tieba_mecha.core.post.check_post_survival", fake_check)
+        from tieba_mecha.core.survival_feedback import run_survival_check
+        result = await run_survival_check(db)
+
+        assert result["unknown"] == 1
+        m = await self._get_material(mid)
+        assert m.survival_status == "alive"  # 原档案保留
+        assert m.last_checked_at is not None and m.last_checked_at > checked_before
+
+    @pytest.mark.asyncio
+    async def test_rotation_recent_first_then_stale(self, db):
+        """轮转排序：近 7 天新帖优先；老帖内从未测过 > 最久未测"""
+        self.db = db
+        mid_old_checked, _ = await self._add_posted("老帖已测", posted_hours_ago=24 * 30)
+        await self._set_checked(mid_old_checked, hours_ago=1)
+        mid_old_never, _ = await self._add_posted("老帖从未测", posted_hours_ago=24 * 30)
+        mid_recent, _ = await self._add_posted("新帖昨发", posted_hours_ago=24)
+        await self._set_checked(mid_recent, hours_ago=1)
+
+        picked = await db.get_materials_for_survival_check(limit=1)
+        assert [m.id for m in picked] == [mid_recent]
+
+        order = await db.get_materials_for_survival_check()
+        assert [m.id for m in order] == [mid_recent, mid_old_never, mid_old_checked]
+
+    @pytest.mark.asyncio
+    async def test_lock_skips_concurrent_run(self, db, monkeypatch):
+        """已有一轮在跑时直接 skipped，不并发打 API"""
+        self.db = db
+
+        async def fail_check(tid):
+            raise AssertionError("互斥期间不应发起检测")
+
+        monkeypatch.setattr("tieba_mecha.core.post.check_post_survival", fail_check)
+        from tieba_mecha.core.survival_feedback import _survival_check_lock, run_survival_check
+        async with _survival_check_lock:
+            result = await run_survival_check(db)
+        assert result["skipped"] is True
+
+    @pytest.mark.asyncio
+    async def test_daemon_task_respects_settings(self, db, monkeypatch):
+        """daemon 任务读 settings 开关与批次；禁用时完全不探测"""
+        import tieba_mecha.core.daemon as daemon_mod
+        import tieba_mecha.core.survival_feedback as sf_mod
+        self.db = db
+
+        calls = {}
+
+        async def fake_run(check_db, limit=None, **kw):
+            calls["limit"] = limit
+            return {"skipped": False, "total": 0}
+
+        async def fake_get_db():
+            return db
+
+        monkeypatch.setattr(daemon_mod, "get_db", fake_get_db)
+        monkeypatch.setattr(sf_mod, "run_survival_check", fake_run)
+
+        await db.set_setting("survival_check_enabled", "true")
+        await db.set_setting("survival_check_batch", "55")
+        await daemon_mod.do_survival_check_task()
+        assert calls.get("limit") == 55
+
+        await db.set_setting("survival_check_enabled", "false")
+        calls.clear()
+        await daemon_mod.do_survival_check_task()
+        assert not calls
+
+
+# ========================================================================
 # AI 改写增强：相似度自检 + 存活 few-shot
 # ========================================================================
 

@@ -602,6 +602,24 @@ async def do_survival_governance_task():
     from .survival_feedback import run_survival_governance
     await run_survival_governance(db)
 
+async def do_survival_check_task():
+    """定时存活检测：增量轮转探测已发帖，写入 survival_* 供 12h 存活治理消费。
+
+    不做则治理只吃手动按钮留下的旧数据，火力目标关停与告警全部滞后。"""
+    db = await get_db()
+    try:
+        if (await db.get_setting("survival_check_enabled", "true")).lower() == "false":
+            return
+    except Exception:
+        pass
+    try:
+        batch = int(float(await db.get_setting("survival_check_batch", "100")))
+    except Exception:
+        batch = 100
+    from .survival_feedback import run_survival_check
+    # limit 轮转批次：近 7 天新帖优先 + 最久未测优先，读操作低风险
+    await run_survival_check(db, limit=max(1, batch))
+
 async def do_maintenance_task():
     """执行拟人化养号维护任务的内部包裹"""
     db = await get_db()
@@ -726,6 +744,17 @@ class TiebaMechaDaemon:
             except Exception:
                 maint_hours = 4.0
             self.scheduler.add_job(do_maintenance_task, 'interval', hours=maint_hours, id="biowarming_job", replace_existing=True)
+
+            # 存活检测轮转：增量探测已发帖写 survival_*，供 12h 存活治理消费新鲜数据
+            # （治理只读档案不探测，检测缺位则闭环断档；读操作低风险，默认 12h/批 100）
+            try:
+                surv_hours = float(await db.get_setting("survival_check_interval_hours", "12"))
+            except Exception:
+                surv_hours = 12.0
+            if surv_hours <= 0:
+                surv_hours = 12.0
+            self.scheduler.add_job(do_survival_check_task, 'interval', hours=surv_hours, id="survival_check_job", replace_existing=True,
+                                   next_run_time=datetime.now() + timedelta(minutes=3))  # 首轮启动后 3 分钟：由调度器管理，避免裸 create_task 在宿主 teardown 期开新连接
 
             await self.reload(db)
 

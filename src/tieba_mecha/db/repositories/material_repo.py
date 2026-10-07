@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import delete, func, select, text, update
@@ -807,6 +807,29 @@ class MaterialRepository:
                 stmt = stmt.limit(limit)
             result = await session.execute(stmt)
             return list(result.scalars().all())
+    async def get_materials_for_survival_check(self, limit: int | None = None) -> list[MaterialPool]:
+        """存活检测轮转选材：success 且已发帖（posted_tid 有效）。
+
+        排序：近 7 天新帖优先（删帖高发窗口）> 最久未测优先（NULL 最先=从未测过）。
+        limit=None 全量（存活页手动扫）；daemon 定时轮转传批次大小做增量轮转。
+        """
+        async with self.async_session() as session:
+            recent_cutoff = datetime.now() - timedelta(days=7)
+            stmt = (
+                select(MaterialPool)
+                .where(MaterialPool.status == "success")
+                .where(MaterialPool.posted_tid.isnot(None))
+                .where(MaterialPool.posted_tid != 0)
+                .order_by(
+                    (MaterialPool.posted_time >= recent_cutoff).desc(),
+                    MaterialPool.last_checked_at.asc(),
+                    MaterialPool.id.asc(),
+                )
+            )
+            if limit:
+                stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
     async def delete_material(self, material_id: int) -> bool:
         async with self.async_session() as session:
             m = await session.get(MaterialPool, material_id)
@@ -853,6 +876,17 @@ class MaterialRepository:
                 if posted_tid is not None: m.posted_tid = posted_tid
                 if posted_account_id is not None: m.posted_account_id = posted_account_id
                 if task_id is not None: m.task_id = task_id
+                await session.commit()
+    async def mark_material_checked(self, material_id: int) -> None:
+        """仅推进 last_checked_at（unknown 结论不写存活档案，"没测出来"不变长期状态）。
+
+        定时轮转靠它越过验证码墙/网络异常的钉子户：unknown 若不推进检测时间，
+        轮转排序会把同一批永远排在队头，其余物料永远轮不到。
+        """
+        async with self.async_session() as session:
+            m = await session.get(MaterialPool, material_id)
+            if m:
+                m.last_checked_at = datetime.now()
                 await session.commit()
     async def update_material_survival_status(self, material_id: int, status: str, death_reason: str = "") -> None:
         """更新物料的存活探测状态，并联动更新 Forum 封禁标记。

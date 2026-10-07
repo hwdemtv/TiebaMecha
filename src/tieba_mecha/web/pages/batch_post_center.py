@@ -1146,108 +1146,77 @@ class BatchPostCenterPage:
         await self.load_data()
 
     async def _bulk_check_survival_status(self, e):
-        """批量处理选中的贴子存活状态探测 (增强版：带实时进度提示)"""
+        """批量处理选中的贴子存活状态探测（调 core 统一入口，带实时进度提示）"""
         if not self._selected_archive_ids:
             self._show_snackbar("请先在列表中勾选想要探测的归档条目", "warning")
             return
 
-        # 提取目标 TIDs（按选中ID从数据库查询，支持跨页选中）
-        targets = []
+        # 提取目标（按选中ID从数据库查询，支持跨页选中）；显式传 materials 走统一检测循环
         selected_materials = await self.db.get_materials_by_ids(list(self._selected_archive_ids))
-        for m in selected_materials:
-            if m.status == "success" and m.posted_tid:
-                targets.append(m)
-                self._survival_cache[m.posted_tid] = "checking"
-
+        targets = [m for m in selected_materials if m.status == "success" and m.posted_tid]
         if not targets:
             self._show_snackbar("所选条目中没有包含有效 TID 的贴子", "warning")
             return
 
-        # 1. 启动进度提示
+        # 1. 挂起状态并启动进度提示
+        for m in targets:
+            self._survival_cache[m.posted_tid] = "checking"
+        total = len(targets)
         self.archive_progress_bar.visible = True
         self.archive_progress_bar.value = 0
         self.archive_status_text.visible = True
-        self.archive_status_text.value = f"正在初始化探测任务 (0/{len(targets)})..."
-        self._log_stream.add(f"🚀 开始对 {len(targets)} 条贴子执行批量存活探测...")
+        self.archive_status_text.value = f"正在初始化探测任务 (0/{total})..."
+        self._log_stream.add(f"🚀 开始对 {total} 条贴子执行批量存活探测...")
 
         # 先更新到 checking 状态显示给用户
         await self.load_data()
 
-        alive_count = 0
-        dead_count = 0
-        unconfirmed_count = 0
-        total = len(targets)
+        from ...core.survival_feedback import run_survival_check
 
-        # 并发控制：最多同时探测3个帖子
-        semaphore = asyncio.Semaphore(3)
         captcha_detected = False
 
-        async def check_single_material(m) -> tuple[str, str, str]:
-            """检测单个物料的存活状态（复用精细化检测逻辑）"""
-            from ...core.post import check_post_survival
-            async with semaphore:
-                tid = m.posted_tid
-                try:
-                    status, reason = await check_post_survival(tid)
-                    return tid, status, reason
-                except Exception:
-                    # 基础设施异常按"未确认"返回，由结果循环保留原状态
-                    return tid, "unknown", "error"
-                finally:
-                    # 限速：每次请求间隔0.5秒
-                    await asyncio.sleep(0.5)
+        async def _item(m, status, reason):
+            nonlocal captcha_detected
+            if status in ("alive", "dead"):
+                self._survival_cache[m.posted_tid] = status
+            elif status == "error":
+                # 检测基础设施异常：不落库，缓存恢复为库内原状态
+                self._survival_cache[m.posted_tid] = m.survival_status or "unknown"
+            else:
+                # unknown（验证码/网络拦截）：不落库，保留原状态
+                self._survival_cache[m.posted_tid] = m.survival_status or "unknown"
 
-        try:
-            # 使用 asyncio.gather 并发执行所有检测任务
-            results = await asyncio.gather(
-                *[check_single_material(m) for m in targets],
-                return_exceptions=True
-            )
-
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    # gather 级异常：不落库，恢复缓存为库内原状态
-                    tid = targets[i].posted_tid
-                    self._survival_cache[tid] = targets[i].survival_status or "unknown"
-                    unconfirmed_count += 1
-                    self._log_stream.add(f"⚠️ [错误] {targets[i].posted_fname} | TID:{tid} | {str(result)}", "error")
+            if reason == "captcha_required":
+                captcha_detected = True
+            if status == "alive":
+                self._log_stream.add(f"✅ [存活] {m.posted_fname} | TID:{m.posted_tid}")
+            elif status == "dead":
+                if reason == "captcha_required":
+                    self._log_stream.add(f"🚫 [验证码] {m.posted_fname} | TID:{m.posted_tid}", "warning")
                 else:
-                    tid, status, reason = result
-                    if status in ("alive", "dead"):
-                        self._survival_cache[tid] = status
-                        await self.db.update_material_survival_status(targets[i].id, status, reason)
-                    else:
-                        # unknown（验证码/网络拦截）：不落库，保留原状态
-                        self._survival_cache[tid] = targets[i].survival_status or "unknown"
-                        unconfirmed_count += 1
+                    self._log_stream.add(f"❌ [阵亡] {m.posted_fname} | TID:{m.posted_tid}", "error")
+            elif status == "error":
+                self._log_stream.add(f"⚠️ [错误] {m.posted_fname} | TID:{m.posted_tid}", "error")
+            elif reason == "captcha_required":
+                self._log_stream.add(f"🚫 [验证码] {m.posted_fname} | TID:{m.posted_tid}", "warning")
+            else:
+                self._log_stream.add(f"❓ [未确认] {m.posted_fname} | TID:{m.posted_tid}", "warning")
 
-                    if status == "alive":
-                        alive_count += 1
-                        self._log_stream.add(f"✅ [存活] {targets[i].posted_fname} | TID:{tid}")
-                    elif status == "dead":
-                        dead_count += 1
-                        if reason == "captcha_required":
-                            captcha_detected = True
-                            self._log_stream.add(f"🚫 [验证码] {targets[i].posted_fname} | TID:{tid}", "warning")
-                        else:
-                            self._log_stream.add(f"❌ [阵亡] {targets[i].posted_fname} | TID:{tid}", "error")
-                    else:
-                        if reason == "captcha_required":
-                            captcha_detected = True
-                            self._log_stream.add(f"🚫 [验证码] {targets[i].posted_fname} | TID:{tid}", "warning")
-                        else:
-                            self._log_stream.add(f"❓ [未确认] {targets[i].posted_fname} | TID:{tid}", "warning")
+        async def _progress(counts):
+            self.archive_progress_bar.value = counts["checked"] / max(counts["total"], 1)
+            self.archive_status_text.value = f"正在探测 ({counts['checked']}/{counts['total']})..."
+            if counts["checked"] % 5 == 0:
+                self.archive_progress_bar.update()
+                self.archive_status_text.update()
 
-                # 更新进度
-                self.archive_progress_bar.value = (i + 1) / total
-                self.archive_status_text.value = f"正在探测 ({i+1}/{total})..."
-                if (i + 1) % 5 == 0:
-                    self.archive_progress_bar.update()
-                    self.archive_status_text.update()
-
-            # 验证码提示
-            if captcha_detected:
-                self._show_snackbar("⚠️ 检测到百度验证码，建议30分钟后重试", "warning")
+        result = {}
+        try:
+            result = await run_survival_check(
+                self.db, materials=targets, progress_cb=_progress, item_cb=_item
+            )
+            if result.get("skipped"):
+                self._show_snackbar("已有存活检测在后台进行中，请稍后再试", "warning")
+                return
         except Exception as ex:
             self._log_stream.add(f"探测任务异常中止: {str(ex)}", "error")
         finally:
@@ -1255,9 +1224,15 @@ class BatchPostCenterPage:
             self.archive_status_text.visible = False
             self.page.update()
 
-        summary = f"批量探测完毕: {alive_count} 条存活健在，{dead_count} 条已掉线"
-        if unconfirmed_count:
-            summary += f"，{unconfirmed_count} 条未确认（保留原状态）"
+        if not result or result.get("skipped"):
+            return
+        # 验证码提示
+        if captcha_detected:
+            self._show_snackbar("⚠️ 检测到百度验证码，建议30分钟后重试", "warning")
+        summary = f"批量探测完毕: {result['alive']} 条存活健在，{result['dead']} 条已掉线"
+        unconfirmed = result["unknown"] + result["failed"]
+        if unconfirmed:
+            summary += f"，{unconfirmed} 条未确认（保留原状态）"
         self._show_snackbar(summary, "info")
         await self.load_data()
 
