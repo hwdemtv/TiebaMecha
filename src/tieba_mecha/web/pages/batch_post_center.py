@@ -546,6 +546,8 @@ class BatchPostCenterPage:
             status_label = {"banned": "（已封禁）", "suspended": "（停用）",
                             "expired": "（过期）", "suspended_proxy": "（代理隔离）"}
             fields["accounts"] = ft.Column([
+                # wrap Row + 子控件定宽：滚动列内自伸缩子控件会被拉成全宽竖排
+                # （手册六），checkbox 定宽后按格换排
                 ft.Row([
                     ft.Checkbox(
                         label=(self._account_name_map.get(a.id, f"#{a.id}")
@@ -556,9 +558,10 @@ class BatchPostCenterPage:
                                and a.status not in ("banned", "suspended", "expired", "suspended_proxy")),
                         data=a.id,
                         disabled=a.status in ("banned", "suspended", "expired", "suspended_proxy"),
+                        width=180,
                     ) for a in self._accounts
-                ], wrap=True, spacing=12, run_spacing=8),
-            ], height=130, scroll=ft.ScrollMode.AUTO)
+                ], wrap=True, spacing=6, run_spacing=8, width=552),
+            ], height=260, scroll=ft.ScrollMode.AUTO)
 
             # 目标贴吧候选池：全域唯一吧（排除隐藏）。已封禁吧禁选且不预勾，
             # 保存时随采集器剔除（与账号池终态同口径）；候选库已不含的现存
@@ -577,10 +580,11 @@ class BatchPostCenterPage:
                         value=(f["fname"] in current_fname_set and not f["is_banned"]),
                         data=f["fname"],
                         disabled=bool(f["is_banned"]),
+                        width=180,
                     ) for f in forum_pool
-                ] + [ft.Checkbox(label=f, value=True, data=f) for f in extra_fnames],
-                wrap=True, spacing=12, run_spacing=8),
-            ], height=130, scroll=ft.ScrollMode.AUTO)
+                ] + [ft.Checkbox(label=f, value=True, data=f, width=180) for f in extra_fnames],
+                wrap=True, spacing=6, run_spacing=8, width=552),
+            ], height=260, scroll=ft.ScrollMode.AUTO)
 
             # 策略组：账号调度 + 文案提取（+ 循环任务的物料轮转），选项与批量发帖页同源
             raw_strategy = task.strategy or "round_robin"
@@ -626,39 +630,73 @@ class BatchPostCenterPage:
         edit_tip = ("（仅待执行、已暂停任务可编辑，目标贴吧与策略可就地调整）"
                     if editable else "（当前状态不可编辑；失败/停止任务可用「重新激活」，配置复用「复制」）")
 
-        edit_controls = []
+        # 可编辑时按功能拆四个页签（基本信息/账号池/目标贴吧/执行策略），替代整块长表单。
+        # 页签纪律（docs/flet_web_layout_pitfalls.md 六-1/六-2）：单页签内容压平 ≤~400px、
+        # 内容列首元素加 10px 留白防浮动标签被页签顶边裁剪（外层容器 padding 挡不住）。
+        # Tabs 显式 width + 内容列 START 对齐：页签内容区默认走 Flutter center，
+        # 收缩包裹的子控件会整块缩进、expand 行溢出右缘（2026-10-07 浏览器实测）
+        def _tab_content(children):
+            return ft.Container(
+                content=ft.Column(
+                    [ft.Container(height=10), *children],
+                    spacing=10, horizontal_alignment=ft.CrossAxisAlignment.START,
+                ),
+                padding=ft.padding.only(top=6, left=4, right=4),
+            )
+
+        content_children = [ft.Column(info_rows, spacing=6),
+                            ft.Text(edit_tip, size=11, color="onSurfaceVariant")]
         if editable:
             # once/daily/weekly 用时刻字段，interval 用间隔小时字段
             schedule_head = ([fields["schedule"]] if "schedule" in fields
                              else [fields["interval"]] if "interval" in fields
                              else [])
-            edit_controls = [
-                ft.Container(content=ft.Column(
-                    schedule_head + ([fields["weekday"]] if "weekday" in fields else []) + [
-                        ft.Text("账号池（终态账号自动被调度剔除）:", size=12, color="onSurfaceVariant"),
-                        fields["accounts"],
-                        ft.Text("目标贴吧（已封禁吧禁选，保存时自动剔除）:", size=12, color="onSurfaceVariant"),
-                        fields["forums"],
-                        ft.Row(
-                            [fields["strategy"], fields["pairing"]]
-                            + ([fields["reset_strategy"]] if "reset_strategy" in fields else []),
-                            spacing=10),
-                        ft.Row([fields["total"], fields["delay_min"], fields["delay_max"]], spacing=10),
-                        ft.Row([fields["use_ai"], fields["persona"]], spacing=20),
-                    ], spacing=10),
-                    padding=12, bgcolor=with_opacity(0.04, "primary"), border_radius=10),
+            # 页签定高：weekly 策略组多一行星期 +56；其余 350 已覆盖
+            # 账号池/目标贴吧页签（260 选择区）与策略组，且 < ~450px 截断线
+            tabs_height = 385 if schedule_type == "weekly" else 350
+            content_children = [
+                ft.Tabs(
+                    width=560,
+                    # 显式定高：Tabs 内部 body 为 Expanded 填充，无界高度下对话框
+                    # 会被撑满整屏（2026-10-07 实测）
+                    height=tabs_height,
+                    selected_index=0, animation_duration=200,
+                    label_color=COLORS.PRIMARY, unselected_label_color="onSurfaceVariant",
+                    indicator_color=COLORS.PRIMARY,
+                    tabs=[
+                        ft.Tab(text="基本信息", content=_tab_content([
+                            ft.Column(info_rows, spacing=6),
+                            ft.Text(edit_tip, size=11, color="onSurfaceVariant"),
+                        ])),
+                        ft.Tab(text="账号池", content=_tab_content([
+                            ft.Text("终态账号自动被调度剔除:", size=12, color="onSurfaceVariant"),
+                            fields["accounts"],
+                        ])),
+                        ft.Tab(text="目标贴吧", content=_tab_content([
+                            ft.Text("已封禁吧禁选，保存时自动剔除:", size=12, color="onSurfaceVariant"),
+                            fields["forums"],
+                        ])),
+                        ft.Tab(text="执行策略", content=_tab_content(
+                            schedule_head + ([fields["weekday"]] if "weekday" in fields else []) + [
+                                ft.Row(
+                                    [fields["strategy"], fields["pairing"]]
+                                    + ([fields["reset_strategy"]] if "reset_strategy" in fields else []),
+                                    spacing=10),
+                                ft.Row([fields["total"], fields["delay_min"], fields["delay_max"]], spacing=10),
+                                ft.Row([fields["use_ai"], fields["persona"]], spacing=20),
+                            ])),
+                    ],
+                ),
             ]
 
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(f"任务 #{task.id} 详情", size=16, weight=ft.FontWeight.BOLD),
             content=ft.Container(
-                content=ft.Column(
-                    [ft.Column(info_rows, spacing=6),
-                     ft.Text(edit_tip, size=11, color="onSurfaceVariant"),
-                     *edit_controls],
-                    spacing=10, scroll=ft.ScrollMode.AUTO,
-                ),
+                # tight 收紧高度：Column 默认 MainAxisSize.max，在对话框松散高度
+                # 约束下会撑满整屏（2026-10-07 对照实验实测，最小弹窗即紧凑）；
+                # 各页签内容 ≤~400px 无需滚动，不踩 scroll+tight 组合（手册五-2）
+                content=ft.Column(content_children, spacing=10, tight=True),
                 width=560,
             ),
             actions=[

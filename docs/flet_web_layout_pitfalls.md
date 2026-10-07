@@ -51,6 +51,9 @@
 | 动态替换 controls / style 后客户端不更新（表头残留、按钮激活态全同、数据发出无挂载点） | flet 0.23.2 对 controls 列表替换与 style 对象整体替换的 patch 不可靠，update 打到容器也没用（见 六-4） | 切换路径只做"静态结构+数据(rows/text)填充"，激活态用 ✓前缀+opacity |
 | 页面打开即报 `XXX.__init__() got an unexpected keyword argument` | 构造 kwarg 在该 flet 版本不存在（如 0.23.2 按钮 bgcolor/color；桩 flet 吃任何 kwarg 测不出来，见 六-5） | 先 `inspect.signature(真实类.__init__)` 核对；测试补签名对照断言 |
 | DataTable 长表头互相重叠、相邻窄列表头粘连成一行（如"来源吧原链(悬停…)"），个别表头被盖没 | **列宽只由数据格决定，表头不参与**：该列数据格是裸 `Text("-")`（~10px）时列宽坍缩，长表头横向溢出盖到相邻列上；有真实内容的视图（采集行）不暴露 | 窄格包 `Container(width=N)` 撑住列宽（≥表头宽+余量），同一列所有视图的格统一处理（见 六-6） |
+| AlertDialog 无论内容多短都撑满整屏高度（内容顶置、按钮钉底、中间大片死空间） | Column 未设 tight 时 Flutter 默认 MainAxisSize.max，在对话框给内容的**松散高度约束**下直接取最大值；scrollable Column 同病 | 对话框内容列加 `tight=True`（勿与 scroll 组合，见 五-2）；诊断靠对照实验：同页开一个纯 Text 内容的最小弹窗，紧凑=内容里有人撑满（见 七-1） |
+| AlertDialog 里放 Tabs：页签内容整块右缩进居中、expand 行溢出对话框右缘被裁 | ① Tabs 内部 body 为 Expanded 填充，无界高度下连对话框一起撑满；② 页签内容列未设对齐时走 Flutter Column 默认 center，收缩包裹的子控件整块居中 | Tabs 显式 `width=` + `height=`（≤~450px 截断线），页签内容列 `horizontal_alignment=START`（见 七-2） |
+| 滚动列里 wrap Row 的 Checkbox 等自伸缩子控件全宽竖排（每行一个） | 手册六既知病（自伸缩子控件在 wrap Row 里被拉满行宽）；**给 Row 定宽无效** | 给每个子控件固定 `width`（如 Checkbox width=180）恢复横向换排（见 七-3） |
 
 ## 三、排查方法论（这次实测有效的流程）
 
@@ -256,3 +259,38 @@ BatchPostPage 控件树（桩 db）+ 视图切换按钮（走真实 `_refresh_ma
 不动。实测（复现页按钮往返切换 + 截图）：DataColumn label 内的 Text.value
 更新在 0.23.2 web 端即时生效、往返无残留。物料表现用于"来源/来源吧"与
 "网盘链接(楼中楼首评)/原链(悬停看提取码)"两组表头切换。
+
+## 七、AlertDialog 里的分页弹窗（2026-10-07 任务详情弹窗四页签实战）
+
+> 任务详情/编辑弹窗按功能拆四页签（基本信息/账号池/目标贴吧/执行策略），
+> 三轮浏览器实测二分定位三坑。复现页：`scratch/smoke_task_detail_tabs_1007.py`。
+
+### 1. 对话框内容 Column 默认撑满整屏（tight 修复）
+
+**症状**：内容只有 ~250px，对话框却顶天立地（内容顶置、按钮钉底、中间死空间）。
+**根因**：Flutter Column 默认 `MainAxisSize.max`，AlertDialog 给内容的是
+**松散高度约束**（0..maxH），Column 直接纳最大值；scrollable Column 同病。
+**诊断法（关键）**：同页加一个纯 `Text` 内容的最小弹窗对照——紧凑=自己的
+内容在撑满，全高=flet/主题行为。本轮靠这一步避免在 Tabs 上白修三轮。
+**修复**：内容列 `tight=True`（mainAxisSize.min）。**勿与 scroll 组合**
+（五-2 的 scroll+tight 禁忌不变）；内容 ≤~400px 时本就不需要滚动。
+
+### 2. AlertDialog 里放 Tabs 的三条纪律
+
+- **必须显式 `height=`**：Tabs 内部 body 是 Expanded 填充，无界高度下
+  连对话框一起被撑满（定 390 高都不够，必须给值）。
+- **必须显式 `width=`**：不设则内容区收缩包裹+居中（见下），子控件
+  整块缩进、expand 行溢出右缘被裁。
+- **页签内容列 `horizontal_alignment=ft.CrossAxisAlignment.START`**：
+  Flutter Column 未设对齐时默认 center，收缩包裹的子控件（caption/
+  checkbox 列/固定宽输入框）整块缩进居中；Row 里的 expand 子项在
+  收缩语境下退化为固有宽 → 三下拉行直接溢出对话框右缘。
+- 高度取值：最高页签内容 + 页签栏，且 ≤~450px 截断线（六-1）。
+  本例 daily=350、weekly=385（多一行星期下拉）。
+
+### 3. wrap Row 全宽竖排的正解=子控件定宽
+
+滚动列（ListView）里 `Row(wrap=True)` 的 Checkbox 全宽竖排（手册六既知）。
+**给 Row 定 `width` 无效**（实验证实），**给每个 Checkbox 定 `width=180`**
+立即恢复横向 3 列换排——消除"自伸缩"属性即绕开病灶。代价是格子等宽，
+长吧名（如"陈华哪个厂的帽子好"）会撑 label 溢出格子——设宽时留足余量。
