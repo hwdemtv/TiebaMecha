@@ -37,6 +37,20 @@ _PERMISSION_SKIP_COUNT: dict[tuple[int, str], int] = {}
 # （banned=全吧封禁 / suspended=停用 / expired=过期 / suspended_proxy=代理失效隔离）
 TERMINAL_ACCOUNT_STATUSES: frozenset[str] = frozenset({"banned", "suspended", "expired", "suspended_proxy"})
 
+# 带链首评账号级风控（2026-10-08 hwdemtv1 带链回复 4/4 秒删事故整改）：
+# ① 手动剔除 link_reply_exclude_accounts——值=账号id列表，命中者全程不参与首评（自评+轮换）；
+# ② 被吞熔断——可见性校验判被吞时按账本 pending 找到"实际发出账号"记一击，窗口内累计达
+#    阈值即冷却退池，冷却到期自动恢复。账本落 settings（link_reply_breaker_ledger）跨重启
+#    持久化；读账失败 fail-open 只告警不阻断，与权限黑名单账本同一容灾口径。
+LINK_REPLY_EXCLUDE_KEY = "link_reply_exclude_accounts"
+LINK_REPLY_BREAKER_ENABLED_KEY = "link_reply_breaker_enabled"
+LINK_REPLY_BREAKER_LEDGER_KEY = "link_reply_breaker_ledger"
+LINK_REPLY_BREAKER_THRESHOLD = 2        # 窗口内被吞判定次数阈值
+LINK_REPLY_BREAKER_WINDOW_HOURS = 48    # 击计数滑动窗口
+LINK_REPLY_BREAKER_COOLDOWN_HOURS = 24  # 触发后冷却时长
+LINK_REPLY_LEDGER_TTL_DAYS = 7          # pending 条目保留期
+LINK_REPLY_LEDGER_MAX_PENDING = 200     # pending FIFO 上限
+
 
 def record_permission_denied(account_id: int, fname: str, reason: str) -> bool:
     """记录权限不足组合，返回是否为该组合首次出现。"""
@@ -2477,6 +2491,88 @@ class AutoBumpManager:
             return f"{m.group(1)} 提取码 {m.group(2)}"
         return link
 
+    # ---- 带链首评账号级风控（手动剔除 + 被吞熔断，账本挂 settings 跨重启）----
+
+    async def _breaker_params(self) -> tuple[bool, int, int, int]:
+        """(enabled, threshold, window_hours, cooldown_hours)，配置损坏回默认值。"""
+        try:
+            enabled = (await self.db.get_setting(LINK_REPLY_BREAKER_ENABLED_KEY, "true")).lower() != "false"
+            threshold = int(await self.db.get_setting("link_reply_breaker_threshold", str(LINK_REPLY_BREAKER_THRESHOLD)))
+            window_h = int(await self.db.get_setting("link_reply_breaker_window_hours", str(LINK_REPLY_BREAKER_WINDOW_HOURS)))
+            cooldown_h = int(await self.db.get_setting("link_reply_breaker_cooldown_hours", str(LINK_REPLY_BREAKER_COOLDOWN_HOURS)))
+        except Exception:
+            return True, LINK_REPLY_BREAKER_THRESHOLD, LINK_REPLY_BREAKER_WINDOW_HOURS, LINK_REPLY_BREAKER_COOLDOWN_HOURS
+        return enabled, max(1, threshold), max(1, window_h), max(1, cooldown_h)
+
+    async def _load_reply_ledger(self) -> dict:
+        """读首评风控账本 {"pending": {mid: {"aid","ts"}}, "strikes": {aid: [ts]}}，损坏静默回空。"""
+        try:
+            raw = await self.db.get_setting(LINK_REPLY_BREAKER_LEDGER_KEY, "")
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        pending, strikes = data.get("pending"), data.get("strikes")
+        return {
+            "pending": pending if isinstance(pending, dict) else {},
+            "strikes": strikes if isinstance(strikes, dict) else {},
+        }
+
+    async def _save_reply_ledger(self, ledger: dict, now, window_h: int) -> None:
+        """裁剪后落账本：pending 按 TTL+FIFO，strikes 只留窗口内（过窗击数对判定无意义）。"""
+        from datetime import timedelta
+        try:
+            pending_cutoff = now - timedelta(days=LINK_REPLY_LEDGER_TTL_DAYS)
+            pend = {}
+            for mid, entry in ledger["pending"].items():
+                try:
+                    if isinstance(entry, dict) and datetime.fromisoformat(entry["ts"]) >= pending_cutoff:
+                        pend[mid] = entry
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if len(pend) > LINK_REPLY_LEDGER_MAX_PENDING:
+                pend = dict(sorted(pend.items(), key=lambda kv: str(kv[1].get("ts", "")))[-LINK_REPLY_LEDGER_MAX_PENDING:])
+            strike_cutoff = now - timedelta(hours=window_h)
+            kept_strikes = {}
+            for aid, ts_list in ledger["strikes"].items():
+                keep = []
+                for ts in ts_list if isinstance(ts_list, list) else []:
+                    try:
+                        if datetime.fromisoformat(ts) >= strike_cutoff:
+                            keep.append(ts)
+                    except (TypeError, ValueError):
+                        continue
+                if keep:
+                    kept_strikes[aid] = keep
+            payload = json.dumps({"pending": pend, "strikes": kept_strikes}, ensure_ascii=False)
+            await self.db.set_setting(LINK_REPLY_BREAKER_LEDGER_KEY, payload)
+        except Exception as ex:
+            await log_warn(f"首评风控账本落库失败（不影响本次动作）: {ex}")
+
+    @staticmethod
+    def _breaker_blocked(aid: int, strikes: dict, now, threshold: int, window_h: int, cooldown_h: int) -> tuple[bool, int, datetime | None]:
+        """账号是否处于熔断冷却：返回 (冷却中, 窗口内击数, 窗口内末次被吞时刻)。
+
+        冷却判定=击数达阈值 且 now < 末击+冷却期；冷却到期后即使击数仍在窗口内也不续期
+        （续期只能由新的被吞判定触发，而冷却中的账号发不出首评、不会产生新击）。
+        """
+        from datetime import timedelta
+        cutoff = now - timedelta(hours=window_h)
+        recent = []
+        for ts in strikes.get(str(aid), []) if isinstance(strikes.get(str(aid)), list) else []:
+            try:
+                t = datetime.fromisoformat(ts)
+            except (TypeError, ValueError):
+                continue
+            if t >= cutoff:
+                recent.append(t)
+        if not recent:
+            return False, 0, None
+        recent.sort()
+        last = recent[-1]
+        return len(recent) >= threshold and now < last + timedelta(hours=cooldown_h), len(recent), last
+
     async def process_link_first_replies(self) -> int:
         """带链首评：主帖净文化（链接不进主帖，规避外链删除），链接走首评楼层。
 
@@ -2538,6 +2634,39 @@ class AutoBumpManager:
             await log_warn(f"带链首评：{len(candidates)} 条物料待发，但矩阵号池为空，本轮跳过")
             return 0
 
+        # 账号级风控剔除：手动剔除（link_reply_exclude_accounts）+ 被吞熔断冷却中。
+        # 命中者全程不参与首评（楼主自评+轮换都轮不到），剔除后池空则本轮跳过。
+        breaker_on, threshold, window_h, cooldown_h = await self._breaker_params()
+        ledger = await self._load_reply_ledger()
+        try:
+            _ex_raw = await self.db.get_setting(LINK_REPLY_EXCLUDE_KEY, "")
+        except Exception:
+            _ex_raw = ""
+        manual_ids = {int(x) for x in re.findall(r"\d+", _ex_raw or "")}
+        breaker_ids: set[int] = set()
+        breaker_desc: list[str] = []
+        if breaker_on:
+            for acc_check in matrix_pool:
+                if acc_check.id in manual_ids:
+                    continue
+                hot, cnt, last = self._breaker_blocked(acc_check.id, ledger["strikes"], now, threshold, window_h, cooldown_h)
+                if hot:
+                    breaker_ids.add(acc_check.id)
+                    until = (last + timedelta(hours=cooldown_h)).strftime("%d日%H:%M")
+                    breaker_desc.append(f"id={acc_check.id}冷却至{until}（{cnt}击）")
+        risk_ids = manual_ids | breaker_ids
+        pool_before = len(matrix_pool)
+        matrix_pool = [a for a in matrix_pool if a.id not in risk_ids]
+        if risk_ids:
+            await log_info(
+                f"带链首评账号风控剔除 {pool_before - len(matrix_pool)}/{pool_before} 个："
+                f"手动={sorted(manual_ids) or '无'}"
+                + (f"；熔断中[{'; '.join(breaker_desc)}]" if breaker_desc else "")
+            )
+        if not matrix_pool:
+            await log_warn(f"带链首评：{len(candidates)} 条物料待发，但风控剔除后矩阵号池为空，本轮跳过")
+            return 0
+
         # 排除出楼主自评的账号（settings 键，值=账号id列表，空=不排除）。
         # 背景：2026-10-04 实证 hwdemtv187 楼主自评首评 4/4 被百度系统硬吞（作者视角
         # 也不可见、reply_num 留残影），同吧同内容其他矩阵号存活——其帖子首评直接轮换。
@@ -2573,9 +2702,14 @@ class AutoBumpManager:
                 acc.id, material.posted_fname, material.posted_tid, reply_content
             )
             if ok:
-                # 仅记发出时间，可见性由校验阶段确认后置 link_reply_pid
+                # 仅记发出时间，可见性由校验阶段确认后置 link_reply_pid；
+                # 同时把 (物料→发出账号) 挂风控账本 pending，被吞判定时据此记击
+                # （熔断开关关闭时不记账=纯旧行为）
                 material.link_reply_at = now
                 success_count += 1
+                if breaker_on:
+                    ledger["pending"][str(material.id)] = {"aid": acc.id, "ts": now.isoformat(timespec="seconds")}
+                    await self._save_reply_ledger(ledger, now, window_h)
                 await log_info(
                     f"物料 [{material.id}] 带链首评已发出: {acc.user_name or acc.name} @ {material.posted_fname}（待可见性校验）"
                 )
@@ -2607,6 +2741,8 @@ class AutoBumpManager:
             verify_delay_min = int(await self.db.get_setting("link_reply_verify_delay_minutes", "3"))
         except Exception:
             verify_delay_min = 3
+        breaker_on, threshold, window_h, cooldown_h = await self._breaker_params()
+        ledger = await self._load_reply_ledger()
 
         async with self.db.async_session() as session:
             stmt = select(MaterialPool).where(and_(
@@ -2645,9 +2781,32 @@ class AutoBumpManager:
                         m.link_reply_pid = pid
                         await session.commit()
                 confirmed += 1
+                ledger["pending"].pop(str(material.id), None)
+                await self._save_reply_ledger(ledger, now, window_h)
                 await log_info(f"物料 [{material.id}] 带链首评可见性确认 (pid:{pid})")
             else:
-                # 发出已超校验延迟仍不可见 → 判定被吞，换号重发
+                # 发出已超校验延迟仍不可见 → 判定被吞，换号重发；
+                # 同时按账本 pending 找到实际发出账号记一击（达阈值即熔断冷却）；
+                # 熔断开关关闭=纯旧行为：不记账、不记击
+                sender_aid = None
+                pend_entry = ledger["pending"].pop(str(material.id), None)
+                if breaker_on and isinstance(pend_entry, dict) and isinstance(pend_entry.get("aid"), int):
+                    sender_aid = pend_entry["aid"]
+                    strikes = ledger["strikes"].setdefault(str(sender_aid), [])
+                    if not isinstance(strikes, list):
+                        strikes = ledger["strikes"][str(sender_aid)] = []
+                    strikes.append(now.isoformat(timespec="seconds"))
+                    hot, cnt, last = self._breaker_blocked(sender_aid, ledger["strikes"], now, threshold, window_h, cooldown_h)
+                    await self._save_reply_ledger(ledger, now, window_h)
+                    if hot:
+                        until = (last + timedelta(hours=cooldown_h)).strftime("%d日%H:%M")
+                        await log_warn(
+                            f"首评熔断：账号id={sender_aid} 窗口内第{cnt}次被吞，冷却退池至 {until}（阈值{threshold}/{window_h}h）"
+                        )
+                    else:
+                        await log_info(f"首评击记账：账号id={sender_aid} 窗口内被吞{cnt}/{threshold}次")
+                elif pend_entry is not None:
+                    await self._save_reply_ledger(ledger, now, window_h)
                 async with self.db.async_session() as session:
                     m = await session.get(MaterialPool, material.id)
                     if m:

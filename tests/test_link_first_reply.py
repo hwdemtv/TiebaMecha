@@ -430,3 +430,133 @@ async def test_reset_to_pending_clears_link_reply_state(db):
     assert m.link_reply_at is None
     assert m.link_reply_pid is None
     assert m.link_reply_fail_count == 0
+
+
+# ---- 账号级风控（2026-10-08 hwdemtv1 秒删事故整改）：手动剔除 + 被吞熔断 ----
+
+
+async def _get_ledger(db) -> dict:
+    import json as _json
+    raw = await db.get_setting("link_reply_breaker_ledger", "")
+    return _json.loads(raw) if raw else {}
+
+
+@pytest.mark.asyncio
+async def test_exclude_accounts_removed_from_pool(db, manager):
+    """link_reply_exclude_accounts：命中者全程不参与首评（楼主自评+轮换都轮不到）。"""
+    poster_id = await _add_account(db, "poster")
+    helper_id = await _add_account(db, "helper")
+    await db.set_setting("link_reply_exclude_accounts", str(poster_id))
+    mid = await _add_material(db, posted_account_id=poster_id)
+
+    count = await manager.process_link_first_replies()
+
+    assert count == 1
+    args = manager.post_manager.reply_to_thread.await_args.args
+    assert args[0] == helper_id, "被剔除账号的帖子首评不得由本人自评发出"
+    m = await _get_material(db, mid)
+    assert m.link_reply_at is not None
+
+
+@pytest.mark.asyncio
+async def test_exclude_all_accounts_skips_send(db, manager):
+    """剔除后矩阵池为空：本轮跳过发送，不得报错不得发帖。"""
+    poster_id = await _add_account(db, "poster")
+    await db.set_setting("link_reply_exclude_accounts", str(poster_id))
+    await _add_material(db, posted_account_id=poster_id)
+
+    count = await manager.process_link_first_replies()
+
+    assert count == 0
+    manager.post_manager.reply_to_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_breaker_trips_after_threshold_and_blocks(db, manager):
+    """被吞熔断：同一账号窗口内累计达阈值击数即冷却退池，后续物料轮不到它。"""
+    solo_id = await _add_account(db, "solo")
+    mid1 = await _add_material(db, posted_account_id=solo_id, posted_tid=111)
+
+    # 第1轮：自评发出 → 判被吞 → 记击1、立即换号重发（池只剩自己）
+    assert await manager.process_link_first_replies() == 1
+    await _backdate_link_reply(db, mid1)
+    await manager.process_link_first_replies()
+    m = await _get_material(db, mid1)
+    assert m.link_reply_fail_count == 1
+    ledger = await _get_ledger(db)
+    assert len(ledger["strikes"][str(solo_id)]) == 1
+    assert str(mid1) in ledger["pending"], "换号重发后 pending 应指向新发出账号"
+
+    # 第2轮：再被吞 → 记击2 达阈值 → 熔断退池；同轮发送阶段池空跳过（fail_count 停在 2，
+    # 冷却到期且未超 48h 窗时会自然重试——优雅降级而非放弃）
+    await _backdate_link_reply(db, mid1)
+    count = await manager.process_link_first_replies()
+    assert count == 0, "熔断生效轮：发送阶段池空，不得再发"
+    m = await _get_material(db, mid1)
+    assert m.link_reply_fail_count == 2
+    ledger = await _get_ledger(db)
+    assert len(ledger["strikes"][str(solo_id)]) == 2
+    assert str(mid1) not in ledger["pending"], "被吞判定后 pending 必须清掉"
+
+    # 后续物料：solo 处于冷却 → 剔除后池空 → 不发送
+    manager.post_manager.reply_to_thread.reset_mock()
+    mid2 = await _add_material(db, posted_account_id=solo_id, posted_tid=222)
+    count = await manager.process_link_first_replies()
+    assert count == 0
+    manager.post_manager.reply_to_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_breaker_cooldown_expires(db, manager):
+    """冷却到期自动恢复：窗口内击数仍在但超过冷却期即不再拦截。"""
+    from tieba_mecha.core.batch_post import AutoBumpManager as _M
+    aid = 7
+    now = datetime.now()
+    strikes = {str(aid): [
+        (now - timedelta(hours=20)).isoformat(timespec="seconds"),
+        (now - timedelta(hours=19)).isoformat(timespec="seconds"),
+    ]}
+    hot, cnt, _ = _M._breaker_blocked(aid, strikes, now, threshold=2, window_h=48, cooldown_h=24)
+    assert hot is True and cnt == 2, "19h 前被吞、24h 冷却期还剩 5h → 仍冷却中"
+
+    hot_late, cnt_late, _ = _M._breaker_blocked(aid, strikes, now + timedelta(hours=6), threshold=2, window_h=48, cooldown_h=24)
+    assert hot_late is False and cnt_late == 2, "末击 25h 后冷却已过 → 恢复资格（窗口内击数仍在但不续期）"
+
+    hot_old, cnt_old, _ = _M._breaker_blocked(aid, {"7": [(now - timedelta(hours=100)).isoformat()]}, now, 2, 48, 24)
+    assert hot_old is False and cnt_old == 0, "窗口(48h)外的击数不计数"
+
+
+@pytest.mark.asyncio
+async def test_confirm_visible_clears_pending_no_strike(db, manager):
+    """确认可见：清 pending 不记击；被吞只击实际发出账号（账本 pending 归因）。"""
+    poster_id = await _add_account(db, "poster")
+    mid = await _add_material(db, posted_account_id=poster_id)
+
+    await manager.process_link_first_replies()  # poster 自评发出
+    ledger = await _get_ledger(db)
+    assert ledger["pending"][str(mid)]["aid"] == poster_id
+
+    await _backdate_link_reply(db, mid)
+    manager._find_link_reply = AsyncMock(return_value=("found", 777))
+    await manager.process_link_first_replies()
+
+    ledger = await _get_ledger(db)
+    assert str(mid) not in ledger["pending"], "确认可见必须清 pending"
+    assert ledger["strikes"] == {}, "可见不得记击"
+
+
+@pytest.mark.asyncio
+async def test_breaker_disabled_skips_strike_accounting(db, manager):
+    """link_reply_breaker_enabled=false：纯旧行为，不记账不熔断。"""
+    await _add_account(db, "poster")
+    await db.set_setting("link_reply_breaker_enabled", "false")
+    mid = await _add_material(db)
+
+    await manager.process_link_first_replies()
+    await _backdate_link_reply(db, mid)
+    await manager.process_link_first_replies()  # 判被吞+换号重发
+
+    ledger = await _get_ledger(db)
+    assert ledger.get("strikes", {}) == {} and ledger.get("pending", {}) == {}, "开关关闭不得留任何账本痕迹"
+    m = await _get_material(db, mid)
+    assert m.link_reply_fail_count == 1, "被吞判定与重发本身不受开关影响"
