@@ -114,7 +114,8 @@ async def test_first_reply_uses_poster_and_rewrites_link(db, manager):
     assert args[0] == poster_id, "首轮无失败记录时必须楼主自评（最自然的'楼主二楼自取'）"
     assert args[1] == "电影" and args[2] == 123456
     content = args[3]
-    assert "pan.baidu.com/s/testlink" in content, "回帖内容必须携带链接"
+    assert "pan.baidu.com/s/testlink" in content.replace("删", ""), "回帖内容必须携带链接（剥删字后可还原）"
+    assert "删" in content, "百度盘链接必须经过删字暗号化（打断特征串）"
     assert "https://" not in content, "链接必须去 scheme 后发出"
     assert "提取码" not in content  # testlink 无 pwd 参数
 
@@ -376,16 +377,51 @@ async def test_solo_poster_self_replies(db, manager):
 
 @pytest.mark.asyncio
 async def test_retry_content_carries_rewrite_and_pwd(db, manager):
-    """pwd 链接改写后重发内容同样携带提取码尾注"""
+    """pwd 链接改写后重发内容同样携带提取码尾注（删字暗号化不破坏还原性）"""
     await _add_account(db, "poster")
     await _add_account(db, "helper")
     mid = await _add_material(db, link_url="https://pan.baidu.com/s/xyz?pwd=9q8z")
 
     await manager.process_link_first_replies()
     content = manager.post_manager.reply_to_thread.await_args.args[3]
-    assert "pan.baidu.com/s/xyz 提取码 9q8z" in content
-    assert "?pwd=" not in content
-    assert "https://" not in content
+    clean = content.replace("删", "")
+    assert "pan.baidu.com/s/xyz 提取码 9q8z" in clean
+    assert "?pwd=" not in clean
+    assert "https://" not in clean
+
+
+# ---- 删字暗号化（2026-10-08 晚四账号带链首评全吞、模式疑似被拉黑的变体实验）----
+
+
+def test_obfuscate_link_for_reply_inserts_single_del():
+    from tieba_mecha.core.batch_post import AutoBumpManager as M
+
+    canonical = "pan.baidu.com/s/1XIiMN6daT6rmpB0CpI2JMA 提取码 soee"
+    for _ in range(50):
+        out = M.obfuscate_link_for_reply(canonical)
+        assert out.replace("删", "") == canonical, "剥删字必须还原原文"
+        assert out.count("删") == 1, "恰好插一个删字"
+        del_pos = out.index("删")
+        url_end = canonical.find(" ")
+        assert del_pos >= len("pan.baidu.com/s/"), "删字落在 /s/ 之后的路径段"
+        assert del_pos <= url_end, "删字不越过 URL 末尾"
+        assert "删" not in out[out.index(" 提取码"):], "提取码尾注不得被污染"
+    # 仅百度盘陪绑：夸克等未标记网盘原样返回
+    quark = "pan.quark.cn/s/abc?pwd=z"
+    assert M.obfuscate_link_for_reply(quark) == quark
+    assert M.obfuscate_link_for_reply("") == ""
+
+
+def test_floor_contains_link_strips_del():
+    from tieba_mecha.core.batch_post import AutoBumpManager as M
+
+    token = "pan.baidu.com/s/abc 提取码 xy12"
+    assert M._floor_contains_link("忘了说，资源在这里 pan.baidu删.com/s/abc 提取码 xy12", token)
+    assert M._floor_contains_link("忘了说，资源在这里 pan.baidu.com/s/a删bc 提取码 xy12", token)
+    assert M._floor_contains_link("忘了说，资源在这里 pan.baidu.com/s/abc 提取码 xy12", token)
+    assert not M._floor_contains_link("无关楼层内容", token)
+    assert not M._floor_contains_link(None, token)
+    assert not M._floor_contains_link("任意文本", "")
 
 
 @pytest.mark.asyncio

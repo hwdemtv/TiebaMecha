@@ -2491,6 +2491,37 @@ class AutoBumpManager:
             return f"{m.group(1)} 提取码 {m.group(2)}"
         return link
 
+    @classmethod
+    def obfuscate_link_for_reply(cls, token: str) -> str:
+        """删字暗号化：在百度盘 /s/ 路径内随机一处插入"删"，打断 pan.baidu.com/s/ 特征串。
+
+        背景：2026-10-08 晚四账号带链首评全数被吞（同格式上午存活傍晚连吞），账号级
+        解释失效、pan.baidu.com 特征串疑似被拉黑——参照 09-23"去 scheme+拆 pwd"改写
+        曾绕过吞评的先例再进一步。仅处理百度盘 /s/ 链接（其他网盘未被标记不陪绑），
+        只插 URL 段（首个空格前）、不动"提取码"尾注；校验侧 _floor_contains_link
+        比对前双侧剥"删"，随机位置不影响可见性闭环。
+        """
+        if not token:
+            return token
+        s_idx = token.find("pan.baidu.com/s/")
+        if s_idx < 0:
+            return token
+        start = s_idx + len("pan.baidu.com/s/")
+        url_end = token.find(" ")
+        if url_end < 0:
+            url_end = len(token)
+        if start >= url_end:
+            return token
+        pos = random.randint(start, url_end)
+        return token[:pos] + "删" + token[pos:]
+
+    @staticmethod
+    def _floor_contains_link(floor_text: str | None, link_token: str) -> bool:
+        """楼层文本是否含链接 token；比对前双侧剥"删"（发送侧随机插删暗号化）。"""
+        if not link_token:
+            return False
+        return link_token in (floor_text or "").replace("删", "")
+
     # ---- 带链首评账号级风控（手动剔除 + 被吞熔断，账本挂 settings 跨重启）----
 
     async def _breaker_params(self) -> tuple[bool, int, int, int]:
@@ -2696,7 +2727,7 @@ class AutoBumpManager:
                 continue
 
             reply_content = random.choice(self.LINK_REPLY_PHRASES).format(
-                link=self.format_link_for_share(material.link_url)
+                link=self.obfuscate_link_for_reply(self.format_link_for_share(material.link_url))
             )
             ok, err = await self.post_manager.reply_to_thread(
                 acc.id, material.posted_fname, material.posted_tid, reply_content
@@ -2844,7 +2875,7 @@ class AutoBumpManager:
         if getattr(res, "err", None) is not None:
             return "dead", None
         for p in (res.objs or []):
-            if link_token in (p.text or ""):
+            if self._floor_contains_link(p.text, link_token):
                 return "found", p.pid
         return "empty", None
 
