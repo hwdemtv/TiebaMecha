@@ -45,11 +45,17 @@ TERMINAL_ACCOUNT_STATUSES: frozenset[str] = frozenset({"banned", "suspended", "e
 LINK_REPLY_EXCLUDE_KEY = "link_reply_exclude_accounts"
 LINK_REPLY_BREAKER_ENABLED_KEY = "link_reply_breaker_enabled"
 LINK_REPLY_BREAKER_LEDGER_KEY = "link_reply_breaker_ledger"
+LINK_REPLY_MAX_PER_ROUND_KEY = "link_reply_max_per_round"
+LINK_REPLY_DAILY_CAP_KEY = "link_reply_account_daily_cap"
 LINK_REPLY_BREAKER_THRESHOLD = 2        # 窗口内被吞判定次数阈值
 LINK_REPLY_BREAKER_WINDOW_HOURS = 48    # 击计数滑动窗口
 LINK_REPLY_BREAKER_COOLDOWN_HOURS = 24  # 触发后冷却时长
 LINK_REPLY_LEDGER_TTL_DAYS = 7          # pending 条目保留期
 LINK_REPLY_LEDGER_MAX_PENDING = 200     # pending FIFO 上限
+LINK_REPLY_MAX_PER_ROUND_DEFAULT = 2    # 每轮发送上限（积压也不许一口气喷完）
+LINK_REPLY_DAILY_CAP_DEFAULT = 5        # 单账号每日发送上限
+# 10-09 实证：1341 新格式连发 12 条（7条/5分钟），前 7 存活后 5 全吞，分界刀切=
+# 单账号频控阈值——积压释放必须节流，否则每条被吞都是一击
 
 
 def record_permission_denied(account_id: int, fname: str, reason: str) -> bool:
@@ -2536,7 +2542,7 @@ class AutoBumpManager:
         return enabled, max(1, threshold), max(1, window_h), max(1, cooldown_h)
 
     async def _load_reply_ledger(self) -> dict:
-        """读首评风控账本 {"pending": {mid: {"aid","ts"}}, "strikes": {aid: [ts]}}，损坏静默回空。"""
+        """读首评风控账本 {"pending": {mid: {"aid","ts"}}, "strikes": {aid: [ts]}, "sends": {aid: {"date","count"}}}，损坏静默回空。"""
         try:
             raw = await self.db.get_setting(LINK_REPLY_BREAKER_LEDGER_KEY, "")
             data = json.loads(raw) if raw else {}
@@ -2548,10 +2554,11 @@ class AutoBumpManager:
         return {
             "pending": pending if isinstance(pending, dict) else {},
             "strikes": strikes if isinstance(strikes, dict) else {},
+            "sends": data.get("sends") if isinstance(data.get("sends"), dict) else {},
         }
 
     async def _save_reply_ledger(self, ledger: dict, now, window_h: int) -> None:
-        """裁剪后落账本：pending 按 TTL+FIFO，strikes 只留窗口内（过窗击数对判定无意义）。"""
+        """裁剪后落账本：pending 按 TTL+FIFO，strikes 只留窗口内，sends 只留当日（旧日计数作废）。"""
         from datetime import timedelta
         try:
             pending_cutoff = now - timedelta(days=LINK_REPLY_LEDGER_TTL_DAYS)
@@ -2576,7 +2583,14 @@ class AutoBumpManager:
                         continue
                 if keep:
                     kept_strikes[aid] = keep
-            payload = json.dumps({"pending": pend, "strikes": kept_strikes}, ensure_ascii=False)
+            today_str = now.strftime("%Y-%m-%d")
+            kept_sends = {
+                aid: e for aid, e in ledger.get("sends", {}).items()
+                if isinstance(e, dict) and e.get("date") == today_str
+            }
+            payload = json.dumps(
+                {"pending": pend, "strikes": kept_strikes, "sends": kept_sends}, ensure_ascii=False
+            )
             await self.db.set_setting(LINK_REPLY_BREAKER_LEDGER_KEY, payload)
         except Exception as ex:
             await log_warn(f"首评风控账本落库失败（不影响本次动作）: {ex}")
@@ -2665,10 +2679,23 @@ class AutoBumpManager:
             await log_warn(f"带链首评：{len(candidates)} 条物料待发，但矩阵号池为空，本轮跳过")
             return 0
 
-        # 账号级风控剔除：手动剔除（link_reply_exclude_accounts）+ 被吞熔断冷却中。
+        # 账号级风控剔除：手动剔除（link_reply_exclude_accounts）+ 被吞熔断冷却中
+        # + 单账号当日发送达上限（10-09 实证 7条/5分钟即触发百度频控，第 8 条起全吞）。
         # 命中者全程不参与首评（楼主自评+轮换都轮不到），剔除后池空则本轮跳过。
         breaker_on, threshold, window_h, cooldown_h = await self._breaker_params()
         ledger = await self._load_reply_ledger()
+        try:
+            max_per_round = int(await self.db.get_setting(LINK_REPLY_MAX_PER_ROUND_KEY, str(LINK_REPLY_MAX_PER_ROUND_DEFAULT)))
+            daily_cap = int(await self.db.get_setting(LINK_REPLY_DAILY_CAP_KEY, str(LINK_REPLY_DAILY_CAP_DEFAULT)))
+        except Exception:
+            max_per_round, daily_cap = LINK_REPLY_MAX_PER_ROUND_DEFAULT, LINK_REPLY_DAILY_CAP_DEFAULT
+        max_per_round, daily_cap = max(1, max_per_round), max(1, daily_cap)
+        today_str = now.strftime("%Y-%m-%d")
+
+        def _sent_today(aid: int) -> int:
+            e = ledger["sends"].get(str(aid))
+            return e.get("count", 0) if isinstance(e, dict) and e.get("date") == today_str else 0
+
         try:
             _ex_raw = await self.db.get_setting(LINK_REPLY_EXCLUDE_KEY, "")
         except Exception:
@@ -2685,14 +2712,16 @@ class AutoBumpManager:
                     breaker_ids.add(acc_check.id)
                     until = (last + timedelta(hours=cooldown_h)).strftime("%d日%H:%M")
                     breaker_desc.append(f"id={acc_check.id}冷却至{until}（{cnt}击）")
-        risk_ids = manual_ids | breaker_ids
+        quota_ids = {a.id for a in matrix_pool if a.id not in manual_ids and _sent_today(a.id) >= daily_cap}
+        risk_ids = manual_ids | breaker_ids | quota_ids
         pool_before = len(matrix_pool)
         matrix_pool = [a for a in matrix_pool if a.id not in risk_ids]
-        if risk_ids:
+        if breaker_ids or quota_ids:
             await log_info(
                 f"带链首评账号风控剔除 {pool_before - len(matrix_pool)}/{pool_before} 个："
                 f"手动={sorted(manual_ids) or '无'}"
                 + (f"；熔断中[{'; '.join(breaker_desc)}]" if breaker_desc else "")
+                + (f"；日限额满{sorted(quota_ids)}" if quota_ids else "")
             )
         if not matrix_pool:
             await log_warn(f"带链首评：{len(candidates)} 条物料待发，但风控剔除后矩阵号池为空，本轮跳过")
@@ -2709,11 +2738,19 @@ class AutoBumpManager:
 
         success_count = 0
         for material in candidates:
+            if success_count >= max_per_round:
+                await log_info(f"带链首评本轮已达发送上限 {max_per_round} 条，剩余留待下轮（限流防频控）")
+                break
+            # 当日限额在循环内逐条复核：同一轮内连发也必须受 daily_cap 约束
+            avail_pool = [a for a in matrix_pool if _sent_today(a.id) < daily_cap]
+            if not avail_pool:
+                await log_info(f"带链首评全部账号今日发送已达上限({daily_cap})，剩余留待明日")
+                break
             fail_count = material.link_reply_fail_count or 0
-            poster_acc = next((a for a in matrix_pool if a.id == material.posted_account_id), None)
+            poster_acc = next((a for a in avail_pool if a.id == material.posted_account_id), None)
             if poster_acc and poster_acc.id in no_self_ids:
                 poster_acc = None  # 被排除出楼主自评：直接走矩阵号轮换
-            pool_wo_poster = [a for a in matrix_pool if a.id != material.posted_account_id]
+            pool_wo_poster = [a for a in avail_pool if a.id != material.posted_account_id]
             # 楼主自评优先（首轮无失败记录时）；已有失败记录则按失败次数轮换矩阵号，
             # 不再重复押注同一个号
             if poster_acc and not fail_count:
@@ -2738,9 +2775,13 @@ class AutoBumpManager:
                 # （熔断开关关闭时不记账=纯旧行为）
                 material.link_reply_at = now
                 success_count += 1
+                send_entry = ledger["sends"].setdefault(str(acc.id), {"date": today_str, "count": 0})
+                if not isinstance(send_entry, dict) or send_entry.get("date") != today_str:
+                    send_entry = ledger["sends"][str(acc.id)] = {"date": today_str, "count": 0}
+                send_entry["count"] = int(send_entry.get("count", 0)) + 1
                 if breaker_on:
                     ledger["pending"][str(material.id)] = {"aid": acc.id, "ts": now.isoformat(timespec="seconds")}
-                    await self._save_reply_ledger(ledger, now, window_h)
+                await self._save_reply_ledger(ledger, now, window_h)
                 await log_info(
                     f"物料 [{material.id}] 带链首评已发出: {acc.user_name or acc.name} @ {material.posted_fname}（待可见性校验）"
                 )

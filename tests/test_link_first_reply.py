@@ -583,7 +583,7 @@ async def test_confirm_visible_clears_pending_no_strike(db, manager):
 
 @pytest.mark.asyncio
 async def test_breaker_disabled_skips_strike_accounting(db, manager):
-    """link_reply_breaker_enabled=false：纯旧行为，不记账不熔断。"""
+    """link_reply_breaker_enabled=false：不记账不熔断（发送计数除外——限流独立于熔断）。"""
     await _add_account(db, "poster")
     await db.set_setting("link_reply_breaker_enabled", "false")
     mid = await _add_material(db)
@@ -593,6 +593,102 @@ async def test_breaker_disabled_skips_strike_accounting(db, manager):
     await manager.process_link_first_replies()  # 判被吞+换号重发
 
     ledger = await _get_ledger(db)
-    assert ledger.get("strikes", {}) == {} and ledger.get("pending", {}) == {}, "开关关闭不得留任何账本痕迹"
+    assert ledger.get("strikes", {}) == {} and ledger.get("pending", {}) == {}, "开关关闭不得留击/ pending 痕迹"
     m = await _get_material(db, mid)
     assert m.link_reply_fail_count == 1, "被吞判定与重发本身不受开关影响"
+
+
+# ---- 限流（10-09 实证 7条/5分钟触发百度频控：积压释放必须节流）----
+
+
+@pytest.mark.asyncio
+async def test_round_cap_limits_sends_per_round(db, manager):
+    """每轮发送上限：4 条积压、上限 2 → 本轮只发 2 条，其余留待下轮。"""
+    poster_id = await _add_account(db, "poster")
+    helper_id = await _add_account(db, "helper")
+    await db.set_setting("link_reply_max_per_round", "2")
+    await db.set_setting("link_reply_account_daily_cap", "10")
+    mids = [
+        await _add_material(db, posted_account_id=poster_id, posted_tid=1001),
+        await _add_material(db, posted_account_id=poster_id, posted_tid=1002),
+        await _add_material(db, posted_account_id=helper_id, posted_tid=1003),
+        await _add_material(db, posted_account_id=helper_id, posted_tid=1004),
+    ]
+
+    count = await manager.process_link_first_replies()
+    assert count == 2, "本轮只发上限条数"
+    assert manager.post_manager.reply_to_thread.await_count == 2
+    for mid in mids[2:]:
+        m = await _get_material(db, mid)
+        assert m.link_reply_at is None, "超出上限的物料必须原封不动留待下轮"
+
+    # 下一轮继续释放剩余积压
+    count2 = await manager.process_link_first_replies()
+    assert count2 == 2
+    assert manager.post_manager.reply_to_thread.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_stops_account_within_round(db, manager):
+    """单账号日限额：同轮内连发也必须受限——超额账号不再被选中（含楼主自评）。"""
+    solo_id = await _add_account(db, "solo")
+    await db.set_setting("link_reply_max_per_round", "10")
+    await db.set_setting("link_reply_account_daily_cap", "2")
+    m1 = await _add_material(db, posted_account_id=solo_id, posted_tid=2001)
+    m2 = await _add_material(db, posted_account_id=solo_id, posted_tid=2002)
+    m3 = await _add_material(db, posted_account_id=solo_id, posted_tid=2003)
+
+    count = await manager.process_link_first_replies()
+    assert count == 2, "日限额 2：发满即止"
+    assert manager.post_manager.reply_to_thread.await_count == 2
+    ledger = await _get_ledger(db)
+    assert ledger["sends"][str(solo_id)]["count"] == 2
+
+    m3_row = await _get_material(db, m3)
+    assert m3_row.link_reply_at is None, "第 3 条不得发出"
+    # 次日（模拟：清空 sends 计数）恢复发送
+    ledger["sends"] = {}
+    import json as _json
+    await db.set_setting("link_reply_breaker_ledger", _json.dumps(ledger, ensure_ascii=False))
+    count2 = await manager.process_link_first_replies()
+    assert count2 == 1
+    assert (await _get_material(db, m3)).link_reply_at is not None
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_rotates_to_other_account(db, manager):
+    """日限额满的账号退出可选池，物料轮换到其他账号。"""
+    poster_id = await _add_account(db, "poster")
+    helper_id = await _add_account(db, "helper")
+    await db.set_setting("link_reply_max_per_round", "10")
+    await db.set_setting("link_reply_account_daily_cap", "1")
+    mid1 = await _add_material(db, posted_account_id=poster_id, posted_tid=3001)
+    mid2 = await _add_material(db, posted_account_id=poster_id, posted_tid=3002)
+
+    count = await manager.process_link_first_replies()
+    assert count == 2
+    args1 = manager.post_manager.reply_to_thread.await_args_list[0].args
+    args2 = manager.post_manager.reply_to_thread.await_args_list[1].args
+    assert args1[0] == poster_id, "第 1 条：楼主自评"
+    assert args2[0] == helper_id, "第 2 条：poster 限额满，轮换 helper"
+
+
+@pytest.mark.asyncio
+async def test_confirm_preserves_send_counts(db, manager):
+    """可见性确认/被吞清 pending 不得丢发送计数（同账本多段共存）。"""
+    poster_id = await _add_account(db, "poster")
+    await db.set_setting("link_reply_max_per_round", "10")
+    mid = await _add_material(db, posted_account_id=poster_id)
+
+    await manager.process_link_first_replies()
+    ledger = await _get_ledger(db)
+    assert ledger["sends"][str(poster_id)]["count"] == 1
+    assert str(mid) in ledger["pending"]
+
+    await _backdate_link_reply(db, mid)
+    manager._find_link_reply = AsyncMock(return_value=("found", 555))
+    await manager.process_link_first_replies()
+
+    ledger = await _get_ledger(db)
+    assert ledger["sends"][str(poster_id)]["count"] == 1, "确认可见后发送计数必须保留"
+    assert str(mid) not in ledger["pending"]

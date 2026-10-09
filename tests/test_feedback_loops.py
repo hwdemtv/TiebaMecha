@@ -665,10 +665,11 @@ class TestAuditSignRateSemantics:
 
     async def _insert_signs(self, db, forum, rows):
         from tieba_mecha.db.models import SignLog
+        base = datetime.now() - timedelta(days=2)  # 相对日期：勿用硬编码，7天窗口滑动后fixture会老化出窗
         async with db.async_session() as session:
             for success, message, hour in rows:
                 session.add(SignLog(forum_id=forum.id, fname=forum.fname, success=success,
-                                    message=message, signed_at=datetime(2026, 10, 2, hour, 30, 0)))
+                                    message=message, signed_at=base.replace(hour=hour, minute=30, second=0, microsecond=0)))
             await session.commit()
 
     @pytest.mark.asyncio
@@ -743,11 +744,12 @@ class TestAuditWorkHoursSampleGuard:
 
     async def _insert_posts(self, db, acc, hours):
         from tieba_mecha.db.models import BatchPostLog
+        base = datetime.now() - timedelta(days=2)  # 相对日期：勿用硬编码，7天窗口滑动后fixture会老化出窗
         async with db.async_session() as session:
             for i, h in enumerate(hours):
                 session.add(BatchPostLog(task_id=f"t{i}", account_id=acc.id, account_name=acc.name,
                                          fname="吧", title=f"标题{i}", tid=1000 + i, status="success",
-                                         created_at=datetime(2026, 10, 2, h, 0, 0)))
+                                         created_at=base.replace(hour=h, minute=0, second=0, microsecond=0)))
             await session.commit()
 
     @pytest.mark.asyncio
