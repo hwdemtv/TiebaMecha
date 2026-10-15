@@ -11,19 +11,23 @@
 
 from __future__ import annotations
 
+import random
 import re
 import time
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import unquote
 
-# 采集配置默认值（与 web/pages/settings.py 的 _maint_config 保持一致）
+# 采集配置默认值（与 web/pages/settings.py 的 _maint_config 保持一致；
+# maint_harvest_forums / maint_harvest_directed_prob 仅 settings 表，无 UI 控件）
 HARVEST_DEFAULTS = {
     "maint_harvest_enabled": "true",
     "maint_harvest_min_reply": "30",
     "maint_harvest_min_agree": "5",
     "maint_harvest_max_per_cycle": "1",
     "maint_harvest_max_age_days": "90",
+    "maint_harvest_forums": "",
+    "maint_harvest_directed_prob": "30",
 }
 
 # 标题特征词：命中其一即视为资源帖候选（"求资源"类请求帖不挡，由楼层扫描有无链接自然裁决）
@@ -216,6 +220,28 @@ def pick_harvest_candidate(threads_objs: list, min_reply: int, max_age_days: int
     if not candidates:
         return None
     return max(candidates, key=lambda t: getattr(t, "reply_num", 0) or 0)
+
+
+def pick_directed_forum(raw: dict) -> Optional[str]:
+    """采集定向轮换：白名单概率命中时返回本轮应逛的吧名，否则 None。
+
+    raw 为 get_settings_bulk(HARVEST_DEFAULTS 键) 结果。maint_harvest_forums
+    为中英文逗号分隔吧名白名单，maint_harvest_directed_prob 为百分比整数（0-100，
+    越界收敛）。enabled=false / 白名单空 / 概率未命中 / 脏值一律 None，
+    降级为常规随机逛吧。维护循环用它替换本轮目标吧（替换而非追加，零新增请求）。
+    """
+    try:
+        if str(raw.get("maint_harvest_enabled", "true")).strip().lower() == "false":
+            return None
+        forums = [s.strip() for s in re.split(r"[，,]", str(raw.get("maint_harvest_forums", "") or "")) if s.strip()]
+        if not forums:
+            return None
+        prob = min(max(int(float(raw.get("maint_harvest_directed_prob", "30") or 30)), 0), 100)
+        if prob <= 0 or random.random() >= prob / 100:
+            return None
+        return random.choice(forums)
+    except Exception:
+        return None
 
 
 async def _default_link_checker(url: str, link_type: str):

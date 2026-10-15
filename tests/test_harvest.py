@@ -669,3 +669,53 @@ def test_harvest_defaults_consistency():
     # 与 settings 页签默认值一致（口径漂移会在集成层露馅，这里咬住关键默认）
     assert HARVEST_DEFAULTS["maint_harvest_min_reply"] == "30"
     assert HARVEST_DEFAULTS["maint_harvest_max_per_cycle"] == "1"
+
+
+# ---------- 采集定向轮换（白名单） ----------
+
+from tieba_mecha.core.harvest import pick_directed_forum  # noqa: E402
+
+
+def test_directed_forum_disabled_when_no_whitelist():
+    """白名单空（含纯逗号/空白）→ 永不定向"""
+    assert pick_directed_forum({"maint_harvest_forums": ""}) is None
+    assert pick_directed_forum({"maint_harvest_forums": "，，, "}) is None
+    assert pick_directed_forum({}) is None
+
+
+def test_directed_forum_disabled_by_switch():
+    """总开关关→不定向（即使白名单非空、概率100）"""
+    raw = {"maint_harvest_enabled": "false", "maint_harvest_forums": "小说资源",
+           "maint_harvest_directed_prob": "100"}
+    assert pick_directed_forum(raw) is None
+
+
+def test_directed_forum_prob_zero_off():
+    """概率0=关闭；越界值收敛（负数→0 关，超百→封顶100 必中）"""
+    wl = {"maint_harvest_forums": "小说资源", "maint_harvest_directed_prob": "0"}
+    assert pick_directed_forum(wl) is None
+    neg = {"maint_harvest_forums": "小说资源", "maint_harvest_directed_prob": "-5"}
+    assert pick_directed_forum(neg) is None
+    over = {"maint_harvest_forums": "小说资源", "maint_harvest_directed_prob": "999"}
+    assert pick_directed_forum(over) == "小说资源"
+
+
+def test_directed_forum_prob_hundred_always_hits():
+    """概率100→必从白名单（中英文逗号混排+去空白）返回其一"""
+    raw = {"maint_harvest_forums": "电视剧，小说资源, 追剧 ，电视剧资源", "maint_harvest_directed_prob": "100"}
+    got = {pick_directed_forum(raw) for _ in range(50)}
+    assert got == {"电视剧", "小说资源", "追剧", "电视剧资源"}
+
+
+def test_directed_forum_dirty_values_fail_closed():
+    """概率脏值（非数）fail-close 返回 None 不抛异常；吧名脏值走 str() 容错不炸"""
+    assert pick_directed_forum({"maint_harvest_forums": "小说资源", "maint_harvest_directed_prob": "abc"}) is None
+    assert pick_directed_forum({"maint_harvest_forums": None, "maint_harvest_directed_prob": "100"}) is None
+    # 非字符串白名单（如误存数字）经 str() 容错仍可正常判定
+    assert pick_directed_forum({"maint_harvest_forums": 12345, "maint_harvest_directed_prob": "100"}) == "12345"
+
+
+def test_directed_forum_new_defaults_present():
+    """新键默认值：白名单空=默认关，概率默认30"""
+    assert HARVEST_DEFAULTS["maint_harvest_forums"] == ""
+    assert HARVEST_DEFAULTS["maint_harvest_directed_prob"] == "30"

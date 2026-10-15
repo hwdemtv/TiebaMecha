@@ -14,7 +14,7 @@ from aiotieba.logging import get_logger
 from ..db.crud import Database
 from .account import get_account_credentials
 from .client_factory import create_client
-from .harvest import HARVEST_DEFAULTS, harvest_from_posts, pick_harvest_candidate
+from .harvest import HARVEST_DEFAULTS, harvest_from_posts, pick_directed_forum, pick_harvest_candidate
 from .logger import log_info, log_warn, log_error
 
 logger = get_logger()
@@ -128,6 +128,18 @@ class MaintManager:
                     # 随机选一个吧进行浏览
                     target_forum_name = random.choice(forum_names)
 
+                # 采集定向轮换：白名单概率命中→本轮改逛白名单吧（替换而非追加，零新增请求）
+                harvest_raw: Optional[dict] = None
+                try:
+                    harvest_raw = await self.db.get_settings_bulk(
+                        list(HARVEST_DEFAULTS.keys()), dict(HARVEST_DEFAULTS))
+                except Exception:
+                    harvest_raw = None
+                directed_forum = pick_directed_forum(harvest_raw or {})
+                if directed_forum:
+                    target_forum_name = directed_forum
+                    await log_info(f"[BioWarming] {account_name} 定向采集轮换 → [{directed_forum}]")
+
                 await log_info(f"[BioWarming] {account_name} 模拟进入 [{target_forum_name}] 进行深层浏览...")
 
                 # 获取主题帖列表 (模拟翻页看帖)
@@ -154,9 +166,11 @@ class MaintManager:
                     # 顺手采集热门资源物料（零新增请求）：候选判定只用列表自带元数据
                     hcfg = None
                     try:
-                        raw = await self.db.get_settings_bulk(
-                            list(HARVEST_DEFAULTS.keys()), dict(HARVEST_DEFAULTS)
-                        )
+                        raw = harvest_raw
+                        if raw is None:  # 选吧阶段读取失败时此处补读一次
+                            raw = await self.db.get_settings_bulk(
+                                list(HARVEST_DEFAULTS.keys()), dict(HARVEST_DEFAULTS)
+                            )
                         if str(raw.get("maint_harvest_enabled", "true")).strip().lower() != "false":
                             min_reply = max(int(float(raw.get("maint_harvest_min_reply", "30") or 30)), 1)
                             min_agree = max(int(float(raw.get("maint_harvest_min_agree", "5") or 5)), 0)
