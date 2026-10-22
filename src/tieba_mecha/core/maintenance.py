@@ -14,7 +14,13 @@ from aiotieba.logging import get_logger
 from ..db.crud import Database
 from .account import get_account_credentials
 from .client_factory import create_client
-from .harvest import HARVEST_DEFAULTS, harvest_from_posts, pick_directed_forum, pick_harvest_candidate
+from .harvest import (
+    HARVEST_DEFAULTS,
+    funnel_summary_line,
+    harvest_from_posts,
+    harvest_funnel_stats,
+    pick_directed_forum,
+)
 from .logger import log_info, log_warn, log_error
 
 logger = get_logger()
@@ -184,10 +190,22 @@ class MaintManager:
                     harvest_candidate = None
                     if hcfg is not None:
                         try:
-                            harvest_candidate = pick_harvest_candidate(
+                            counts, cands, kw_samples = harvest_funnel_stats(
                                 threads.objs, hcfg["min_reply"], hcfg["max_age_days"], hcfg["min_agree"])
-                            if harvest_candidate is not None and await self.db.get_harvested_by_source_tid(harvest_candidate.tid):
-                                harvest_candidate = None  # 同源帖已采过，不再偏置浏览
+                            # 漏斗聚合行：定向到访必打（诊断主战场），常规到访仅在有候选时打
+                            if directed_forum or cands:
+                                await log_info(
+                                    f"[BioWarming] {account_name} 🌾漏斗[{target_forum_name}] "
+                                    + funnel_summary_line(counts, len(threads.objs), len(cands),
+                                                          hcfg["min_reply"], hcfg["min_agree"], hcfg["max_age_days"]))
+                                if not cands and kw_samples:
+                                    await log_info(f"[BioWarming] {account_name} 🌾漏斗[{target_forum_name}] 词表未中样本: {'；'.join(kw_samples)}")
+                            # 已采过回退：候选按回复降序逐个查重（最多前3），取第一个未采过的
+                            # ——旧版只试最高回复那一个，同吧反复到访撞同一已采帖整轮空手
+                            for c in cands[:3]:
+                                if not await self.db.get_harvested_by_source_tid(getattr(c, "tid", 0) or 0):
+                                    harvest_candidate = c
+                                    break
                         except Exception:
                             harvest_candidate = None
 
@@ -219,7 +237,7 @@ class MaintManager:
                             if new_id:
                                 await log_info(f"[BioWarming] {account_name} 🌾采集热门资源入库: [{target_forum_name}] {target_thread.title[:24]}... -> 物料#{new_id}（待转存/待审核）")
                             else:
-                                await log_info(f"[BioWarming] {account_name} 候选帖 [{target_forum_name}] 首页楼层无网盘链接或已采过，跳过")
+                                await log_info(f"[BioWarming] {account_name} 候选帖 [{target_forum_name}] 首页楼层无网盘链接，跳过")
                             harvest_candidate = None  # 每轮最多采 1 条，采完收口
 
                         # 拟真停顿：模拟深度阅读

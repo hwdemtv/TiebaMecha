@@ -8,11 +8,15 @@ import pytest
 
 from tieba_mecha.core.harvest import (
     HARVEST_DEFAULTS,
+    classify_harvest_reject,
     classify_link,
     extract_floor_link,
+    funnel_summary_line,
     harvest_from_posts,
+    harvest_funnel_stats,
     is_harvest_candidate,
     pick_harvest_candidate,
+    rank_harvest_candidates,
 )
 from tieba_mecha.core.link_transfer import (
     TransferResult,
@@ -719,3 +723,92 @@ def test_directed_forum_new_defaults_present():
     """新键默认值：白名单空=默认关，概率默认30"""
     assert HARVEST_DEFAULTS["maint_harvest_forums"] == ""
     assert HARVEST_DEFAULTS["maint_harvest_directed_prob"] == "30"
+
+
+# ---------- 漏斗可观测 + 求助词防线（2026-10-22 整改：51次到访仅2条入库，过滤全静默） ----------
+
+def test_classify_reject_reason_attribution_per_gate():
+    """各门归因：返回首个拒绝原因码（与旧判定门序一致）"""
+    assert classify_harvest_reject(_thread("4K资源合集", 29), 30) == "reply"
+    assert classify_harvest_reject(
+        SimpleNamespace(title="4K资源合集", reply_num=45, tid=1, agree=2), 5, min_agree=30) == "agree"
+    assert classify_harvest_reject(
+        SimpleNamespace(title="4K资源合集", reply_num=100, tid=1, is_top=True), 30) == "top"
+    assert classify_harvest_reject(_thread("4K资源合集 加微信拿", 100), 30) == "spam"
+    assert classify_harvest_reject(_thread("每日水贴盖楼", 999), 30) == "water"
+    assert classify_harvest_reject(_thread("网站或资源来一个", 100), 30) == "beg"
+    import time as _time
+    old = SimpleNamespace(title="4K资源合集", reply_num=100, tid=1,
+                          create_time=_time.time() - 91 * 86400)
+    assert classify_harvest_reject(old, 30) == "age"
+    assert classify_harvest_reject(_thread("今天天气不错", 100), 30) == "keyword"
+    # 全过 = 候选
+    assert classify_harvest_reject(_thread("4K资源合集", 30), 30) is None
+
+
+def test_classify_reject_empty_title_and_gate_order():
+    """空标题归词表未中（词表不可能命中）；回复门在词表门前——空标题+低回复归 reply"""
+    assert classify_harvest_reject(_thread("", 100), 30) == "keyword"
+    assert classify_harvest_reject(_thread("", 10), 30) == "reply"
+
+
+def test_beg_words_block_request_titles():
+    """2026-10-18 实弹误入库："网站或资源来一个"——"资源"命中词表+首评带链击穿无链裁决"""
+    assert is_harvest_candidate(_thread("网站或资源来一个", 100), 30) is False
+    assert is_harvest_candidate(_thread("跪求一个能看的网站", 100), 30) is False
+    assert is_harvest_candidate(_thread("求个电视剧资源谢谢", 100), 30) is False
+    # 正常分享标题不误杀
+    assert is_harvest_candidate(_thread("蓝光合集自取", 100), 30) is True
+    assert is_harvest_candidate(_thread("4K资源合集", 45), 30, min_agree=0) is True
+
+
+def test_rank_candidates_reply_descending():
+    """候选降序排列（供调用方查重回退逐个取用）；pick 薄壳取首位"""
+    threads = [
+        _thread("蓝光收藏合集", 45, tid=2),
+        _thread("4K片单分享", 88, tid=3),
+        _thread("普通讨论帖", 500, tid=1),
+    ]
+    assert [t.tid for t in rank_harvest_candidates(threads, 30)] == [3, 2]
+    picked = pick_harvest_candidate(threads, 30)
+    assert picked is not None and picked.tid == 3
+
+
+def test_harvest_funnel_stats_counts_order_and_samples():
+    threads = [
+        _thread("4K片单分享", 88, tid=3),      # 候选
+        _thread("普通讨论", 500, tid=1),        # 词表未中
+        _thread("水贴盖楼", 999, tid=2),        # 水贴
+        _thread("蓝光合集", 45, tid=4),         # 候选
+        _thread("求个资源", 60, tid=5),         # 求助词
+    ]
+    counts, cands, samples = harvest_funnel_stats(threads, 30)
+    assert counts == {"keyword": 1, "water": 1, "beg": 1}
+    assert [c.tid for c in cands] == [3, 4]
+    assert samples == ["普通讨论"]
+
+
+def test_harvest_funnel_stats_keyword_samples_capped_at_two():
+    """词表未中样本只取回复降序前2条非空标题——零候选时的调词表依据"""
+    threads = [_thread(f"某讨论帖{i}", 100 + i, tid=i) for i in range(5)]
+    counts, cands, samples = harvest_funnel_stats(threads, 30)
+    assert cands == [] and counts == {"keyword": 5}
+    assert samples == ["某讨论帖4", "某讨论帖3"]
+    # 空标题帖归词表未中但不进样本
+    counts2, _, samples2 = harvest_funnel_stats([_thread("", 100)] + threads, 30)
+    assert counts2 == {"keyword": 6}
+    assert samples2 == ["某讨论帖4", "某讨论帖3"]
+
+
+def test_funnel_summary_line_format_and_order():
+    """固定门序、只列非零项、门槛值内嵌"""
+    line = funnel_summary_line({"agree": 74, "reply": 61, "keyword": 6}, 83, 1, 5, 30, 90)
+    assert line == "共83帖｜回复<5:61｜点赞<30:74｜词表未中:6｜→ 候选1"
+
+
+def test_funnel_summary_line_all_gates():
+    line = funnel_summary_line({"top": 2, "spam": 1, "water": 3, "beg": 1, "age": 1}, 83, 0, 5, 30, 90)
+    assert line == "共83帖｜置顶/求助:2｜引流词:1｜水贴版务:3｜求助词:1｜超龄>90天:1｜→ 候选0"
+    # 关闭的门槛（点赞/年龄=0）不会出现在计数里，也不出现在文案里
+    line2 = funnel_summary_line({"reply": 3}, 10, 0, 30, 0, 0)
+    assert line2 == "共10帖｜回复<30:3｜→ 候选0"

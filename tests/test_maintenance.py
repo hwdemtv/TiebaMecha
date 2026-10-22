@@ -89,6 +89,57 @@ class TestMaintManager:
         mock_db.update_maint_status.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_harvest_candidate_fallback_past_harvested(self):
+        """采集候选已采过时按回复降序回退到下一个未采候选（2026-10-22 整改：旧版只试最高回复一个，撞已采帖整轮空手）。"""
+        mock_db = MagicMock()
+        mock_db.update_maint_status = AsyncMock()
+        mock_db.get_account_by_id = AsyncMock(return_value=MagicMock(user_name="test_user", name="test_acc"))
+        mock_db.get_forums = AsyncMock(return_value=[])
+        mock_db.get_proxy = AsyncMock(return_value=None)
+        # settings 返回默认值（采集开、每轮1条、白名单空=不定向）
+        async def _bulk(keys, defaults=None):
+            return dict(defaults or {})
+        mock_db.get_settings_bulk = AsyncMock(side_effect=_bulk)
+        # 最高回复候选 tid=101 已采过 → 应回退采集 tid=102
+        mock_db.get_harvested_by_source_tid = AsyncMock(side_effect=lambda tid: tid == 101)
+
+        manager = MaintManager(mock_db)
+        mock_creds = (1, "test_bduss", "test_stoken", None, "test_cuid", "test_ua")
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get_self_info = AsyncMock(return_value=MagicMock(user_id=12345))
+        mock_client.get_follow_forums = AsyncMock(return_value=MagicMock(err=None, objs=[
+            MagicMock(fname="test_forum")
+        ]))
+        # 元数据字段须显式给值：MagicMock 自动属性在门槛比较/年龄计算处会抛 TypeError
+        mock_client.get_threads = AsyncMock(return_value=MagicMock(objs=[
+            MagicMock(tid=101, title="4K资源合集", reply_num=500, agree=50,
+                      is_top=False, is_help=False, create_time=0),
+            MagicMock(tid=102, title="蓝光合集分享", reply_num=80, agree=9,
+                      is_top=False, is_help=False, create_time=0),
+            MagicMock(tid=103, title="每日水贴盖楼", reply_num=999, agree=3,
+                      is_top=False, is_help=False, create_time=0),
+        ]))
+        mock_client.get_posts = AsyncMock(return_value=MagicMock(objs=[]))
+        mock_client.agree = AsyncMock()
+        mock_client.search_threads = AsyncMock()
+        mock_client.follow_forum = AsyncMock()
+
+        with patch('tieba_mecha.core.maintenance.get_account_credentials', AsyncMock(return_value=mock_creds)), \
+             patch('tieba_mecha.core.maintenance.create_client', AsyncMock(return_value=mock_client)), \
+             patch('tieba_mecha.core.maintenance.MaintManager._human_sleep', AsyncMock()), \
+             patch('tieba_mecha.core.maintenance.harvest_from_posts', AsyncMock(return_value=55)) as mock_harvest:
+            result = await manager.run_maint_cycle(account_id=1)
+
+        assert result is True
+        # 已采过的 101 被查重拦下，回退采集 102（不再是整轮空手）
+        mock_harvest.assert_awaited_once()
+        assert mock_harvest.await_args.args[2].tid == 102
+        checked_tids = [c.args[0] for c in mock_db.get_harvested_by_source_tid.await_args_list]
+        assert 101 in checked_tids and 102 in checked_tids
+
+    @pytest.mark.asyncio
     async def test_run_maint_cycle_empty_forum_list(self):
         """空关注列表 -> 回退本地数据库 -> 本地也为空时进入冷启动公域探索, 完成一轮维护返回 True。
 

@@ -6,7 +6,9 @@
 
 词表口径（与出站文案黑名单严格分离）：
 - 入站只挡明显引流信号（加微信/QQ群/公众号等），营销禁词在人工审核+AI改写环节生效；
-- "合集"是资源帖特征词，不在入站黑名单里。
+- "合集"是资源帖特征词，不在入站黑名单里；
+- 求助帖（"求个/来一个"类）由标题词防线直接拒绝：2026-10-18 实弹"网站或资源来一个"
+  入库证明"楼层无链接自然裁决"会被首评带链的求助帖击穿。
 """
 
 from __future__ import annotations
@@ -47,6 +49,20 @@ HARVEST_TITLE_SPAM_WORDS = (
 HARVEST_TITLE_WATER_WORDS = (
     "水贴", "盖楼", "吧规", "版规", "导航", "签到", "打卡", "闲聊", "吹水", "公告",
 )
+
+# 求助/伸手特征词：命中即放弃采集——楼主正文是"求"不是"分享"，物料复用价值为负
+# （2026-10-18 实弹：求助帖首评有人给链照样入库，"无链自然裁决"防线被击穿）
+HARVEST_TITLE_BEG_WORDS = (
+    "求个", "求部", "求资源", "求分享", "求推荐", "求链接", "求发", "求大佬",
+    "跪求", "伸手", "来一个", "来个", "来一份", "有没有", "谁有", "哪位有",
+)
+
+# 漏斗拒绝原因码 → 日志标签（顺序即判定顺序，funnel_summary_line 按此序展示）
+HARVEST_REJECT_LABELS = {
+    "reply": "回复不足", "agree": "点赞不足", "top": "置顶/求助",
+    "spam": "引流词", "water": "水贴版务", "beg": "求助词",
+    "age": "超龄", "keyword": "词表未中",
+}
 
 # 老帖年龄门：资源链有效性与帖子年龄强相关（#1845 采进 2014 年吧规，链接基本必死）。
 # 超龄帖不采，"持续更新"类合集豁免；create_time 缺失不误杀；0=不限制。可经 settings 覆盖。
@@ -183,43 +199,109 @@ def _matchable_title(title: str) -> str:
     return t
 
 
-def is_harvest_candidate(thread, min_reply: int, max_age_days: int = HARVEST_MAX_AGE_DAYS_DEFAULT,
-                         min_agree: int = 0) -> bool:
-    """帖子列表元数据判定：回复数达标 + 点赞达标 + 标题(去吧名前缀)命中资源词
-    + 非置顶/求助 + 非水贴版务 + 未超龄。
-
-    点赞(agree)是比回复更贴近资源价值的信号——水贴盖楼"回复爆炸、点赞寥寥"，
-    AND 门槛从数据结构上拦住这类帖；min_agree<=0 关闭（纯回复数旧行为）。
+def classify_harvest_reject(thread, min_reply: int, max_age_days: int = HARVEST_MAX_AGE_DAYS_DEFAULT,
+                            min_agree: int = 0) -> Optional[str]:
+    """is_harvest_candidate 的归因版：七道门逐检，返回首个拒绝原因码（HARVEST_REJECT_LABELS 键），
+    None=通过为候选。门序与旧实现一致：回复→点赞→置顶/求助→引流词→水贴→求助词→超龄→词表。
     """
     reply_num = getattr(thread, "reply_num", 0) or 0
     title = (getattr(thread, "title", "") or "").strip()
-    if reply_num < min_reply or not title:
-        return False
+    if reply_num < min_reply:
+        return "reply"
+    if not title:
+        return "keyword"
     if min_agree > 0 and (getattr(thread, "agree", 0) or 0) < min_agree:
-        return False
+        return "agree"
     # 置顶/求助帖：吧规、水贴盖楼、导航、问答的聚集地，几乎必然不是资源分享
     if getattr(thread, "is_top", False) or getattr(thread, "is_help", False):
-        return False
+        return "top"
     core_title = _matchable_title(title)
     if any(w in core_title for w in HARVEST_TITLE_SPAM_WORDS):
-        return False
+        return "spam"
     if any(w in core_title for w in HARVEST_TITLE_WATER_WORDS):
-        return False
+        return "water"
+    if any(w in core_title for w in HARVEST_TITLE_BEG_WORDS):
+        return "beg"
     create_time = getattr(thread, "create_time", 0) or 0
     if create_time > 0 and max_age_days > 0:
         age_days = (time.time() - create_time) / 86400
         if age_days > max_age_days and not any(w in core_title for w in HARVEST_AGE_EXEMPT_WORDS):
-            return False
-    return any(k in core_title.upper() for k in HARVEST_TITLE_KEYWORDS)
+            return "age"
+    if not any(k in core_title.upper() for k in HARVEST_TITLE_KEYWORDS):
+        return "keyword"
+    return None
+
+
+def is_harvest_candidate(thread, min_reply: int, max_age_days: int = HARVEST_MAX_AGE_DAYS_DEFAULT,
+                         min_agree: int = 0) -> bool:
+    """帖子列表元数据判定：回复数达标 + 点赞达标 + 标题(去吧名前缀)命中资源词
+    + 非置顶/求助 + 非水贴版务 + 非求助伸手 + 未超龄。
+
+    点赞(agree)是比回复更贴近资源价值的信号——水贴盖楼"回复爆炸、点赞寥寥"，
+    AND 门槛从数据结构上拦住这类帖；min_agree<=0 关闭（纯回复数旧行为）。
+    """
+    return classify_harvest_reject(thread, min_reply, max_age_days, min_agree) is None
+
+
+def rank_harvest_candidates(threads_objs: list, min_reply: int, max_age_days: int = HARVEST_MAX_AGE_DAYS_DEFAULT,
+                            min_agree: int = 0) -> list:
+    """通过全部门判定的候选，按回复数降序——供调用方对已采过的逐个查重回退取用。"""
+    candidates = [t for t in (threads_objs or []) if is_harvest_candidate(t, min_reply, max_age_days, min_agree)]
+    candidates.sort(key=lambda t: getattr(t, "reply_num", 0) or 0, reverse=True)
+    return candidates
 
 
 def pick_harvest_candidate(threads_objs: list, min_reply: int, max_age_days: int = HARVEST_MAX_AGE_DAYS_DEFAULT,
                            min_agree: int = 0):
     """从帖子列表（仅元数据，零请求）选出采集候选：命中的里面取回复数最高的"""
-    candidates = [t for t in (threads_objs or []) if is_harvest_candidate(t, min_reply, max_age_days, min_agree)]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda t: getattr(t, "reply_num", 0) or 0)
+    ranked = rank_harvest_candidates(threads_objs, min_reply, max_age_days, min_agree)
+    return ranked[0] if ranked else None
+
+
+def harvest_funnel_stats(threads_objs: list, min_reply: int,
+                         max_age_days: int = HARVEST_MAX_AGE_DAYS_DEFAULT,
+                         min_agree: int = 0) -> tuple[dict, list, list]:
+    """漏斗归因统计（2026-10-22 可观测整改：过滤原本全静默，2条/周无法定位卡点）。
+
+    Returns: (各拒绝原因计数 dict, 候选列表[回复降序], 词表未中样本标题[最多2条])。
+    样本仅取"其余门全过、只死在词表"的非空标题帖（回复降序前2）——调词表的直接
+    依据，由调用方在零候选时打出，控噪。
+    """
+    counts: dict[str, int] = {}
+    candidates = []
+    keyword_missed = []
+    for t in (threads_objs or []):
+        reason = classify_harvest_reject(t, min_reply, max_age_days, min_agree)
+        if reason is None:
+            candidates.append(t)
+        else:
+            counts[reason] = counts.get(reason, 0) + 1
+            if reason == "keyword":
+                keyword_missed.append(t)
+    candidates.sort(key=lambda t: getattr(t, "reply_num", 0) or 0, reverse=True)
+    keyword_missed.sort(key=lambda t: getattr(t, "reply_num", 0) or 0, reverse=True)
+    samples = [(getattr(t, "title", "") or "").strip()[:20]
+               for t in keyword_missed if (getattr(t, "title", "") or "").strip()][:2]
+    return counts, candidates, samples
+
+
+def funnel_summary_line(counts: dict, total: int, n_candidates: int,
+                        min_reply: int, min_agree: int = 0, max_age_days: int = 0) -> str:
+    """漏斗聚合行文案：固定门序、只列非零项、门槛值内嵌。"""
+    labels = {
+        "reply": f"回复<{min_reply}",
+        "agree": f"点赞<{min_agree}",
+        "top": "置顶/求助",
+        "spam": "引流词",
+        "water": "水贴版务",
+        "beg": "求助词",
+        "age": f"超龄>{max_age_days}天" if max_age_days > 0 else "超龄",
+        "keyword": "词表未中",
+    }
+    parts = [f"共{total}帖"]
+    parts += [f"{labels[k]}:{counts[k]}" for k in HARVEST_REJECT_LABELS if counts.get(k)]
+    parts.append(f"→ 候选{n_candidates}")
+    return "｜".join(parts)
 
 
 def pick_directed_forum(raw: dict) -> Optional[str]:
