@@ -63,6 +63,13 @@ def _no_real_sleep(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
 
+@pytest.fixture(autouse=True)
+async def _no_min_gap(db):
+    """最短发送间隔默认 0：本文件连发/重发用例测的是上限与轮换语义，
+    间隔节流由专项用例（test_min_gap_*）单独覆盖，避免每个用例都撞 120 分钟默认间隔。"""
+    await db.set_setting("link_reply_account_min_gap_minutes", "0")
+
+
 @pytest.fixture
 def manager(db):
     mgr = AutoBumpManager(db)
@@ -194,28 +201,36 @@ async def test_verify_swallow_clears_and_retries_with_rotation(db, manager):
     await manager.process_link_first_replies()
     assert manager.post_manager.reply_to_thread.await_args.args[0] == poster_id
 
-    # 越过校验延迟后查不到含链楼层 → 判定被吞
+    # 越过校验延迟后查不到含链楼层 → 判定被吞：记击+记已吞账号+分级退避（不再同轮立即重发）
     await _backdate_link_reply(db, mid)
     manager._find_link_reply = AsyncMock(return_value=("empty", None))
     count2 = await manager.process_link_first_replies()
-    assert count2 == 1, "被吞清空后应立即进入重发"
+    assert count2 == 0, "被吞后进入退避期，本轮不得立即换号重发"
 
     m = await _get_material(db, mid)
     assert m.link_reply_fail_count == 1
+    assert m.link_reply_at is None, "被吞判定清空发出时间"
+    ledger = await _get_ledger(db)
+    retry_e = ledger["retry"][str(mid)]
+    assert retry_e["aids"] == [poster_id], "实际发出账号记入本帖已吞名单"
+    assert datetime.fromisoformat(retry_e["not_before"]) > datetime.now(), "退避起点在未来"
+
+    # 退避到期后换号重发：楼主已在本帖已吞名单，必须轮换矩阵号
+    await _clear_retry_backoff(db, mid)
+    count3 = await manager.process_link_first_replies()
+    assert count3 == 1
+    m = await _get_material(db, mid)
     assert m.link_reply_at is not None, "重发后应重新记发出时间"
-    assert m.link_reply_pid is None
-
-    # 重发换号：不再押注楼主
     args2 = manager.post_manager.reply_to_thread.await_args_list[1].args
-    assert args2[0] != poster_id, "有失败记录后必须轮换矩阵号重发"
-    assert args2[0] == helper_id
+    assert args2[0] == helper_id, "已吞账号不得在本帖重试"
 
-    # 换号重发后校验可见 → 闭环
+    # 换号重发后校验可见 → 闭环（retry 记录随之作废）
     await _backdate_link_reply(db, mid)
     manager._find_link_reply = AsyncMock(return_value=("found", 1001))
     await manager.process_link_first_replies()
     m = await _get_material(db, mid)
     assert m.link_reply_pid == 1001
+    assert str(mid) not in (await _get_ledger(db))["retry"], "闭环后 retry 记录必须清掉"
 
 
 @pytest.mark.asyncio
@@ -229,16 +244,22 @@ async def test_verify_swallow_up_to_max_fail_then_gives_up(db, manager):
     await _backdate_link_reply(db, mid)
 
     for expected_fail in (1, 2, 3):
-        await manager.process_link_first_replies()
+        manager._find_link_reply = AsyncMock(return_value=("empty", None))
+        count = await manager.process_link_first_replies()
         m = await _get_material(db, mid)
         assert m.link_reply_fail_count == expected_fail
         if expected_fail < 3:
-            assert m.link_reply_at is not None, "未达上限时应继续重发"
+            assert count == 0, "被吞后进入退避，本轮不重发"
+            await _clear_retry_backoff(db, mid)
+            count2 = await manager.process_link_first_replies()
+            assert count2 == 1, "退避到期后换号重发"
+            assert (await _get_material(db, mid)).link_reply_at is not None
             await _backdate_link_reply(db, mid)
 
     m = await _get_material(db, mid)
     assert m.link_reply_at is None, "达上限后放弃，link_reply_at 清空"
     assert m.link_reply_pid is None
+    assert str(mid) not in (await _get_ledger(db))["retry"], "放弃后 retry 记录作废"
 
     # 放弃后不再发送、不再校验
     manager.post_manager.reply_to_thread.reset_mock()
@@ -477,6 +498,17 @@ async def _get_ledger(db) -> dict:
     return _json.loads(raw) if raw else {}
 
 
+async def _clear_retry_backoff(db, mid: int, hours: int = 7):
+    """把账本 retry 段的退避起点拨到过去（对齐 _backdate_link_reply 的做法）：
+    分级退避是生产节流，测试里按需越过以驱动后续重发步骤。"""
+    import json as _json
+    ledger = await _get_ledger(db)
+    e = ledger.get("retry", {}).get(str(mid))
+    if isinstance(e, dict):
+        e["not_before"] = (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
+        await db.set_setting("link_reply_breaker_ledger", _json.dumps(ledger, ensure_ascii=False))
+
+
 @pytest.mark.asyncio
 async def test_exclude_accounts_removed_from_pool(db, manager):
     """link_reply_exclude_accounts：命中者全程不参与首评（楼主自评+轮换都轮不到）。"""
@@ -509,36 +541,32 @@ async def test_exclude_all_accounts_skips_send(db, manager):
 
 @pytest.mark.asyncio
 async def test_breaker_trips_after_threshold_and_blocks(db, manager):
-    """被吞熔断：同一账号窗口内累计达阈值击数即冷却退池，后续物料轮不到它。"""
+    """被吞熔断：同一账号窗口内累计达阈值击数即冷却退池，后续物料轮不到它；
+    同帖已吞账号不再重试（换帖仍可正常自评）。"""
     solo_id = await _add_account(db, "solo")
+    await db.set_setting("link_reply_max_per_round", "1")
     mid1 = await _add_material(db, posted_account_id=solo_id, posted_tid=111)
+    mid2 = await _add_material(db, posted_account_id=solo_id, posted_tid=222)
 
-    # 第1轮：自评发出 → 判被吞 → 记击1、立即换号重发（池只剩自己）
+    # mid1 自评发出 → 被吞：记击1；mid1 进退避（且 solo 已入其已吞名单，不得重试）
     assert await manager.process_link_first_replies() == 1
     await _backdate_link_reply(db, mid1)
-    await manager.process_link_first_replies()
-    m = await _get_material(db, mid1)
-    assert m.link_reply_fail_count == 1
+    assert await manager.process_link_first_replies() == 1  # mid2 自评接力发出
     ledger = await _get_ledger(db)
     assert len(ledger["strikes"][str(solo_id)]) == 1
-    assert str(mid1) in ledger["pending"], "换号重发后 pending 应指向新发出账号"
+    assert ledger["retry"][str(mid1)]["aids"] == [solo_id]
 
-    # 第2轮：再被吞 → 记击2 达阈值 → 熔断退池；同轮发送阶段池空跳过（fail_count 停在 2，
-    # 冷却到期且未超 48h 窗时会自然重试——优雅降级而非放弃）
-    await _backdate_link_reply(db, mid1)
-    count = await manager.process_link_first_replies()
-    assert count == 0, "熔断生效轮：发送阶段池空，不得再发"
-    m = await _get_material(db, mid1)
-    assert m.link_reply_fail_count == 2
+    # mid2 再被吞 → 记击2 达阈值熔断；发送阶段 mid1/mid2 都在退避 → 无发送
+    await _backdate_link_reply(db, mid2)
+    assert await manager.process_link_first_replies() == 0
     ledger = await _get_ledger(db)
-    assert len(ledger["strikes"][str(solo_id)]) == 2
-    assert str(mid1) not in ledger["pending"], "被吞判定后 pending 必须清掉"
+    assert len(ledger["strikes"][str(solo_id)]) == 2, "窗口内第2击 → 熔断"
+    assert (await _get_material(db, mid2)).link_reply_fail_count == 1
 
-    # 后续物料：solo 处于冷却 → 剔除后池空 → 不发送
+    # 熔断生效：solo 冷却中，新物料剔除后池空 → 不发送
     manager.post_manager.reply_to_thread.reset_mock()
-    mid2 = await _add_material(db, posted_account_id=solo_id, posted_tid=222)
-    count = await manager.process_link_first_replies()
-    assert count == 0
+    await _add_material(db, posted_account_id=solo_id, posted_tid=333)
+    assert await manager.process_link_first_replies() == 0
     manager.post_manager.reply_to_thread.assert_not_awaited()
 
 
@@ -692,3 +720,140 @@ async def test_confirm_preserves_send_counts(db, manager):
     ledger = await _get_ledger(db)
     assert ledger["sends"][str(poster_id)]["count"] == 1, "确认可见后发送计数必须保留"
     assert str(mid) not in ledger["pending"]
+
+
+# ---- 2026-10-22 优化：渐进熔断 / 同帖已吞账号不重试+分级退避 / 单号最短间隔 ----
+# 数据实证：187（id=1）吞评率 85%，固定 24h 冷却下到期即放回即再吞循环烧池；
+# 同帖第 2 次尝试吞评率≈首试两倍；单号日限 5 条曾 90 分钟烧完=频率指纹。
+
+
+def test_breaker_cooldown_escalates_by_strikes():
+    """渐进冷却：窗口内击数每超阈值一档冷却翻倍（24→48→96h），封顶 168h；
+    escalate=False 回退固定时长；2击档语义与既有生产行为完全一致。"""
+    from tieba_mecha.core.batch_post import AutoBumpManager as M
+    now = datetime.now()
+
+    def strikes(n: int):
+        return {str(9): [
+            (now - timedelta(hours=n - i)).isoformat(timespec="seconds") for i in range(n)
+        ]}
+
+    hot3, _, _ = M._breaker_blocked(9, strikes(3), now + timedelta(hours=30), 2, 48, 24)
+    assert hot3 is True, "3击：30h 仍在 48h 冷却内"
+    hot3_late, _, _ = M._breaker_blocked(9, strikes(3), now + timedelta(hours=49), 2, 48, 24)
+    assert hot3_late is False, "3击：49h 已过 48h 冷却"
+    hot4, _, _ = M._breaker_blocked(9, strikes(4), now + timedelta(hours=90), 2, 48, 24)
+    assert hot4 is True, "4击：90h 仍在 96h 冷却内"
+    hot6, _, _ = M._breaker_blocked(9, strikes(6), now + timedelta(hours=100), 2, 48, 24)
+    assert hot6 is True, "6击：100h 仍在封顶 168h 冷却内"
+    hot3_off, _, _ = M._breaker_blocked(9, strikes(3), now + timedelta(hours=30), 2, 48, 24, escalate=False)
+    assert hot3_off is False, "escalate=False：3击也只用基础 24h"
+    hot2, cnt2, _ = M._breaker_blocked(9, strikes(2), now, 2, 48, 24)
+    assert hot2 is True and cnt2 == 2, "2击：基础冷却立即生效（既有行为不变）"
+
+
+@pytest.mark.asyncio
+async def test_failed_account_not_retried_on_same_material(db, manager):
+    """#743 回归：池收窄到单号时，轮换不得退化为同号连试——本帖已吞过的号
+    即使退避到期也不得上场，物料等待池恢复而非烧失败预算。"""
+    solo_id = await _add_account(db, "solo")
+    mid = await _add_material(db, posted_account_id=solo_id)
+
+    assert await manager.process_link_first_replies() == 1  # solo 自评
+    await _backdate_link_reply(db, mid)
+    await manager.process_link_first_replies()  # 被吞：fail=1 + 退避 + solo 入已吞名单
+
+    await _clear_retry_backoff(db, mid)  # 越过退避：solo 仍不得在本帖重试
+    manager.post_manager.reply_to_thread.reset_mock()
+    assert await manager.process_link_first_replies() == 0
+    manager.post_manager.reply_to_thread.assert_not_awaited()
+    assert (await _get_material(db, mid)).link_reply_fail_count == 1, "无可用号：fail 不虚增"
+
+
+@pytest.mark.asyncio
+async def test_backoff_scales_with_attempt(db, manager):
+    """分级退避：第2次尝试前退避2h，第3次前退避6h。"""
+    poster_id = await _add_account(db, "poster")
+    await _add_account(db, "helper1")
+    await _add_account(db, "helper2")
+    mid = await _add_material(db, posted_account_id=poster_id)
+
+    await manager.process_link_first_replies()  # poster 自评
+    await _backdate_link_reply(db, mid)
+    await manager.process_link_first_replies()  # 被吞1
+    nb1 = datetime.fromisoformat((await _get_ledger(db))["retry"][str(mid)]["not_before"])
+    assert timedelta(hours=1.5) < nb1 - datetime.now() <= timedelta(hours=2), "第2次尝试退避2h"
+
+    await _clear_retry_backoff(db, mid)
+    await manager.process_link_first_replies()  # 轮换重发
+    await _backdate_link_reply(db, mid)
+    await manager.process_link_first_replies()  # 被吞2
+    nb2 = datetime.fromisoformat((await _get_ledger(db))["retry"][str(mid)]["not_before"])
+    assert timedelta(hours=5.5) < nb2 - datetime.now() <= timedelta(hours=6), "第3次尝试退避6h"
+
+
+@pytest.mark.asyncio
+async def test_min_gap_blocks_same_account_and_rotates(db, manager):
+    """单号最短间隔：同轮同号连发被挡，物料轮换到间隔外的号；全员未到间隔本轮整体跳过。"""
+    poster_id = await _add_account(db, "poster")
+    helper_id = await _add_account(db, "helper")
+    await db.set_setting("link_reply_account_min_gap_minutes", "120")
+    await db.set_setting("link_reply_max_per_round", "10")
+    await _add_material(db, posted_account_id=poster_id, posted_tid=6001)
+    await _add_material(db, posted_account_id=poster_id, posted_tid=6002)
+
+    count = await manager.process_link_first_replies()
+    assert count == 2
+    args1 = manager.post_manager.reply_to_thread.await_args_list[0].args
+    args2 = manager.post_manager.reply_to_thread.await_args_list[1].args
+    assert args1[0] == poster_id, "首条楼主自评"
+    assert args2[0] == helper_id, "同轮第二条：poster 未到间隔，必须轮换 helper"
+
+    # 两号都刚发过：紧邻的下一轮整体跳过（新物料无人可用）
+    await _add_material(db, posted_account_id=poster_id, posted_tid=6003)
+    count2 = await manager.process_link_first_replies()
+    assert count2 == 0, "全部账号未到最短发送间隔"
+    ledger = await _get_ledger(db)
+    assert ledger["sends"][str(poster_id)]["last_ts"], "间隔判定基准 last_ts 落账本"
+
+
+@pytest.mark.asyncio
+async def test_min_gap_crosses_midnight_with_yesterday_entry(db, manager):
+    """跨午夜：昨日账本条目的 last_ts 落在近24h内时保留，仍参与间隔判定。"""
+    poster_id = await _add_account(db, "poster")
+    helper_id = await _add_account(db, "helper")
+    await db.set_setting("link_reply_account_min_gap_minutes", "120")
+    import json as _json
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    await db.set_setting("link_reply_breaker_ledger", _json.dumps({
+        "pending": {}, "strikes": {}, "retry": {},
+        "sends": {str(poster_id): {
+            "date": yesterday,
+            "count": 3,
+            "last_ts": (datetime.now() - timedelta(minutes=30)).isoformat(timespec="seconds"),
+        }},
+    }, ensure_ascii=False))
+    await _add_material(db, posted_account_id=poster_id)
+
+    count = await manager.process_link_first_replies()
+    assert count == 1
+    args = manager.post_manager.reply_to_thread.await_args.args
+    assert args[0] == helper_id, "poster 昨日末条仅30分钟前（跨午夜）未到120分间隔 → 轮换 helper"
+    ledger = await _get_ledger(db)
+    assert ledger["sends"][str(poster_id)]["date"] == yesterday, "近24h内的昨日条目必须保留"
+
+
+@pytest.mark.asyncio
+async def test_old_ledger_without_new_sections_loads(db, manager):
+    """旧账本 JSON（无 retry 段 / sends 无 last_ts）兼容：回空段、无间隔记录放行。"""
+    poster_id = await _add_account(db, "poster")
+    import json as _json
+    await db.set_setting("link_reply_breaker_ledger", _json.dumps({
+        "pending": {}, "strikes": {},
+        "sends": {str(poster_id): {"date": datetime.now().strftime("%Y-%m-%d"), "count": 1}},
+    }, ensure_ascii=False))
+    await _add_material(db, posted_account_id=poster_id)
+
+    count = await manager.process_link_first_replies()
+    assert count == 1, "无 last_ts 视为无间隔记录，正常发送"
+    assert "retry" in (await _get_ledger(db)), "落库后补全新段"
