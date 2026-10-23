@@ -9,7 +9,7 @@ API 成功≠可见（实测被吞时 reply_num 照样 +1）：发出超过校�
 """
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -857,3 +857,93 @@ async def test_old_ledger_without_new_sections_loads(db, manager):
     count = await manager.process_link_first_replies()
     assert count == 1, "无 last_ts 视为无间隔记录，正常发送"
     assert "retry" in (await _get_ledger(db)), "落库后补全新段"
+
+
+# ---- 死帖出口+只提醒一次（10-23 整改：死帖每20分钟重复打日志+拉楼层，永无出口）----
+
+
+def _dead_notice_count(mock_info) -> int:
+    return sum(
+        1 for c in mock_info.await_args_list
+        if c.args and "主帖异常" in str(c.args[0])
+    )
+
+
+@pytest.mark.asyncio
+async def test_dead_thread_logs_once_and_keeps_rechecking(db, manager):
+    """死帖只提醒一次（账本 dead_seen 去重）；窗口内仍逐轮复查——
+    覆盖"审核屏蔽临时不可见、之后恢复"的情形，不能一死就永不再看。"""
+    await _add_account(db, "poster")
+    mid = await _add_material(db)
+
+    await manager.process_link_first_replies()
+    await _backdate_link_reply(db, mid)
+
+    manager._find_link_reply = AsyncMock(return_value=("dead", None))
+    with patch("tieba_mecha.core.batch_post.log_info", new_callable=AsyncMock) as mock_info:
+        await manager.process_link_first_replies()  # 首见：提醒一次
+        await manager.process_link_first_replies()  # 复见：静默
+        await manager.process_link_first_replies()  # 再复见：静默
+
+    assert _dead_notice_count(mock_info) == 1, "同一物料死帖提醒必须只打一次"
+    assert manager._find_link_reply.await_count == 3, "窗口内死帖仍逐轮复查"
+    assert str(mid) in (await _get_ledger(db))["dead_seen"], "提醒记录落账本（重启后也不重复提醒）"
+
+    m = await _get_material(db, mid)
+    assert m.link_reply_at is not None and m.link_reply_fail_count == 0, "死帖不动状态语义保持（#626）"
+
+
+@pytest.mark.asyncio
+async def test_dead_thread_exits_verify_after_window(db, manager):
+    """link_reply_verify_max_age_hours 超龄的死帖退出校验查询：不再拉楼层、不再打日志。
+    默认 24h：25h 前发出的不再复查，23h 前发出的仍在窗口内。"""
+    await _add_account(db, "poster")
+    mid_old = await _add_material(db, posted_tid=7001)
+    mid_new = await _add_material(db, posted_tid=7002)
+
+    async with db.async_session() as session:
+        for mid, hours in ((mid_old, 25), (mid_new, 23)):
+            m = await session.get(MaterialPool, mid)
+            m.link_reply_at = datetime.now() - timedelta(hours=hours)
+            await session.commit()
+
+    manager._find_link_reply = AsyncMock(return_value=("dead", None))
+    with patch("tieba_mecha.core.batch_post.log_info", new_callable=AsyncMock) as mock_info:
+        count = await manager.process_link_first_replies()
+
+    assert count == 0
+    manager._find_link_reply.assert_awaited_once()
+    assert manager._find_link_reply.await_args.args[0] == 7002, "只有窗口内的死帖被复查"
+    assert _dead_notice_count(mock_info) == 1, "超龄死帖整轮静默退出（那条日志属于窗口内者）"
+    assert str(mid_old) not in (await _get_ledger(db))["dead_seen"], "超龄者根本不进校验，无提醒记录"
+
+
+@pytest.mark.asyncio
+async def test_dead_recovery_clears_notice_and_relogs(db, manager):
+    """帖子恢复（查到楼层→判被吞→换号重发）后 dead_seen 必须清掉：
+    新一 episodes 的死帖要重新提醒，不能被旧记录吞掉。"""
+    poster_id = await _add_account(db, "poster")
+    await _add_account(db, "helper")
+    mid = await _add_material(db, posted_account_id=poster_id)
+
+    await manager.process_link_first_replies()  # poster 自评
+    await _backdate_link_reply(db, mid)
+
+    with patch("tieba_mecha.core.batch_post.log_info", new_callable=AsyncMock) as mock_info:
+        manager._find_link_reply = AsyncMock(return_value=("dead", None))
+        await manager.process_link_first_replies()  # 死帖：提醒①
+        assert _dead_notice_count(mock_info) == 1
+
+        manager._find_link_reply = AsyncMock(return_value=("empty", None))
+        await manager.process_link_first_replies()  # 帖子恢复但首评被吞：判被吞进退避
+        assert str(mid) not in (await _get_ledger(db))["dead_seen"], "恢复必须清提醒记录"
+
+        await _clear_retry_backoff(db, mid)
+        manager._find_link_reply = AsyncMock(return_value=("dead", None))
+        await manager.process_link_first_replies()  # 换号重发
+        await _backdate_link_reply(db, mid)  # 越过校验延迟，重发首评进入校验
+        await manager.process_link_first_replies()  # 又死：提醒②
+
+    assert _dead_notice_count(mock_info) == 2, "再死必须再提醒"
+    args_re = manager.post_manager.reply_to_thread.await_args_list[-1].args
+    assert args_re[0] != poster_id, "重发已轮换其他号（前置语义未破坏）"

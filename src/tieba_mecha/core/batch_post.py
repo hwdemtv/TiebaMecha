@@ -2567,8 +2567,9 @@ class AutoBumpManager:
     async def _load_reply_ledger(self) -> dict:
         """读首评风控账本。结构：
         {"pending": {mid: {"aid","ts"}}, "strikes": {aid: [ts]},
-         "sends": {aid: {"date","count","last_ts"}}, "retry": {mid: {"aids","not_before","ts"}}}
-        旧账本缺 sends.last_ts / retry 段时回空，天然兼容。损坏静默回空。"""
+         "sends": {aid: {"date","count","last_ts"}}, "retry": {mid: {"aids","not_before","ts"}},
+         "dead_seen": {mid: ts}}
+        旧账本缺 sends.last_ts / retry / dead_seen 段时回空，天然兼容。损坏静默回空。"""
         try:
             raw = await self.db.get_setting(LINK_REPLY_BREAKER_LEDGER_KEY, "")
             data = json.loads(raw) if raw else {}
@@ -2582,10 +2583,11 @@ class AutoBumpManager:
             "strikes": strikes if isinstance(strikes, dict) else {},
             "sends": data.get("sends") if isinstance(data.get("sends"), dict) else {},
             "retry": data.get("retry") if isinstance(data.get("retry"), dict) else {},
+            "dead_seen": data.get("dead_seen") if isinstance(data.get("dead_seen"), dict) else {},
         }
 
     async def _save_reply_ledger(self, ledger: dict, now, window_h: int) -> None:
-        """裁剪后落账本：pending/retry 按 TTL+FIFO，strikes 保留 max(窗口, 渐进
+        """裁剪后落账本：pending/retry/dead_seen 按 TTL+FIFO，strikes 保留 max(窗口, 渐进
         冷却封顶) 内（高档冷却回看窗长于 48h 窗，击记录过早裁掉会让长档失据），
         sends 保留当日 + 近 24h 内发过 last_ts 的昨日条目（跨午夜最短间隔判定用）。"""
         from datetime import timedelta
@@ -2609,6 +2611,13 @@ class AutoBumpManager:
                     continue
             if len(retry) > LINK_REPLY_LEDGER_MAX_PENDING:
                 retry = dict(sorted(retry.items(), key=lambda kv: str(kv[1].get("ts", "")))[-LINK_REPLY_LEDGER_MAX_PENDING:])
+            dead_seen = {}
+            for mid, ts in ledger.get("dead_seen", {}).items():
+                try:
+                    if datetime.fromisoformat(ts) >= pending_cutoff:
+                        dead_seen[mid] = ts
+                except (TypeError, ValueError):
+                    continue
             strike_cutoff = now - timedelta(hours=max(window_h, LINK_REPLY_BREAKER_COOLDOWN_CAP_HOURS))
             kept_strikes = {}
             for aid, ts_list in ledger["strikes"].items():
@@ -2636,7 +2645,8 @@ class AutoBumpManager:
                 except (TypeError, ValueError):
                     continue
             payload = json.dumps(
-                {"pending": pend, "strikes": kept_strikes, "sends": kept_sends, "retry": retry},
+                {"pending": pend, "strikes": kept_strikes, "sends": kept_sends, "retry": retry,
+                 "dead_seen": dead_seen},
                 ensure_ascii=False,
             )
             await self.db.set_setting(LINK_REPLY_BREAKER_LEDGER_KEY, payload)
@@ -2933,6 +2943,12 @@ class AutoBumpManager:
             verify_delay_min = int(await self.db.get_setting("link_reply_verify_delay_minutes", "3"))
         except Exception:
             verify_delay_min = 3
+        try:
+            # 死帖复查窗：link_reply_at 超龄即退出校验。没有这个窗口，死帖物料会
+            # 每 20 分钟被重新拉一次楼层+打一条日志，永无出口（10-23 整改）
+            verify_max_age_h = max(1, int(await self.db.get_setting("link_reply_verify_max_age_hours", "24")))
+        except Exception:
+            verify_max_age_h = 24
         breaker_on, threshold, window_h, cooldown_h, escalate = await self._breaker_params()
         ledger = await self._load_reply_ledger()
 
@@ -2947,6 +2963,7 @@ class AutoBumpManager:
                 MaterialPool.link_reply_pid == None,
                 MaterialPool.link_reply_fail_count < max_fail,
                 MaterialPool.link_reply_at <= now - timedelta(minutes=verify_delay_min),
+                MaterialPool.link_reply_at >= now - timedelta(hours=verify_max_age_h),
             ))
             result = await session.execute(stmt)
             pending = list(result.scalars().all())
@@ -2959,8 +2976,17 @@ class AutoBumpManager:
             status, pid = await self._find_link_reply(material.posted_tid, link_token)
             if status == "dead":
                 # 主帖阵亡/异常：跳过被吞判定，不动状态（fail_count 不累计），
-                # 存活检测会另行落库 death_reason
-                await log_info(f"物料 [{material.id}] 主帖异常，首评校验本轮跳过（不判被吞）")
+                # 存活检测会另行落库 death_reason。同一物料只提醒一次（死帖每
+                # 20 分钟重复打日志纯噪音）；窗口内仍逐轮复查（覆盖审核屏蔽
+                # 临时不可见后恢复的情形），超龄随查询窗口自然退出；帖子恢复
+                # （确认可见/判被吞）会清提醒记录，再死再报。
+                if str(material.id) not in ledger.get("dead_seen", {}):
+                    ledger.setdefault("dead_seen", {})[str(material.id)] = now.isoformat(timespec="seconds")
+                    await self._save_reply_ledger(ledger, now, window_h)
+                    await log_info(
+                        f"物料 [{material.id}] 主帖异常（阵亡/屏蔽），首评不判被吞；"
+                        f"{verify_max_age_h}h 内复查，超龄放弃校验"
+                    )
                 continue
             if status == "error":
                 # 楼层查询异常（风控/网络）：不动状态，下轮再校验，避免误判被吞浪费重试
@@ -2975,6 +3001,7 @@ class AutoBumpManager:
                 confirmed += 1
                 ledger["pending"].pop(str(material.id), None)
                 ledger["retry"].pop(str(material.id), None)  # 已闭环：已吞账号/退避记录随之作废
+                ledger.get("dead_seen", {}).pop(str(material.id), None)  # 帖子已恢复：再死再提醒
                 await self._save_reply_ledger(ledger, now, window_h)
                 await log_info(f"物料 [{material.id}] 带链首评可见性确认 (pid:{pid})")
             else:
@@ -2984,6 +3011,7 @@ class AutoBumpManager:
                 # 已吞账号入 retry 段（换号不再上场）+ 分级退避（不再同轮立即重发）。
                 sender_aid = None
                 pend_entry = ledger["pending"].pop(str(material.id), None)
+                ledger.get("dead_seen", {}).pop(str(material.id), None)  # 帖子已恢复：再死再提醒
                 if breaker_on and isinstance(pend_entry, dict) and isinstance(pend_entry.get("aid"), int):
                     sender_aid = pend_entry["aid"]
                     strikes = ledger["strikes"].setdefault(str(sender_aid), [])
