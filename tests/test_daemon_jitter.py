@@ -96,3 +96,80 @@ def test_filter_due_tasks_skips_jittered_future():
     due = daemon._filter_due_tasks([future_due, past_once, no_anchor], now)
     assert past_once in due and no_anchor in due
     assert future_due not in due
+
+
+# ── 完成续注册双发事故回归（2026-10-25 生产实证）─────────────────────────
+# 负抖动派发早于锚点：单帖任务 2 秒完成时当天锚点未到，旧逻辑把下次锚点
+# 排回"今天"，再撒抖动得到已过期派发时刻 → job 注册即跳火被 max_instances
+# 拦下 → 轮询兜底 5 分钟后再派一轮，同账号分钟级双帖。修复=完成路径
+# （after_run=True）以本轮锚点为基准 +1 周期，绝不落回已消耗的锚点轮。
+
+def _anchor_future(minutes=4):
+    """now+minutes 的整分锚点（模拟负抖动提前派发、完成时锚点未到）"""
+    a = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=minutes)
+    return a
+
+
+def test_after_run_daily_advances_one_full_day():
+    """负抖动日完成：下一锚点=本轮锚点+1天（同分），不再落回今天"""
+    anchor = _anchor_future(4)
+    t = _task(anchor=anchor)
+    nxt = daemon._calc_next_schedule_time(t, after_run=True)
+    assert nxt == anchor + timedelta(days=1)
+    assert nxt > datetime.now()
+
+
+def test_after_run_daily_crossing_midnight():
+    """跨午夜负抖动：锚点 00:01 的任务前一天深夜派发完成，下一轮必须是
+    锚点+1天，而不是 now 重建出的"今天 00:01"（那正是已消耗的本轮锚点）"""
+    # 构造"锚点比 now 晚 4 分钟"且锚点落在次日的场景等价物：直接以
+    # 午夜两侧验证锚点基准逻辑——锚点取当天 00:01（此刻必然已过），
+    # 本轮视作它昨夜 23:5x 派发跑完的
+    now = datetime.now()
+    anchor = now.replace(hour=0, minute=1, second=0, microsecond=0)
+    t = _task(anchor=anchor)
+    nxt = daemon._calc_next_schedule_time(t, after_run=True)
+    assert nxt > now
+    assert (nxt.hour, nxt.minute) == (0, 1)
+    assert nxt - anchor >= timedelta(days=1)
+
+
+def test_after_run_daily_stale_anchor_catches_up():
+    """宕机积压补跑的历史轮：锚点已远远落后 now，下一轮从锚点+1天追进未来"""
+    stale = datetime.now().replace(second=0, microsecond=0) - timedelta(days=3)
+    t = _task(anchor=stale)
+    nxt = daemon._calc_next_schedule_time(t, after_run=True)
+    assert nxt > datetime.now()
+    assert nxt - stale == timedelta(days=4)
+
+
+def test_after_run_weekly_advances_one_full_week():
+    """weekly 同病同修：完成一轮后下一锚点=本轮锚点+7 天"""
+    anchor = _anchor_future(4)
+    t = SimpleNamespace(
+        id=3, schedule_type="weekly",
+        schedule_time=anchor,
+        schedule_day_of_week=anchor.weekday(),
+    )
+    nxt = daemon._calc_next_schedule_time(t, after_run=True)
+    assert nxt == anchor + timedelta(days=7)
+    assert nxt > datetime.now()
+
+
+def test_resume_semantics_unchanged_today_anchor_future():
+    """防回归：恢复/编辑链路（after_run 缺省）锚点未到时仍排该锚点本身"""
+    anchor = _anchor_future(30)
+    t = _task(anchor=anchor)
+    nxt = daemon._calc_next_schedule_time(t)
+    # now+30min 的锚点就是"第一个未来的同分时刻"（跨午夜与否皆然）
+    assert nxt == anchor
+
+
+def test_after_run_chain_next_dispatch_never_in_past():
+    """修复后整链断言：完成路径的下一派发时刻（锚点+1天 再撒抖动）必为
+    未来——杜绝注册即跳火的过期 job（skipped: maximum instances 根源）"""
+    anchor = _anchor_future(4)
+    t = _task(anchor=anchor)
+    nxt = daemon._calc_next_schedule_time(t, after_run=True)
+    eff = daemon.jittered_dispatch_time(t, nxt)
+    assert eff > datetime.now()

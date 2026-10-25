@@ -318,7 +318,7 @@ async def _run_claimed_task(task_id: str):
             )
 
         if schedule_type != 'once':
-            next_time = _calc_next_schedule_time(task)
+            next_time = _calc_next_schedule_time(task, after_run=True)
             new_cycle = (getattr(task, 'cycle_count', 0) or 0) + 1
             await db.update_batch_task(
                 task.id,
@@ -338,7 +338,7 @@ async def _run_claimed_task(task_id: str):
         print(f"[{datetime.now()}] [DAEMON] 任务 ID={task.id} 执行异常: {e}")
         # 循环任务异常归位 pending 并重注册触发器，下次继续；once 任务标记失败
         if schedule_type != 'once':
-            next_time = _calc_next_schedule_time(task)
+            next_time = _calc_next_schedule_time(task, after_run=True)
             await db.update_batch_task(task.id, status="pending", schedule_time=next_time)
             daemon_instance.schedule_batch_task(task.id, next_time)
         else:
@@ -464,20 +464,35 @@ async def do_batch_post_tasks():
         return  # 单班次只派发一个，其余任务等下一班次错峰执行
 
 
-def _calc_next_schedule_time(task) -> datetime:
+def _calc_next_schedule_time(task, after_run: bool = False) -> datetime:
     """
     根据任务的调度类型计算下次执行时间。
-    
+
     - daily: 明天 schedule_time 的 HH:MM
-    - weekly: 下一个 schedule_day_of_week 的 schedule_time HH:MM  
+    - weekly: 下一个指定星期几
     - interval: now + interval_hours
+
+    after_run=True 仅供"一轮刚执行完/执行异常"的续注册路径使用：抖动派发
+    可早于锚点时刻，本轮完成后当天锚点可能尚未到达，但该锚点轮次已被
+    本轮消耗，必须无条件进位到下一周期。否则会重排出"今天锚点"（仍在
+    未来），对其再撒抖动得到已过期的派发时刻 → 注册即跳火的 job 被
+    max_instances 拦下 → 轮询兜底 5 分钟后再次派发同一任务，同账号
+    分钟级连发两帖（2026-10-25 生产实证）。
     """
     schedule_type = getattr(task, 'schedule_type', 'once') or 'once'
     schedule_time = task.schedule_time or datetime.now()
-    
+
     if schedule_type == 'daily':
-        # 每天：明天的同一时刻
         now = datetime.now()
+        if after_run:
+            # 基准必须用本轮锚点而非 now 重建：负抖动派发可早于锚点（含
+            # 跨午夜提前到前一夜的情形），本轮消耗的就是 schedule_time 这个
+            # 锚点轮，下一轮=锚点+1天；宕机兜底补跑的历史轮由 while 追进未来。
+            next_dt = schedule_time.replace(second=0, microsecond=0) + timedelta(days=1)
+            while next_dt <= now:
+                next_dt += timedelta(days=1)
+            return next_dt
+        # 每天：明天的同一时刻
         next_dt = now.replace(
             hour=schedule_time.hour,
             minute=schedule_time.minute,
@@ -486,11 +501,18 @@ def _calc_next_schedule_time(task) -> datetime:
         if next_dt <= now:
             next_dt += timedelta(days=1)
         return next_dt
-        
+
     elif schedule_type == 'weekly':
-        # 每周：下一个指定星期几
         day_of_week = getattr(task, 'schedule_day_of_week', 0) or 0  # 0=周一...6=周日
         now = datetime.now()
+        if after_run:
+            # 同 daily：锚点即本轮锚点日（schedule_time 的星期几天然对齐），
+            # 下一轮=锚点+1周，while 兜超长耗时/积压补跑。
+            next_dt = schedule_time.replace(second=0, microsecond=0) + timedelta(days=7)
+            while next_dt <= now:
+                next_dt += timedelta(days=7)
+            return next_dt
+        # 每周：下一个指定星期几
         # 计算目标时间的时分
         target_time = now.replace(
             hour=schedule_time.hour,
