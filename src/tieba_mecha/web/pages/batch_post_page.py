@@ -77,6 +77,8 @@ class BatchPostPage:
         self._temp_local_fnames = []    # 本地自留区锁定的吧名
         self._temp_global_fnames = []   # 全域轰炸组锁定的吧名
         self._local_selected_only = True    # 本地自留区弹窗默认只看已选（所见列表=勾选集，计数与眼见一致）
+        self._local_unsafe_n = 0    # 锁定时快照：已选中的非安全吧数（主页面摘要条用）
+        self._known_safe_fnames = set()    # 最近一次火力弹窗打开时的安全吧集合（处置后重算快照用）
 
         # 账号选择增强状态
         self._account_search_text = ""
@@ -1451,9 +1453,13 @@ class BatchPostPage:
             self.global_status_btn.visible = False
         else:
             self.forum_select_btn.visible = False
-            # 本地自留区按钮
+            # 本地自留区按钮（构成摘要：非安全计数来自锁定时快照）
             if local_count > 0:
-                self.local_status_btn.text = f"🏠 本地自留区: {local_count} 个目标"
+                unsafe_n = getattr(self, "_local_unsafe_n", 0) or 0
+                summary = f"🏠 本地自留区: {local_count} 个目标"
+                if unsafe_n:
+                    summary += f" · {unsafe_n} 非安全"
+                self.local_status_btn.text = summary
                 self.local_status_btn.style = ft.ButtonStyle(color="white", bgcolor="primary")
             else:
                 self.local_status_btn.text = "🏠 本地自留区: 未选择"
@@ -1592,6 +1598,18 @@ class BatchPostPage:
         except Exception:
             pass
         _safe_fnames = {f['fname'] for f in local_forums if f['is_post_target']}
+        self._known_safe_fnames = set(_safe_fnames)  # 供预检处置后重算非安全快照
+
+        # 空降集合（账号感知，A 包 2026-10-25）：所选账号均未关注的本地吧 = 空降投放。
+        # 未选账号时不算空降（概念无从谈起），facets 与徽标自动失效。
+        _parachute_fnames: set = set()
+        _acc_ids = sorted(self._selected_account_ids)
+        if _acc_ids:
+            try:
+                _followed = set(await self.db.get_fnames_followed_by_accounts(_acc_ids))
+                _parachute_fnames = {f['fname'] for f in local_forums} - _followed
+            except Exception:
+                _parachute_fnames = set()
         
         # ===== 两个独立的选中集合 =====
         # 本地自留区选中：若上次有持久化选择则沿用，否则默认选中所有安全吧
@@ -1630,20 +1648,39 @@ class BatchPostPage:
             label="只看已选", value=self._local_selected_only, scale=0.8,
             tooltip="仅显示当前已勾选的目标；关闭后列出全部已关注吧"
         )
+        # facets 快筛（A 包 2026-10-25）：与"只看已选"互斥的单选过滤，配合批量移除
+        # 构成"筛出来→看清楚→一键剔"的治理动线；未选账号时空降筛不可用
+        _local_facet = {"mode": None}  # None / "unsafe" / "parachute"
+        _facet_para_tip = (
+            f"仅显示所选 {_acc_ids and len(_acc_ids)} 个账号都未关注的吧（将空降投放）"
+            if _acc_ids else "先在中间栏选择执行账号，才能按账号计算空降")
+        facet_unsafe_cb = ft.Checkbox(
+            label="只看非安全", value=False, scale=0.8,
+            tooltip="仅显示未开启本土作战的吧；勾选后可用「移除筛选结果」一键剔除")
+        facet_parachute_cb = ft.Checkbox(
+            label="只看空降", value=False, scale=0.8, disabled=not _acc_ids,
+            tooltip=_facet_para_tip)
+        remove_filtered_btn = ft.TextButton(
+            "移除筛选结果", icon=icons.DELETE_SWEEP_OUTLINED, visible=False,
+            tooltip="把当前筛选出的、已勾选的吧全部移出目标集")
+
         local_select_all_cb = ft.Checkbox(label="全选安全", value=False, scale=0.8, fill_color="green")
         local_container = ft.Column(spacing=2, scroll=ft.ScrollMode.ADAPTIVE, height=300)
         local_count_text = ft.Text("", size=12, color="primary", weight=ft.FontWeight.BOLD)
-        
+
         def update_local_count():
             parts = [f"已选: {len(local_selected)} 个目标"]
             unsafe_n = len([fn for fn in local_selected if fn not in _safe_fnames])
             risky_n = len([fn for fn in local_selected if _is_risky(risk_map.get(fn))])
+            para_n = len([fn for fn in local_selected if fn in _parachute_fnames])
             if unsafe_n:
                 parts.append(f"{unsafe_n} 非安全")
+            if para_n:
+                parts.append(f"{para_n} 空降")
             if risky_n:
                 parts.append(f"{risky_n} 高风险")
             local_count_text.value = " · ".join(parts)
-            local_count_text.color = "red" if risky_n else ("orange" if unsafe_n else "primary")
+            local_count_text.color = "red" if risky_n else ("orange" if (unsafe_n or para_n) else "primary")
             try: local_count_text.update()
             except Exception: pass
         update_local_count()
@@ -1683,12 +1720,16 @@ class BatchPostPage:
                 for f in local_forums:
                     fn = f['fname']
                     is_safe = f['is_post_target']
-                    if self._local_selected_only and fn not in local_selected: continue
+                    if self._local_selected_only and not _local_facet["mode"] and fn not in local_selected: continue
                     if keyword and keyword.lower() not in fn.lower(): continue
+                    # facets 单选过滤（优先于"只看已选"：筛治理目标时要看全集）
+                    if _local_facet["mode"] == "unsafe" and is_safe: continue
+                    if _local_facet["mode"] == "parachute" and fn not in _parachute_fnames: continue
                     risk = risk_map.get(fn)
                     is_risky = _is_risky(risk)
                     badge = _risk_badge(risk)
-                    badge_text = f"  ({badge})" if badge else ""
+                    para_mark = " 🪂空降" if fn in _parachute_fnames else ""
+                    badge_text = (f"  ({badge})" if badge else "") + para_mark
                     is_checked = fn in local_selected
                     item_disabled = False
                     # [修复] 被选中但非安全的贴吧添加⚠️警告标识，提醒用户状态变化
@@ -1764,9 +1805,58 @@ class BatchPostPage:
 
         def on_local_selected_only_change(e):
             self._local_selected_only = e.control.value
+            if e.control.value:
+                # 与 facets 互斥：恢复常规"只看已选"
+                _local_facet["mode"] = None
+                facet_unsafe_cb.value = False
+                facet_parachute_cb.value = False
+                remove_filtered_btn.visible = False
+                try:
+                    facet_unsafe_cb.update(); facet_parachute_cb.update(); remove_filtered_btn.update()
+                except Exception: pass
             render_local_list(local_search_field.value)
 
         local_selected_only_cb.on_change = on_local_selected_only_change
+
+        def _set_facet(mode: str | None):
+            was_off = _local_facet.get("prev_selected_only")
+            _local_facet["mode"] = mode
+            facet_unsafe_cb.value = mode == "unsafe"
+            facet_parachute_cb.value = mode == "parachute"
+            if mode and self._local_selected_only:
+                # facet 优先：临时关闭"只看已选"，退出 facet 时还原
+                _local_facet["prev_selected_only"] = True
+                self._local_selected_only = False
+                local_selected_only_cb.value = False
+            elif not mode and was_off:
+                _local_facet["prev_selected_only"] = False
+                self._local_selected_only = True
+                local_selected_only_cb.value = True
+            remove_filtered_btn.visible = mode is not None
+            try:
+                facet_unsafe_cb.update(); facet_parachute_cb.update()
+                local_selected_only_cb.update(); remove_filtered_btn.update()
+            except Exception: pass
+            render_local_list(local_search_field.value)
+
+        facet_unsafe_cb.on_change = lambda e: _set_facet("unsafe" if e.control.value else None)
+        facet_parachute_cb.on_change = lambda e: _set_facet("parachute" if e.control.value else None)
+
+        def on_remove_filtered(_):
+            visible_fns = [cb.data for cb in local_container.controls
+                           if isinstance(cb, ft.Checkbox) and not cb.disabled]
+            removed = [fn for fn in visible_fns if fn in local_selected]
+            if not removed:
+                self._show_snackbar("当前筛选结果中没有已勾选的吧，无可移除", "info")
+                return
+            for fn in removed:
+                local_selected.discard(fn)
+            update_local_count()
+            render_local_list(local_search_field.value)
+            mode_label = "非安全" if _local_facet["mode"] == "unsafe" else "空降"
+            self._show_snackbar(f"已移除 {len(removed)} 个{mode_label}目标", "success")
+
+        remove_filtered_btn.on_click = on_remove_filtered
 
         def on_local_clear(_):
             local_selected.clear()
@@ -1780,6 +1870,8 @@ class BatchPostPage:
                 preview = "、".join(sorted(unsafe_selected)[:5]) + ("…" if len(unsafe_selected) > 5 else "")
                 self._show_snackbar(f"⚠️ 含 {len(unsafe_selected)} 个非安全贴吧，将以关注号身份投放（无本土作战加成）：{preview}", "warning")
             self._temp_local_fnames = list(local_selected)
+            # 主页面摘要条数据源（_update_forum_select_btn 为同步函数，用锁定时快照）
+            self._local_unsafe_n = len(local_selected - _safe_fnames)
             if self.db:
                 self.page.run_task(self.db.set_setting, "last_selected_local_forums", json.dumps(self._temp_local_fnames))
             self._update_forum_select_btn()
@@ -2016,11 +2108,18 @@ class BatchPostPage:
                     icon=icons.GPS_FIXED,
                     content=ft.Container(
                         content=ft.Column([
-                            ft.Text("列出全部已关注贴吧；🛡️安全吧默认勾选，非安全吧勾选后将以关注号身份投放", size=11, color="onSurfaceVariant"),
+                            ft.Text("列出全部已关注贴吧；🛡️安全吧默认勾选，非安全吧勾选后将以关注号身份投放；🪂=所选账号未关注（空降投放）", size=11, color="onSurfaceVariant"),
                             ft.Row([
                                 local_search_field,
                                 local_selected_only_cb,
                                 local_select_all_cb,
+                            ], spacing=5),
+                            # 治理动作行（A 包 2026-10-25）：facets 快筛 → 批量移除/取关
+                            ft.Row([
+                                facet_unsafe_cb,
+                                facet_parachute_cb,
+                                remove_filtered_btn,
+                                ft.Container(expand=True),
                                 ft.TextButton(
                                     "取关选中",
                                     icon=icons.DELETE_SWEEP,
@@ -2965,19 +3064,24 @@ class BatchPostPage:
         report = await PreflightService(self.db).run(config)
         return config, report
 
-    def _build_summary_issue_row(self, issue: PreflightIssue):
+    def _build_summary_issue_row(self, issue: PreflightIssue, actions: list | None = None):
         icon_map = {
             "error": (icons.ERROR_ROUNDED, "error"),
             "warning": (icons.WARNING_AMBER_ROUNDED, "orange"),
             "info": (icons.INFO_OUTLINED, "primary"),
         }
         icon_name, color = icon_map.get(issue.level, (icons.INFO_OUTLINED, "primary"))
-        return ft.Row([
+        row_controls = [
             ft.Icon(name=icon_name, color=color, size=16),
             ft.Container(expand=True, content=ft.Text(issue.message, size=11, selectable=True)),
-        ], spacing=6)
+        ]
+        # B 包（2026-10-25）：警告行内处置按钮（移除/补关注），点击后自动重跑预检
+        if actions:
+            row_controls.extend(actions)
+        return ft.Row(row_controls, spacing=6)
 
-    def _build_summary_content(self, report: PreflightReport, dry: bool) -> ft.Control:
+    def _build_summary_content(self, report: PreflightReport, dry: bool,
+                               remediations: dict | None = None) -> ft.Control:
         s = report.stats
         est_min, est_max = s.get("estimated_duration", ("—", "—"))
         mult_note = "（凌晨双倍延迟已启用）" if s.get("delay_multiplier", 1) > 1 else ""
@@ -3013,7 +3117,10 @@ class BatchPostPage:
             stat_rows.append(ft.Text("风险构成: " + "；".join(report.risk_factors),
                                      size=10, color="onSurfaceVariant", selectable=True))
 
-        issue_rows = [self._build_summary_issue_row(i) for i in report.warnings + report.infos]
+        issue_rows = []
+        for i in report.warnings + report.infos:
+            acts = (remediations or {}).get(i.code)
+            issue_rows.append(self._build_summary_issue_row(i, acts))
         if not report.warnings and not report.infos:
             issue_rows.append(ft.Row([
                 ft.Icon(name=icons.CHECK_CIRCLE_ROUNDED, color=COLORS.GREEN, size=16),
@@ -3031,6 +3138,24 @@ class BatchPostPage:
             width=520,
         )
 
+    def _remove_forums_from_selection(self, fnames: list) -> int:
+        """从两组目标选择集中移除指定吧（预检警告行内处置用），返回移除数。
+
+        同步重算非安全快照并刷新主页面摘要条。"""
+        removed = 0
+        for fn in fnames:
+            if fn in self._temp_local_fnames:
+                self._temp_local_fnames.remove(fn)
+                removed += 1
+            if fn in self._temp_global_fnames:
+                self._temp_global_fnames.remove(fn)
+                removed += 1
+        known_safe = getattr(self, "_known_safe_fnames", None) or set()
+        self._local_unsafe_n = len(
+            [fn for fn in self._temp_local_fnames if fn not in known_safe])
+        self._update_forum_select_btn()
+        return removed
+
     async def _show_launch_summary_dialog(self, report: PreflightReport, dry: bool = False) -> bool:
         """展示启动摘要/预检报告。dry=True 仅展示（干跑/错误查看），否则等待确认。返回是否确认。"""
         loop = asyncio.get_running_loop()
@@ -3044,6 +3169,62 @@ class BatchPostPage:
             except Exception:
                 pass
 
+        # B 包（2026-10-25）：警告行内处置——动作执行后自动重跑预检并重开本弹窗。
+        # dry 干跑场景重跑干跑、发射场景重走发射确认流，均复用现有入口零复制。
+        async def _remediate_then_rerun(action: str, fnames: list, account_ids: list):
+            _resolve(False)
+            if action == "remove":
+                removed = self._remove_forums_from_selection(fnames)
+                self._show_snackbar(f"已从目标集移除 {removed} 个吧，正在重新预检…", "success")
+            elif action == "follow":
+                from ...core.batch_post import BatchPostManager
+                self._show_snackbar(
+                    f"开始为 {len(account_ids)} 个账号补齐 {len(fnames)} 个吧的关注…", "info")
+                result = await BatchPostManager(self.db).follow_forums_bulk(
+                    fnames, account_ids=account_ids)
+                n_ok = len(result.get("success") or [])
+                n_fail = len(result.get("failed") or [])
+                self._show_snackbar(
+                    f"补齐关注完成：成功 {n_ok} / 失败 {n_fail}，正在重新预检…",
+                    "success" if n_ok else "warning")
+            if dry:
+                await self._on_dry_run_click(None)
+            else:
+                await self._on_start_click(None)
+
+        def _make_remediation_btn(label: str, tooltip: str, handler):
+            return ft.TextButton(
+                label, tooltip=tooltip,
+                on_click=lambda e: self.page.run_task(handler))
+
+        remediations: dict[str, list] = {}
+        s = report.stats
+        unsafe_fns = s.get("forums_unsafe") or []
+        parachute_fns = s.get("forums_parachute") or []
+        eff_ids = report.effective_account_ids or []
+        if unsafe_fns:
+            async def _h_remove_unsafe(_e=None):
+                await _remediate_then_rerun("remove", list(unsafe_fns), [])
+            remediations["forums_unsafe"] = [_make_remediation_btn(
+                "移除非安全吧",
+                f"把 {len(unsafe_fns)} 个非安全吧移出目标集并重新预检",
+                _h_remove_unsafe)]
+        if parachute_fns:
+            async def _h_remove_para(_e=None):
+                await _remediate_then_rerun("remove", list(parachute_fns), [])
+            buttons = [_make_remediation_btn(
+                "移除空降吧",
+                f"把 {len(parachute_fns)} 个空降吧移出目标集并重新预检",
+                _h_remove_para)]
+            if eff_ids:
+                async def _h_follow_para(_e=None):
+                    await _remediate_then_rerun("follow", list(parachute_fns), list(eff_ids))
+                buttons.insert(0, _make_remediation_btn(
+                    "补齐关注",
+                    f"让 {len(eff_ids)} 个有效账号关注这 {len(parachute_fns)} 个吧（消除空降）后重新预检",
+                    _h_follow_para))
+            remediations["forums_parachute"] = buttons
+
         has_errors = bool(report.errors)
         title = "干跑预检报告" if dry else ("发射拦截" if has_errors else "确认发射")
         if has_errors:
@@ -3056,7 +3237,7 @@ class BatchPostPage:
             )
             actions = [ft.TextButton("返回", on_click=lambda _: _resolve(False))]
         else:
-            content = self._build_summary_content(report, dry)
+            content = self._build_summary_content(report, dry, remediations)
             if dry:
                 actions = [ft.TextButton("关闭", on_click=lambda _: _resolve(False))]
             else:

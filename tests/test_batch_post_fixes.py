@@ -709,7 +709,8 @@ class TestLocalSelectedOnlyFilter:
         # 默认开启：打开弹窗所见即勾选集，已选计数与列表可见数一致
         assert "self._local_selected_only = True" in source
         # 过滤条件按勾选集判定，而非 is_post_target
-        assert "if self._local_selected_only and fn not in local_selected: continue" in source
+        # （2026-10-25 A 包：facet 激活时临时让位，锚点相应更新）
+        assert 'if self._local_selected_only and not _local_facet["mode"] and fn not in local_selected: continue' in source
         # 取消勾选时即时移出列表（避免整表重绘重置滚动位置）
         assert "local_container.controls.remove(e.control)" in source
 
