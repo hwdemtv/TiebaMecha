@@ -553,6 +553,19 @@ class PreflightService:
             score += add
             factors.append(f"含 {len(unsafe)} 个非安全贴吧 +{add:g}")
 
+        # 空降因子（2026-10-25 补盲区）：双账号实证同靶场空降 2 vs 9 的分差
+        # 此前全被"裸连"掩盖；过半空降顶格 +2，少数按 0.25/吧 封顶 1.5
+        parachute = stats.get("forums_parachute") or []
+        if parachute:
+            total_forums = len(report.effective_fnames) or len(parachute)
+            if len(parachute) * 2 >= total_forums:
+                score += 2
+                factors.append(f"过半贴吧将空降({len(parachute)}/{total_forums}) +2")
+            else:
+                add = min(1.5, 0.25 * len(parachute))
+                score += add
+                factors.append(f"含 {len(parachute)} 个空降贴吧 +{add:g}")
+
         effective_n = stats.get("accounts_effective", 0)
         no_proxy = accounts_info.get("no_proxy") or []
         if effective_n > 0:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from tieba_mecha.web.pages.batch_post.launch_config import LaunchConfig, LaunchConfigError
 from tieba_mecha.web.pages.batch_post.preflight import (
     PreflightIssue,
+    PreflightReport,
     PreflightService,
     format_duration,
 )
@@ -247,6 +248,34 @@ class TestPreflightService:
         assert report.stats["delay_max_effective"] == 10
         assert report.risk_score >= 3
         assert report.risk_factors
+
+    def _score_with_stats(self, stats, effective_fnames):
+        """直接驱动 _score：绕开异步查询，注入空降/非安全统计"""
+        report = PreflightReport()
+        report.effective_fnames = effective_fnames
+        config = LaunchConfig(account_ids=[1], local_fnames=effective_fnames, post_count=1)
+        svc = PreflightService.__new__(PreflightService)
+        svc._score(config, report, stats, {"effective": [], "no_proxy": []})
+        return report
+
+    def test_risk_score_parachute_minor(self):
+        """少数空降（2/8）：+0.5 且文案带数量（评分盲区补齐 2026-10-25）"""
+        fnames = [f"吧{i}" for i in range(8)]
+        report = self._score_with_stats({"forums_parachute": ["吧0", "吧1"]}, fnames)
+        assert any("含 2 个空降贴吧 +0.5" == f for f in report.risk_factors)
+        assert report.risk_score >= 0.5
+
+    def test_risk_score_parachute_majority(self):
+        """过半空降（6/8）：顶格 +2"""
+        fnames = [f"吧{i}" for i in range(8)]
+        report = self._score_with_stats({"forums_parachute": fnames[:6]}, fnames)
+        assert any("过半贴吧将空降(6/8) +2" == f for f in report.risk_factors)
+
+    def test_risk_score_parachute_none(self):
+        """零空降不产生因子"""
+        fnames = [f"吧{i}" for i in range(8)]
+        report = self._score_with_stats({"forums_parachute": []}, fnames)
+        assert not any("空降" in f for f in report.risk_factors)
 
     async def test_free_tier_caps_applied(self):
         db = await self._make_db(

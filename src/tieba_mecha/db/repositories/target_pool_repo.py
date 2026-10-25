@@ -83,8 +83,9 @@ class TargetPoolRepository:
                 )
                 updated += del_result.rowcount
 
-            # 不再自动恢复 is_post_target=True，避免覆盖用户手动设置
-            # 用户可通过 UI 的"批量切换火力"或单贴吧开关手动重新开启
+            # 不再自动恢复 is_post_target=True，避免覆盖用户手动设置。
+            # 手动重开入口 = 账号页·战略吧库的盾牌徽章弹窗（toggle_forum_post_target_by_fname，
+            # 按 fname 级联全账号）；注意"批量切换火力"切的是 TargetPool.is_target，动不了本标志。
 
             await session.commit()
             return updated

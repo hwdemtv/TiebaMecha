@@ -1117,7 +1117,7 @@ class AccountsPage:
         self.page.open(dialog)
 
     def _show_safety_detail(self, stat: dict):
-        """显示本土作战自动判定详情"""
+        """显示本土作战自动判定详情（含手动开关——is_post_target 按 fname 级联全账号生效）"""
         fname = stat['fname']
         is_post_target = stat.get('is_post_target', False)
         is_banned = stat.get('is_banned', False)
@@ -1145,8 +1145,33 @@ class AccountsPage:
         else:
             result_text = "❌ 本土作战未开启"
             result_color = "error"
-            detail = "判定依据：\n" + "\n".join(reasons)
-            detail += "\n\n💡 当封禁解除且删帖记录清除后，将自动恢复为安全状态。"
+            if reasons:
+                detail = "判定依据：\n" + "\n".join(reasons)
+                detail += "\n\n💡 封禁解除且删帖记录清除后自动恢复；也可用下方按钮手动开启。"
+            else:
+                # 无任何风险记录：新入库吧的默认态就是未开启，手动开启即可转正
+                detail = "该吧无封禁/删帖记录——多为新入库默认未开启，可直接手动开启。"
+
+        async def on_toggle(e):
+            new_val = not is_post_target
+            if not self.db:
+                self._show_snackbar("数据库未就绪", "error")
+                return
+            try:
+                changed = await self.db.toggle_forum_post_target_by_fname(fname, new_val)
+            except Exception as exc:
+                self._show_snackbar(f"切换失败: {exc}", "error")
+                return
+            self.page.close(dialog)
+            await self._refresh_matrix_stats()
+            self.refresh_ui()
+            if changed:
+                self._show_snackbar(
+                    f"🛡️ '{fname}' 本土作战已{'开启' if new_val else '关闭'}（全账号级联生效）",
+                    "success" if new_val else "info",
+                )
+            else:
+                self._show_snackbar(f"'{fname}' 未找到 Forum 记录，未变更", "warning")
 
         dialog = ft.AlertDialog(
             title=ft.Row([ft.Icon(icons.SHIELD_ROUNDED if is_post_target else icons.SHIELD_OUTLINED, color=result_color), ft.Text(f"{fname} — 安全判定")]),
@@ -1159,6 +1184,11 @@ class AccountsPage:
                 padding=5,
             ),
             actions=[
+                ft.TextButton(
+                    "⛔ 关闭本土作战" if is_post_target else "🛡️ 开启本土作战",
+                    icon=icons.BLOCK if is_post_target else icons.SHIELD_ROUNDED,
+                    on_click=lambda e: self.page.run_task(on_toggle, e),
+                ),
                 ft.TextButton("关闭", on_click=lambda _: self.page.close(dialog)),
             ]
         )
@@ -1414,7 +1444,7 @@ class AccountsPage:
                             ),
                             ft.IconButton(
                                 icon=icons.SHIELD_ROUNDED if is_post_target else icons.SHIELD_OUTLINED,
-                                tooltip="本土作战已开启 (自动判定)" if is_post_target else "本土作战未开启 (点击查看原因)",
+                                tooltip="本土作战已开启 (点击管理)" if is_post_target else "本土作战未开启 (点击开启/查看原因)",
                                 icon_color="green" if is_post_target else "error",
                                 on_click=lambda e, s=stat: self._show_safety_detail(s),
                             ),

@@ -629,3 +629,87 @@ async def test_delete_account_cascades_history_and_events(db):
     assert await db.delete_account(acc.id) is True
     assert await db.get_weight_history(account_id=acc.id) == []
     assert await db.get_captcha_events(account_id=acc.id) == []
+
+
+# ── 安全判定弹窗手动开关（2026-10-25：is_post_target 只关不开的 UI 出口）──
+
+def make_safety_stat(fname="测试吧", is_post_target=False, is_banned=False, deleted=0, acc=0):
+    return {"fname": fname, "is_post_target": is_post_target, "is_banned": is_banned,
+            "deleted_count": deleted, "account_count": acc}
+
+
+def _dialog_action_labels(fp):
+    dialog = fp.opened_dialogs[-1]
+    return [a.text for a in dialog.actions]
+
+
+def test_safety_dialog_offers_enable_when_off():
+    """未开启的吧：弹窗提供「开启本土作战」按钮（此前无任何 UI 出路）"""
+    fp, page = make_page()
+    page._banned_forum_map = {}
+    page._show_safety_detail(make_safety_stat(is_post_target=False))
+    assert "🛡️ 开启本土作战" in _dialog_action_labels(fp)
+
+
+def test_safety_dialog_offers_disable_when_on():
+    """已开启的吧：对称提供关闭按钮"""
+    fp, page = make_page()
+    page._banned_forum_map = {}
+    page._show_safety_detail(make_safety_stat(is_post_target=True))
+    assert "⛔ 关闭本土作战" in _dialog_action_labels(fp)
+
+
+def test_safety_dialog_default_state_copy_for_clean_forum():
+    """无封禁/删帖记录的未开启吧：文案指向新入库默认态而非空判定依据"""
+    fp, page = make_page()
+    page._banned_forum_map = {}
+    page._show_safety_detail(make_safety_stat(is_post_target=False))
+    texts = find_texts(fp.opened_dialogs[-1].content)
+    assert any("新入库默认" in (t.value or "") for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_safety_toggle_invokes_fname_cascade_and_refreshes():
+    """点击开启 → toggle_forum_post_target_by_fname(fname, True) + 矩阵刷新 + 成功反馈"""
+    from unittest.mock import AsyncMock
+
+    fp, page = make_page()
+    page.db = SimpleNamespace(
+        toggle_forum_post_target_by_fname=AsyncMock(return_value=2))
+    page._banned_forum_map = {}
+    page._refresh_matrix_stats = AsyncMock()
+    page.refresh_ui = lambda: None
+
+    page._show_safety_detail(make_safety_stat(fname="测试吧", is_post_target=False))
+    dialog = fp.opened_dialogs[-1]
+    toggle_btn = next(a for a in dialog.actions if a.text == "🛡️ 开启本土作战")
+    toggle_btn.on_click(FakeEvent())  # 经 page.run_task 排队
+    handler, args = fp.tasks[-1][0], fp.tasks[-1][1]
+    await handler(*args)
+
+    page.db.toggle_forum_post_target_by_fname.assert_awaited_once_with("测试吧", True)
+    page._refresh_matrix_stats.assert_awaited_once()
+    assert any("已开启" in str(s.content.value) for s in fp.snack_bars)
+
+
+@pytest.mark.asyncio
+async def test_safety_toggle_zero_rows_warns_not_success():
+    """Forum 无记录（changed=0）：提示未变更而非谎报成功"""
+    from unittest.mock import AsyncMock
+
+    fp, page = make_page()
+    page.db = SimpleNamespace(
+        toggle_forum_post_target_by_fname=AsyncMock(return_value=0))
+    page._banned_forum_map = {}
+    page._refresh_matrix_stats = AsyncMock()
+    page.refresh_ui = lambda: None
+
+    page._show_safety_detail(make_safety_stat(fname="幽灵吧", is_post_target=True))
+    dialog = fp.opened_dialogs[-1]
+    toggle_btn = next(a for a in dialog.actions if a.text == "⛔ 关闭本土作战")
+    toggle_btn.on_click(FakeEvent())
+    handler, args = fp.tasks[-1][0], fp.tasks[-1][1]
+    await handler(*args)
+
+    page.db.toggle_forum_post_target_by_fname.assert_awaited_once_with("幽灵吧", False)
+    assert any("未找到" in str(s.content.value) for s in fp.snack_bars)
