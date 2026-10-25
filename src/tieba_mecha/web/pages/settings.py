@@ -517,20 +517,47 @@ class SettingsPage:
 
     # --- Logic Helpers ---
     def _build_daemon_cards(self) -> list[ft.Control]:
-        cards = []
-        for j in self._jobs_info:
+        """守护任务单表（DataTable）。
+
+        旧形态 7 张卡纵向叠高 ~530px，超出 flet web 页签 ~450px 绘制截断线，
+        第 7 张（应用更新自动检测）长期隐形（2026-10-25 修复）；单表总高
+        ~320px 稳进安全区，触发/开关收进行内操作列。"""
+        if not self._jobs_info:
+            return [ft.Text("暂无守护任务", size=12, color="onSurfaceVariant")]
+        order = {jid: i for i, jid in enumerate(self.JOB_FUNCS)}
+        rows = []
+        for j in sorted(self._jobs_info, key=lambda x: order.get(x["id"], 99)):
             active = j["status"] == "运行中"
-            card = ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.icons.TIMER_OUTLINED if active else ft.icons.TIMER_OFF_OUTLINED, color="primary" if active else "onSurfaceVariant"),
-                    ft.Column([ft.Text(j["name"], size=14, weight=ft.FontWeight.BOLD),
-                              ft.Text(f"下次: {j['next_run']}", size=11, color="primary" if active else "onSurfaceVariant")], spacing=2, expand=True),
+            rows.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Row([
+                    ft.Icon(ft.icons.TIMER_OUTLINED if active else ft.icons.TIMER_OFF_OUTLINED,
+                            size=16, color="primary" if active else "onSurfaceVariant"),
+                    ft.Text(j["name"], size=12),
+                ], spacing=6)),
+                ft.DataCell(ft.Text("运行中" if active else "已暂停", size=11,
+                                    color="primary" if active else "onSurfaceVariant")),
+                ft.DataCell(ft.Text(j["next_run"], size=11)),
+                ft.DataCell(ft.Row([
                     ft.TextButton("触发", on_click=lambda e, jid=j["id"]: self.page.run_task(self._trigger_daemon_job, jid)),
                     ft.Switch(value=active, on_change=lambda e, jid=j["id"]: self.page.run_task(self._toggle_daemon_job, jid, e.control.value)),
-                ]), padding=10, border=ft.border.all(1, with_opacity(0.1, "primary" if active else "onSurface")), border_radius=10, bgcolor=with_opacity(0.02, "primary" if active else "onSurface"),
-            )
-            cards.append(card)
-        return cards
+                ], spacing=0)),
+            ]))
+        table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("任务", size=12)),
+                ft.DataColumn(ft.Text("状态", size=12)),
+                ft.DataColumn(ft.Text("下次执行", size=12)),
+                ft.DataColumn(ft.Text("操作", size=12)),
+            ],
+            rows=rows,
+            heading_row_height=36,
+            data_row_min_height=36,
+            data_row_max_height=40,
+            horizontal_margin=8,
+            column_spacing=12,
+            divider_thickness=0,
+        )
+        return [table]
 
     async def _trigger_maint_now(self, e):
         """手动触发一次养号周期"""
