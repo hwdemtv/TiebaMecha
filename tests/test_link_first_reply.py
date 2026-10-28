@@ -123,6 +123,9 @@ async def test_first_reply_uses_poster_and_rewrites_link(db, manager):
     content = args[3]
     assert "pan.baidu.com/s/testlink" in content.replace("删", ""), "回帖内容必须携带链接（剥删字后可还原）"
     assert "删" in content, "百度盘链接必须经过删字暗号化（打断特征串）"
+    assert any(
+        note in content for note in AutoBumpManager.LINK_REPLY_DECRYPT_NOTES
+    ), "插删字必须补说明尾注，引导读者去掉'删'字还原链接"
     assert "https://" not in content, "链接必须去 scheme 后发出"
     assert "提取码" not in content  # testlink 无 pwd 参数
 
@@ -412,6 +415,24 @@ async def test_retry_content_carries_rewrite_and_pwd(db, manager):
 
 
 # ---- 删字暗号化（2026-10-08 晚四账号带链首评全吞、模式疑似被拉黑的变体实验）----
+
+
+@pytest.mark.asyncio
+async def test_quark_link_no_del_no_note(db, manager):
+    """非百度盘链接不插删字也不陪绑说明尾注（删字暗号仅对百度盘 /s/ 生效）。"""
+    await _add_account(db, "poster")
+    await _add_account(db, "helper")
+    mid = await _add_material(db, link_url="https://pan.quark.cn/s/abc?pwd=z")
+
+    count = await manager.process_link_first_replies()
+
+    assert count == 1
+    content = manager.post_manager.reply_to_thread.await_args.args[3]
+    assert "pan.quark.cn/s/abc?pwd=z" in content, "夸克链接原样携带（仅去 scheme）"
+    assert "删" not in content, "非百度盘链接不得插删字"
+    assert not any(
+        note in content for note in AutoBumpManager.LINK_REPLY_DECRYPT_NOTES
+    ), "未插删字的链接不得陪绑说明尾注"
 
 
 def test_obfuscate_link_for_reply_inserts_single_del():

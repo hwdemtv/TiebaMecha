@@ -2488,6 +2488,13 @@ class AutoBumpManager:
         "放这里了 {link}",
     ]
 
+    # 删字暗号说明尾注：链接被插"删"后读者无从知晓需去掉，随机轮换口语化说明引导还原
+    LINK_REPLY_DECRYPT_NOTES = [
+        "（链接里的“删”字去掉就能打开）",
+        "（“删”字是防屏蔽暗号，去掉即是完整链接）",
+        "（用前把链接里的“删”字删掉哈）",
+    ]
+
     # 裸 https:// 外链是回复被吞的头号触发词（实测：API 成功但楼层不可见）。
     # 去 scheme + 百度盘 ?pwd= 拆成"提取码"尾注，可读可复制但不再命中外链正则。
     _PAN_PWD_RE = re.compile(r"(pan\.baidu\.com/s/[^?\s]+)[?&]pwd=([0-9a-zA-Z]+)")
@@ -2892,9 +2899,12 @@ class AutoBumpManager:
                 await log_warn(f"物料 [{material.id}] 带链首评跳过：矩阵池无该帖可用账号")
                 continue
 
-            reply_content = random.choice(self.LINK_REPLY_PHRASES).format(
-                link=self.obfuscate_link_for_reply(self.format_link_for_share(material.link_url))
-            )
+            share_token = self.format_link_for_share(material.link_url)
+            obfuscated = self.obfuscate_link_for_reply(share_token)
+            reply_content = random.choice(self.LINK_REPLY_PHRASES).format(link=obfuscated)
+            if obfuscated != share_token:
+                # 删字暗号仅对百度盘 /s/ 生效；未插删字的链接不陪绑说明
+                reply_content += random.choice(self.LINK_REPLY_DECRYPT_NOTES)
             ok, err = await self.post_manager.reply_to_thread(
                 acc.id, material.posted_fname, material.posted_tid, reply_content
             )
