@@ -68,7 +68,7 @@ class ForumInfo:
 
 
 # 错误码常量（单源定义在 core/risk.py，此处重导出以兼容既有引用）
-from .risk import ERR_ALREADY_SIGNED, ERR_FORUM_INVALID, ERR_FORUM_BANNED
+from .risk import ERR_ALREADY_SIGNED, ERR_FORUM_INVALID, ERR_FORUM_BANNED, ERR_SIGN_LOAD_FAILED
 
 # 全局签到流互斥锁：防止守护进程定时签到与界面手动签到并发执行，
 # 双流并跑会令请求频率翻倍，破坏行为模拟节奏并加大风控风险
@@ -92,6 +92,9 @@ def _parse_sign_result(result_raw):
         return True, "今日已签到" if is_already_signed else "签到成功", is_already_signed, is_forum_invalid, err_code
     if is_forum_invalid:
         return False, f"贴吧已失效 ({err_code})", is_already_signed, is_forum_invalid, err_code
+    if err and err_code == ERR_SIGN_LOAD_FAILED:
+        # 裸 str(err) 是元组样式 "(300004, '加载数据失败')"，日志里可读性差
+        return False, "签到数据加载失败 (300004)", is_already_signed, is_forum_invalid, err_code
     return False, str(err) if err else "签到失败", is_already_signed, is_forum_invalid, err_code
 
 
@@ -409,6 +412,16 @@ async def sign_all_forums(
 
                 success, msg, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(sign_res)
 
+                if not success and err_code == ERR_SIGN_LOAD_FAILED:
+                    # 300004 数据加载失败：接口偶发抖动（10-03~07 电影吧曾连日复现后自愈），
+                    # 短退避重试一次，仍失败按普通失败记账
+                    await _interruptible_sleep(stop_event, random.uniform(5, 10))
+                    try:
+                        sign_res = await client.sign_forum(forum.fname)
+                        success, msg, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(sign_res)
+                    except Exception:
+                        pass  # 重试异常时保留首试结论
+
                 if success:
                     result = SignResult(
                         fname=forum.fname,
@@ -606,6 +619,16 @@ async def sign_account_forums(
                     result_raw = await client.sign_forum(forum.fname)
 
                 success, message, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(result_raw)
+
+                if not success and err_code == ERR_SIGN_LOAD_FAILED:
+                    # 300004 数据加载失败：接口偶发抖动（10-03~07 电影吧曾连日复现后自愈），
+                    # 短退避重试一次，仍失败按普通失败记账
+                    await _interruptible_sleep(stop_event, random.uniform(5, 10))
+                    try:
+                        result_raw = await client.sign_forum(forum.fname)
+                        success, message, is_already_signed, is_forum_invalid, err_code = _parse_sign_result(result_raw)
+                    except Exception:
+                        pass  # 重试异常时保留首试结论
 
                 if is_forum_invalid:
                     if err_code == ERR_FORUM_BANNED:

@@ -507,6 +507,23 @@ class ForumRepository:
                 stmt.order_by(SignLog.signed_at.desc()).limit(limit)
             )
             return list(result.scalars().all())
+    async def has_sign_activity_today(self, account_id: int) -> bool:
+        """该账号今日是否产生过任何签到日志（成功/失败/拟人跳过均算）。
+
+        SignLog 无 account_id 列，但 forum_id 指向的 forums 行是按账号隔离的，
+        join Forum 即得账号口径。供守护签到缺席对账使用：既无日志也无
+        is_sign_today 标记 = 整号当日缺席。
+        """
+        start = datetime.combine(datetime.now().date(), datetime.min.time())
+        async with self.async_session() as session:
+            stmt = (
+                select(func.count(SignLog.id))
+                .join(Forum, Forum.id == SignLog.forum_id)
+                .where(Forum.account_id == account_id, SignLog.signed_at >= start)
+            )
+            count = (await session.execute(stmt)).scalar()
+            return bool(count)
+
     async def get_all_unique_forums(self) -> list[dict]:
         """获取所有不重复的贴吧基本信息和权限状态（排除已隐藏的贴吧）"""
         from sqlalchemy import func

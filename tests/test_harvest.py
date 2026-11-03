@@ -391,9 +391,77 @@ async def test_check_link_alive_skips_unsupported_without_network():
     """SPA 类型直接返回未知、不发请求（检查点：detail 说明原因）"""
     from tieba_mecha.core.link_check import check_link_alive
 
-    v = await check_link_alive("https://pan.quark.cn/s/whatever", "quark")
+    v = await check_link_alive("https://www.alipan.com/s/whatever", "aliyun")
     assert v.alive is None
     assert "SPA" in v.detail or "未支持" in v.detail
+
+
+# ---------- 夸克/UC 分享 token API 判定（core/link_check，2026-11-03 扩测） ----------
+
+def test_share_api_dead_signature():
+    """真网实测（2026-11-03）：不存在的分享 → HTTP 404 + code 41006 + 分享不存在"""
+    from tieba_mecha.core.link_check import judge_share_api_response
+
+    body = '{"status":404,"code":41006,"message":"分享不存在","req_id":"x"}'
+    v = judge_share_api_response("quark", 404, body)
+    assert v.alive is False
+    assert "分享不存在" in v.detail
+    # 取消/过期同判死（明确措辞）
+    v2 = judge_share_api_response("uc", 404, '{"code":41008,"message":"分享已被取消"}')
+    assert v2.alive is False
+    v3 = judge_share_api_response("quark", 200, '{"code":41011,"message":"分享已过期"}')
+    assert v3.alive is False
+
+
+def test_share_api_alive_signature():
+    """真网实测（2026-11-03）：存活分享 → HTTP 200 + code 0 + stoken"""
+    from tieba_mecha.core.link_check import judge_share_api_response
+
+    body = '{"status":200,"code":0,"message":"ok","data":{"stoken":"rtFR"}}'
+    v = judge_share_api_response("quark", 200, body)
+    assert v.alive is True
+    v2 = judge_share_api_response("uc", 200, '{"status":200,"code":0,"message":"ok","data":{}}')
+    assert v2.alive is True
+
+
+def test_share_api_passcode_needed_is_alive():
+    """带提取码的分享以空 passcode 请求会报提取码错误——分享存在即算存活"""
+    from tieba_mecha.core.link_check import judge_share_api_response
+
+    v = judge_share_api_response("quark", 400, '{"status":400,"code":41009,"message":"需要提取码"}')
+    assert v.alive is True
+
+
+def test_share_api_unknown_fail_open():
+    """反爬页/空体/未知错误码一律未知（fail-open 照常入库，绝不错杀）"""
+    from tieba_mecha.core.link_check import judge_share_api_response
+
+    assert judge_share_api_response("quark", 200, "<html>blocked</html>").alive is None
+    assert judge_share_api_response("quark", 200, "").alive is None
+    assert judge_share_api_response("uc", 500, '{"status":500,"code":99999,"message":"服务器开小差"}').alive is None
+    assert judge_share_api_response("quark", 200, "[1,2]").alive is None
+
+
+def test_extract_share_id():
+    from tieba_mecha.core.link_check import extract_share_id
+
+    assert extract_share_id("https://pan.quark.cn/s/1a3f2935bd17?p=x#/list") == "1a3f2935bd17"
+    assert extract_share_id("https://drive.uc.cn/s/abcDEF123") == "abcDEF123"
+    assert extract_share_id("https://pan.quark.cn/s/") == ""
+    assert extract_share_id("not a share link") == ""
+
+
+@pytest.mark.asyncio
+async def test_check_link_alive_real_quark_dead():
+    """真网实测（2026-11-03）：夸克假分享 id 走 token API 判死。
+    断网/风控环境下 fail-open 为未知，两种结果都接受（不脆）。"""
+    from tieba_mecha.core.link_check import check_link_alive
+
+    v = await check_link_alive("https://pan.quark.cn/s/fake123abcde", "quark", timeout=8)
+    if v.alive is None:
+        assert "检测异常" in v.detail or "未知" in v.detail  # 断网等环境问题：fail-open
+    else:
+        assert v.alive is False
 
 
 @pytest.mark.asyncio

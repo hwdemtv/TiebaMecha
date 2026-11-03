@@ -15,6 +15,7 @@ ERR_FORUM_INVALID = (340006, 340001)
 ERR_FORUM_BANNED = 3250004        # 吧务封禁（在该吧被封）
 ERR_ACCOUNT_BLACKLISTED = 400013  # 账号被该吧拉黑
 ERR_SILENT_INTERCEPT = 220012     # 发帖静默拦截（web 发帖接口无文本拒绝码）
+ERR_SIGN_LOAD_FAILED = 300004     # 签到数据加载失败（接口偶发抖动，10-03~07 电影吧连日复现后自愈）
 
 # ── 验证码 / 风控拦截 ──
 # 关键词取历史上两套实现的并集：batch_post 的 ["验证码","captcha","安全验证",

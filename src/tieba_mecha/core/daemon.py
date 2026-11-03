@@ -9,6 +9,7 @@ from .sign import (
     sign_all_accounts, sign_account_forums, sign_flow_lock,
     stagger_offset_seconds, SIGN_STAGGER_SETTING_KEY, SIGN_STAGGER_DEFAULT, SIGN_STAGGER_MAX,
 )
+from .logger import log_warn
 from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
@@ -19,6 +20,10 @@ from ..db.crud import get_db
 # 错峰排程的进程内幂等集合：(account_id, date)。重启后清空重放，
 # 重放安全性由核心流"今日已签剔除"保证——已签账号的 worker 零请求秒退
 _STAGGER_SPAWNED = set()
+
+# 签到缺席对账：每进程每天只排一次（对账为只读检查，重排无副作用）
+_ATTENDANCE_CHECK_SPAWNED: set = set()
+ATTENDANCE_CHECK_BUFFER_MIN = 90  # 错峰窗结束后的宽限：覆盖遇锁重试(50min)+跑批时长
 
 
 async def _stagger_account_worker(account_id: int, run_at: datetime, attempt: int = 1):
@@ -110,7 +115,81 @@ async def _register_staggered_signs(db):
         await db.set_setting("last_daemon_sign_date", today.isoformat())
     except Exception:
         pass
+    await _spawn_attendance_check(window)
     return True
+
+
+async def _sign_attendance_check():
+    """当日签到缺席对账：核对每个参与定时签到的账号是否留下当日签到活动。
+
+    判缺席口径：该账号既无任何 is_sign_today 标记、当日也无 SignLog 记录
+    （成功/失败/拟人跳过均算活动）= 整号一轮都没跑。10-21（6号+1341）、
+    10-30（9号+187）两次单日整号缺席实测既无日志也无告警，此处闭环。
+    """
+    db = await get_db()
+    try:
+        accounts = await db.get_scheduled_sign_accounts()
+    except Exception as e:
+        print(f"[{datetime.now()}] [DAEMON] 签到缺席对账读取参与账号失败: {e}")
+        return
+    absent = []
+    for account in accounts:
+        if account.status in ("suspended", "suspended_proxy", "banned", "expired"):
+            continue
+        try:
+            forums = await db.get_forums(account.id, include_banned=False)
+        except Exception:
+            continue
+        if not forums or any(f.is_sign_today for f in forums):
+            continue
+        try:
+            if await db.has_sign_activity_today(account.id):
+                continue
+        except Exception:
+            continue
+        absent.append(account.name)
+    if absent:
+        await log_warn(
+            f"⚠️ 签到缺席告警：账号 {absent} 截至当前无任何当日签到记录"
+            f"（无已签标记也无签到日志），请核实是否整号漏签"
+        )
+    else:
+        print(f"[{datetime.now()}] [DAEMON] 签到缺席对账: 全部参与账号均有当日活动")
+
+
+async def _spawn_attendance_check(window_minutes: float, extra_delay_min: float = 0.0):
+    """把当日缺席对账排到错峰窗结束后（每进程每天一次，重启重放幂等）。"""
+    from datetime import time as dtime
+
+    today = datetime.now().date()
+    if today in _ATTENDANCE_CHECK_SPAWNED:
+        return
+    _ATTENDANCE_CHECK_SPAWNED.add(today)
+
+    db = await get_db()
+    try:
+        raw = await db.get_setting("schedule", "{}")
+        sched = json.loads(raw) if raw else {}
+    except (ValueError, TypeError):
+        sched = {}
+    try:
+        h, m = str(sched.get("sign_time", "08:00")).split(":")
+        base = datetime.combine(today, dtime(int(h), int(m)))
+    except (ValueError, TypeError):
+        base = datetime.combine(today, dtime(8, 0))
+
+    target = base + timedelta(minutes=window_minutes + ATTENDANCE_CHECK_BUFFER_MIN + extra_delay_min)
+    if target <= datetime.now():
+        target = datetime.now() + timedelta(minutes=ATTENDANCE_CHECK_BUFFER_MIN)
+    print(f"[{datetime.now()}] [DAEMON] 签到缺席对账排程 → {target:%H:%M:%S}")
+    asyncio.create_task(_run_attendance_check_at(target))
+
+
+async def _run_attendance_check_at(target: datetime):
+    delay = (target - datetime.now()).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+    await _sign_attendance_check()
 
 
 async def do_sign_task(attempt: int = 1, jitter: bool = True):
@@ -162,6 +241,9 @@ async def do_sign_task(attempt: int = 1, jitter: bool = True):
         d_min, d_max, ad_min, ad_max = 5.0, 15.0, 30.0, 120.0
 
     print(f"[{datetime.now()}] [DAEMON] 触发定时签到流 | 串行全扫 {len(scheduled)} 个参与账号 | 吧间延迟: {d_min}-{d_max}s")
+
+    # 串行路径同样排缺席对账（窗=0 + 额外宽限：全扫可达数小时且遇锁重试至多 3×40min）
+    await _spawn_attendance_check(0.0, extra_delay_min=60)
 
     # 与手动签到互斥：定时触发不排队等待（一轮全扫可能长达数小时）；
     # 遇锁不再当日放弃——挂 40 分钟一次性重试，至多 3 次（守护缺签事故闭环）
