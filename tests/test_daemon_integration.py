@@ -305,6 +305,52 @@ class TestDaemonIntegration:
         forums = {f.fname: f for f in await db.get_forums(acc_b.id)}
         assert forums["stg_b"].is_sign_today is False, "其他账号不得被连带签到"
 
+    async def test_stagger_worker_locked_retries_until_deadline(self, db):
+        """方案B: 遇锁不再按固定5次放弃——对账时刻前持续挂重试（整号缺席根治）"""
+        from tieba_mecha.core.account import add_account
+        from tieba_mecha.core import daemon as daemon_mod
+        from datetime import timedelta as td
+
+        real_worker = daemon_mod._stagger_account_worker
+        acc = await add_account(db=db, name="acc_lock", bduss="a" * 192, stoken="b" * 64)
+        await db.add_forum(fid=1, fname="lock_forum", account_id=acc.id)
+        # 对账时刻 = sign_time + 错峰窗 + 90min 宽限 = 15:30（未来）→ 应挂重试
+        await db.set_setting("schedule", json.dumps({"sign_time": "08:00"}))
+        await db.set_setting("sign_stagger_minutes", "360")
+
+        fake_lock = MagicMock()
+        fake_lock.locked = lambda: True
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+             patch("tieba_mecha.core.daemon.sign_flow_lock", fake_lock), \
+             patch.object(daemon_mod, "_stagger_account_worker", new_callable=AsyncMock) as mock_self:
+            await real_worker(acc.id, datetime.now() - td(minutes=1))
+
+        mock_self.assert_called_once(), "对账时刻前遇锁应挂 10 分钟重试而非放弃"
+        rescheduled_at = mock_self.call_args.args[1]
+        assert datetime.now() <= rescheduled_at <= datetime.now() + td(minutes=11)
+
+    async def test_stagger_worker_locked_gives_up_past_deadline(self, db):
+        """方案B: 过对账时刻仍遇锁才当日放弃，由缺席对账如实点名"""
+        from tieba_mecha.core.account import add_account
+        from tieba_mecha.core import daemon as daemon_mod
+        from datetime import timedelta as td
+
+        real_worker = daemon_mod._stagger_account_worker
+        acc = await add_account(db=db, name="acc_lock2", bduss="a" * 192, stoken="b" * 64)
+        await db.add_forum(fid=1, fname="lock_forum2", account_id=acc.id)
+        # 对账时刻 = 00:00 + 窗0 + 90min 宽限 = 当日 01:30（已过）→ 放弃
+        await db.set_setting("schedule", json.dumps({"sign_time": "00:00"}))
+        await db.set_setting("sign_stagger_minutes", "0")
+
+        fake_lock = MagicMock()
+        fake_lock.locked = lambda: True
+        with patch("tieba_mecha.core.daemon.get_db", return_value=db), \
+             patch("tieba_mecha.core.daemon.sign_flow_lock", fake_lock), \
+             patch.object(daemon_mod, "_stagger_account_worker", new_callable=AsyncMock) as mock_self:
+            await real_worker(acc.id, datetime.now() - td(minutes=1))
+
+        mock_self.assert_not_called(), "耐心耗尽后不得再挂重试"
+
     async def test_do_sign_task_tolerates_corrupted_schedule_json(self, db):
         """回归: schedule 为损坏 JSON 时守护流程不整体失败（错峰锚点解析回退默认 08:00）"""
         from tieba_mecha.core.account import add_account

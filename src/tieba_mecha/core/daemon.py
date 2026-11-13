@@ -23,10 +23,36 @@ _STAGGER_SPAWNED = set()
 
 # 签到缺席对账：每进程每天只排一次（对账为只读检查，重排无副作用）
 _ATTENDANCE_CHECK_SPAWNED: set = set()
-ATTENDANCE_CHECK_BUFFER_MIN = 90  # 错峰窗结束后的宽限：覆盖遇锁重试(50min)+跑批时长
+ATTENDANCE_CHECK_BUFFER_MIN = 90  # 错峰窗结束后的宽限：对账排程与遇锁重试耐心共用（整轮实跑可达 ~90min）
 
 
-async def _stagger_account_worker(account_id: int, run_at: datetime, attempt: int = 1):
+async def _sign_retry_deadline(db) -> datetime:
+    """遇锁重试耐心上限 = 当日缺席对账时刻（sign_time + 错峰窗 + 宽限）。
+
+    其他账号整轮实跑实测 40-90 分钟，旧固定 5 次预算（50min）会把排在长跑
+    窗口里的整号静默跳过（11-09/11-11/11-12 三次整号缺席同根因）。
+    """
+    from datetime import time as dtime
+
+    try:
+        window = float(await db.get_setting(SIGN_STAGGER_SETTING_KEY, str(SIGN_STAGGER_DEFAULT)))
+    except Exception:
+        window = SIGN_STAGGER_DEFAULT
+    window = max(0.0, min(SIGN_STAGGER_MAX, window))
+    try:
+        raw = await db.get_setting("schedule", "{}")
+        sched = json.loads(raw) if raw else {}
+    except (ValueError, TypeError):
+        sched = {}
+    try:
+        h, m = str(sched.get("sign_time", "08:00")).split(":")
+        base = datetime.combine(datetime.now().date(), dtime(int(h), int(m)))
+    except (ValueError, TypeError):
+        base = datetime.combine(datetime.now().date(), dtime(8, 0))
+    return base + timedelta(minutes=window + ATTENDANCE_CHECK_BUFFER_MIN)
+
+
+async def _stagger_account_worker(account_id: int, run_at: datetime):
     """错峰账号签到 worker：睡到既定时刻 → 有待签才拿锁执行（不长时间持锁）。"""
     delay = (run_at - datetime.now()).total_seconds()
     if delay > 0:
@@ -42,14 +68,16 @@ async def _stagger_account_worker(account_id: int, run_at: datetime, attempt: in
         print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}]：今日已全部签毕，零请求跳过")
         return
 
-    # 遇锁（手动流/其他错峰 worker 占用）：进程内延迟重试，至多 5 次
+    # 遇锁（手动流/其他错峰 worker 占用）：10 分钟节拍持续重试，耐心直到当日
+    # 缺席对账时刻；对账前仍拿不到锁才放弃，由对账如实点名。
     if sign_flow_lock.locked():
-        if attempt >= 5:
-            print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 连续遇锁放弃（次日按新种子重排）")
+        deadline = await _sign_retry_deadline(db)
+        if datetime.now() >= deadline:
+            print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 遇锁耐心耗尽，今日放弃（对账将点名；次日按新种子重排）")
             return
-        print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 遇锁，10 分钟后重试 ({attempt}/4)")
+        print(f"[{datetime.now()}] [DAEMON] 错峰签到 [{account.name}] 遇锁，10 分钟后重试（耐心至 {deadline:%H:%M}）")
         asyncio.create_task(
-            _stagger_account_worker(account_id, datetime.now() + timedelta(minutes=10), attempt + 1)
+            _stagger_account_worker(account_id, datetime.now() + timedelta(minutes=10))
         )
         return
 
