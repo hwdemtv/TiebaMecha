@@ -12,7 +12,7 @@ from ...core.ai_optimizer import AIOptimizer, _decrypt_api_key, _encrypt_api_key
 from ...core.auth import get_auth_manager, AuthStatus
 from ...core.web_auth import is_password_set, set_password, check_password, clear_password
 from ...core.updater import get_update_manager
-from ...core.daemon import daemon_instance, do_sign_task, do_auto_monitor_task, do_batch_post_tasks, do_auto_bump_task, do_maintenance_task, do_auth_check_task
+from ...core.daemon import daemon_instance, do_sign_task, do_auto_monitor_task, do_batch_post_tasks, do_auto_bump_task, do_maintenance_task, do_auth_check_task, do_database_backup_task, MIN_MAINT_INTERVAL_HOURS, MAX_MAINT_INTERVAL_HOURS
 from ...core.logger import get_recent_logs, get_log_queue
 from ..components import icons
 
@@ -143,6 +143,8 @@ class SettingsPage:
             "auth_check_job": "授权状态心跳校准",
             "auto_bump_job": "自动回帖(自顶)调度",
             "biowarming_job": "BioWarming 养号维护",
+            "backup_job": "数据库自动备份",
+            "survival_check_job": "存活检测轮转",
         }
         self.JOB_FUNCS = {
             "global_sign_job": do_sign_task,
@@ -152,6 +154,7 @@ class SettingsPage:
             "auth_check_job": do_auth_check_task,
             "auto_bump_job": do_auto_bump_task,
             "biowarming_job": do_maintenance_task,
+            "backup_job": do_database_backup_task,
         }
         for job in scheduler.get_jobs():
             next_run = job.next_run_time
@@ -166,7 +169,10 @@ class SettingsPage:
         if not hasattr(self, "tabs"): return
 
         # 通用配置更新
-        self.ai_key_field.value = self._settings.get("ai_api_key", "")
+        # 密钥不回显：未改动过的输入框保持为空（提示是否已配置），保存时沿用库内已存值
+        self._secret_edited.clear()
+        self.ai_key_field.value = ""
+        self.ai_key_field.hint_text = "已配置（未修改则保持不变）" if self._settings.get("ai_api_key") else ""
         self.ai_url_field.value = self._settings.get("ai_base_url", "")
         self.ai_model_field.value = self._settings.get("ai_model", "")
         self.ai_prompt_field.value = self._settings.get("ai_system_prompt", "")
@@ -185,7 +191,8 @@ class SettingsPage:
             self.web_password_status.value = "未设置"; self.web_password_status.color = COLORS.AMBER
 
         # 授权页签
-        self.license_key_field.value = self._settings.get("license_key", "")
+        self.license_key_field.value = ""
+        self.license_key_field.hint_text = "已配置（未修改则保持不变）" if self._settings.get("license_key") else ""
         self.hwid_field.value = f"硬件指纹 (HWID): {self._settings.get('hwid', '获取中...')}"
         am = await get_auth_manager()
         status_map = {
@@ -420,7 +427,10 @@ class SettingsPage:
 
     # --- Initialization Helpers ---
     def _init_general_fields(self):
-        self.ai_key_field = ft.TextField(label="AI API KEY", password=True, can_reveal_password=True, expand=True)
+        # 密钥框不回显库内已存值（它会被下发到浏览器）：未改动时保持为空，保存时沿用库内值
+        self._secret_edited: set[str] = set()
+        self.ai_key_field = ft.TextField(label="AI API KEY", password=True, can_reveal_password=True, expand=True,
+                                         on_change=self._mark_secret_edited("ai_key"))
         self.ai_url_field = ft.TextField(label="Base URL", expand=True)
         self.ai_model_field = ft.TextField(label="Model", width=150)
         self.ai_prompt_field = ft.TextField(label="System Prompt", multiline=True, min_lines=3, max_lines=6, text_size=12)
@@ -441,11 +451,18 @@ class SettingsPage:
         self.proxy_fallback_switch = ft.Switch(label="代理容灾", value=False)
         self._init_general_sec_fields()
 
+    def _mark_secret_edited(self, key: str):
+        """密钥输入框的改动标记：只有用户实际输入过，保存时才覆盖库内已存值（清空后保存 = 删除）"""
+        def _handler(e):
+            self._secret_edited.add(key)
+        return _handler
+
     def _init_auth_fields(self):
         self.auth_badge = ft.Chip(label=ft.Text("..."))
         self.auth_desc = ft.Text("...", size=12, color="onSurfaceVariant")
         self.auth_expiry_text = ft.Text("...", size=13)
-        self.license_key_field = ft.TextField(label="License Key", password=True, can_reveal_password=True, expand=True)
+        self.license_key_field = ft.TextField(label="License Key", password=True, can_reveal_password=True, expand=True,
+                                              on_change=self._mark_secret_edited("license_key"))
         self.hwid_field = ft.Text("HWID: ...", size=11, color="onSurfaceVariant", selectable=True)
         self.verify_auth_btn = ft.FilledTonalButton("核销授权", icon=icons.GPP_GOOD_ROUNDED, on_click=self._verify_license_online)
 
@@ -583,17 +600,37 @@ class SettingsPage:
     async def _reload_daemon(self, e):
         await daemon_instance.reload(self.db); await self._load_daemon_info(); await self.refresh_ui(); self._show_snackbar("调度器已重载", "success")
 
+    def _validate_maint_interval(self) -> str | None:
+        """养号间隔保存前校验：返回错误文案（None 表示通过）
+
+        间隔为 0/负数时守护侧会让调度器停摆或养号背靠背连跑（见 core.daemon.MIN_MAINT_INTERVAL_HOURS），
+        不合法的值不落库。
+        """
+        raw = self.maint_fields["maint_interval_hours"].value
+        try:
+            hours = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return "养号间隔必须是一个数字（单位：小时）"
+        if not (MIN_MAINT_INTERVAL_HOURS <= hours <= MAX_MAINT_INTERVAL_HOURS):
+            return (f"养号间隔须在 {MIN_MAINT_INTERVAL_HOURS:g} ~ {MAX_MAINT_INTERVAL_HOURS:g} 小时之间"
+                    "（0 或负数会让调度器停摆）")
+        return None
+
     async def _do_save(self, e):
         if not self.db: return
+        err = self._validate_maint_interval()
+        if err:
+            self._show_snackbar(err, "error")
+            return
         try:
             config = {
-                "ai_api_key": _encrypt_api_key(self.ai_key_field.value), "ai_base_url": self.ai_url_field.value,
+                "ai_base_url": self.ai_url_field.value,
                 "ai_model": self.ai_model_field.value, "ai_system_prompt": self.ai_prompt_field.value,
                 "proxy_fallback": "true" if self.proxy_fallback_switch.value else "false",
                 "heartbeat_interval": self.heartbeat_field.value, "delay_min": self.delay_min_field.value, "delay_max": self.delay_max_field.value,
                 "sign_skip_probability": self.sign_skip_field.value,
                 "quiet_start": self.quiet_start_field.value, "quiet_end": self.quiet_end_field.value,
-                "license_key": self.license_key_field.value, "obfuscator_density": str(self.obf_density_slider.value),
+                "obfuscator_density": str(self.obf_density_slider.value),
                 "obfuscator_symbols": "true" if self.obf_symbols_switch.value else "false",
                 "obfuscator_spacing": "true" if self.obf_spacing_switch.value else "false",
                 "obfuscator_shuffling": "true" if self.obf_shuffling_switch.value else "false",
@@ -616,6 +653,11 @@ class SettingsPage:
                 "maint_harvest_max_per_cycle": self.maint_fields["maint_harvest_max_per_cycle"].value,
                 "maint_harvest_max_age_days": self.maint_fields["maint_harvest_max_age_days"].value,
             }
+            # 密钥只在用户实际改动过时写入（清空后保存 = 删除）；未改动则沿用库内已存值
+            if "ai_key" in self._secret_edited:
+                config["ai_api_key"] = _encrypt_api_key(self.ai_key_field.value)
+            if "license_key" in self._secret_edited:
+                config["license_key"] = self.license_key_field.value
             await self.db.set_settings_bulk(config)
             await daemon_instance.reload(self.db) # 强制刷新调度器
             self._show_snackbar("所有设置已保存", "success")
@@ -662,7 +704,9 @@ class SettingsPage:
             if btn:
                 btn.disabled = True
                 self.page.update()
-            await self.db.set_setting("license_key", self.license_key_field.value)
+            # 授权框不回显已存 Key：只有用户实际改动过才覆盖库内值，否则原样保留
+            if "license_key" in self._secret_edited:
+                await self.db.set_setting("license_key", self.license_key_field.value)
             am = await get_auth_manager()
             if await am.verify_online(): self._show_snackbar("授权成功", "success")
             else: self._show_snackbar("验证失败", "error")

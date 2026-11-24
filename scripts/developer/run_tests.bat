@@ -1,62 +1,33 @@
 @echo off
 chcp 65001 >nul
-echo.
-echo ========================================
-echo   TiebaMecha Web UI 启动测试
-echo ========================================
-echo.
-
 setlocal
-
-REM 设置环境变量
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 
-echo 1. 测试原始脚本 (可能失败)
-echo   命令: python start_web_fix.py
-echo.
-pause
-python start_web_fix.py
-if errorlevel 1 (
-    echo.
-    echo ❌ 原始脚本失败 (预期中)
-    pause
+rem 跑测试的入口包装：实际逻辑在 run_tests.py（根目录定位、参数透传都在那边）。
+rem 此前本文件是一段早已失效的「Web UI 启动测试」，引用了 4 个不存在的脚本
+rem （2026-11-24 体检时清理）。
+rem 用法：
+rem   run_tests.bat                 跑常规门禁（不含 tests/manual）
+rem   run_tests.bat tests/test_x.py 只跑指定文件
+rem   run_tests.bat --cov           带覆盖率
+
+rem 切到项目根目录（本脚本位于 scripts\developer\ 下）
+pushd "%~dp0..\.."
+
+if "%~1"=="" (
+    python scripts\developer\run_tests.py --ignore=tests/manual %*
+) else (
+    python scripts\developer\run_tests.py %*
 )
+set EXITCODE=%ERRORLEVEL%
 
+popd
 echo.
-echo ========================================
-echo 2. 测试简单修复脚本
-echo   命令: python start_web_simple.py
-echo.
+if %EXITCODE%==0 (
+    echo [OK] 测试通过
+) else (
+    echo [FAIL] 测试失败，退出码 %EXITCODE%
+)
 pause
-python start_web_simple.py
-
-echo.
-echo ========================================
-echo 3. 测试猴子补丁修复脚本
-echo   命令: python start_web_monkeypatch.py
-echo.
-pause
-python start_web_monkeypatch.py
-
-echo.
-echo ========================================
-echo 4. 测试新启动脚本
-echo   命令: python start_web.py
-echo.
-pause
-python start_web.py
-
-echo.
-echo ========================================
-echo 5. 测试 uvicorn 修复
-echo   命令: python test_uvicorn_fix.py
-echo.
-pause
-python test_uvicorn_fix.py
-
-echo.
-echo ========================================
-echo 所有测试完成！
-echo.
-pause
+exit /b %EXITCODE%

@@ -5,7 +5,9 @@ description = "Cyber-Mecha style Baidu Tieba management tool with CLI and Web UI
 authors = [{ name = "Developer" }]
 requires-python = ">=3.10,<3.15"
 dependencies = [
-    "aiotieba",
+    # 代理注入（core/client_factory.py）依赖 aiotieba 4.6.x 的内部结构；不锁上界时，
+    # 升级带来的结构变化会让代理悄悄失效而无人察觉（2026-11-24 体检的起因）
+    "aiotieba>=4.6.4,<5",
     "flet==0.23.2",
     "typer>=0.9.0",
     "sqlalchemy[asyncio]>=2.0",
@@ -19,6 +21,11 @@ dependencies = [
     "socksio",        # SOCKS 代理支持
     "rich>=13.0",     # CLI 美化输出
     "pydantic>=2.0",  # 数据模型校验
+    # 以下三个此前靠 flet 间接带入，但 start_web.py / web/downloads.py 直接 import 它们；
+    # flet 一旦调整自身依赖就会断，故显式声明（2026-11-24）
+    "uvicorn>=0.42",
+    "fastapi>=0.135",
+    "starlette>=1.0",
 ]
 
 [project.optional-dependencies]

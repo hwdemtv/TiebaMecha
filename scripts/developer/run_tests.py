@@ -17,7 +17,9 @@ from pathlib import Path
 def main():
     """Run pytest with the specified arguments."""
     # Ensure we're in the project root
-    project_root = Path(__file__).parent
+    # 本脚本位于 scripts/developer/ 下：根目录是上两级（此前写成脚本所在目录，
+    # 会在 scripts/developer 里找 tests/ 而一无所获——2026-11-24 体检）
+    project_root = Path(__file__).resolve().parents[2]
 
     # Build pytest command
     cmd = [sys.executable, "-m", "pytest"]

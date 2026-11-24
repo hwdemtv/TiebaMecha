@@ -1,0 +1,104 @@
+# 生产环境依赖锁定（Python 3.12.3 / Ubuntu 24.04）
+#
+# 来源：2026-11-24 在生产服务器 192.168.31.69 的 venv 上 `pip freeze` 的完整快照
+#（只读导出，未改动服务器）。项目此前没有任何锁文件：pyproject.toml 里几乎全是 >= 下界，
+# 开发机（Python 3.11.9）与服务器各自解析出一套不同版本——11-24 实测两侧 aiohttp /
+# SQLAlchemy / uvicorn / cryptography 版本均不一致，出问题时无法复现「线上到底是哪一套」。
+#
+# 用途：
+#   - 重建 / 迁移服务器环境：`python3.12 -m pip install -r requirements-server.lock`
+#   - 排查线上问题时，在开发机复刻同一套版本做对照
+# pyproject.toml 仍然声明「允许的范围」，本文件记录「实际在跑的版本」。两者不一致时
+# 以 pyproject 的范围为准判断兼容性，以本文件为准判断线上现状。升级依赖后请重新导出：
+#   ssh hw@192.168.31.69 'cd /home/hw/TiebaMecha && .venv/bin/python -m pip freeze'
+#
+# 注意：这是服务器 venv 的全量快照，其中也包含 pytest / py-spy 等开发工具（服务器上装过）。
+# 已知问题（11-24 审计）：下列版本命中公开安全公告，升级需单独评估、逐项验证：
+#   aiohttp 3.13.5（客户端相关：连接复用时 SNI 校验绕过、畸形响应越界读）
+#   starlette 1.0.0（Web 控制台的 ASGI 层）、certifi 2026.2.25（内置根证书含已泄露的 CA）
+#   cryptography 46.0.7、urllib3 2.6.3、multidict 6.7.1 等
+
+# —— 直接依赖（pyproject.toml 声明 + 源码直接 import）——
+aiohttp==3.13.5
+aiohttp_socks==0.11.0
+aiosqlite==0.22.1
+aiotieba==4.6.4
+APScheduler==3.11.2
+cryptography==46.0.7
+fastapi==0.135.3
+flet==0.23.2
+httpx==0.28.1
+pydantic==2.12.5
+python-dotenv==1.2.2
+rich==14.3.4
+socksio==1.0.0
+SQLAlchemy==2.0.49
+starlette==1.0.0
+typer==0.24.1
+uvicorn==0.44.0
+
+# —— 开发工具 ——
+iniconfig==2.3.0
+pluggy==1.6.0
+py-spy==0.4.2
+pytest-asyncio==0.23.5
+pytest==8.0.0
+
+# —— 上述依赖的间接依赖 ——
+aiohappyeyeballs==2.6.1
+aiosignal==1.4.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+arrow==1.4.0
+attrs==26.1.0
+beautifulsoup4==4.14.3
+binaryornot==0.6.0
+certifi==2026.2.25
+cffi==2.0.0
+charset-normalizer==3.4.7
+click==8.3.2
+cookiecutter==2.7.1
+flet-core==0.23.2
+flet-runtime==0.23.2
+frozenlist==1.8.0
+greenlet==3.4.0
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.7.1
+idna==3.11
+Jinja2==3.1.6
+lxml==6.0.3
+markdown-it-py==4.0.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+multidict==6.7.1
+oauthlib==3.3.1
+packaging==23.2
+propcache==0.4.1
+protobuf==7.34.1
+pycparser==3.0
+pydantic_core==2.41.5
+Pygments==2.20.0
+pypng==0.20220715.0
+python-dateutil==2.9.0.post0
+python-slugify==8.0.4
+python-socks==2.8.1
+PyYAML==6.0.3
+qrcode==7.4.2
+repath==0.9.0
+requests==2.33.1
+shellingham==1.5.4
+six==1.17.0
+soupsieve==2.8.3
+text-unidecode==1.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2026.1
+tzlocal==5.3.1
+urllib3==2.6.3
+uvloop==0.22.1
+watchdog==4.0.2
+watchfiles==1.1.1
+websockets==16.0
+yarl==1.23.0

@@ -55,15 +55,18 @@ def _bigram_jaccard(text_a: str, text_b: str, min_len: int = 20) -> float:
 
 
 def _encrypt_api_key(value: str) -> str:
-    """加密 API Key 后存储"""
+    """加密 API Key 后存储。
+
+    加密失败直接抛出，不回退明文：此前这里捕获异常后把明文 key 原样返回，只留一条
+    warning——环境变量缺失或密钥过短时保存设置页，明文 key 就写进了 settings.ai_api_key
+    （与 account.py「缺环境变量就报错、不兜底」的约定相反；2026-11-24 体检）。
+    调用方（设置页保存）捕获后提示「保存失败」。
+    """
     if not value:
         return value
-    try:
-        from .account import encrypt_value
-        return encrypt_value(value)
-    except Exception:
-        logger.warning("API Key 加密失败，使用明文存储")
-        return value
+    from .account import encrypt_value
+
+    return encrypt_value(value)
 
 
 def _decrypt_api_key(value: str) -> str:

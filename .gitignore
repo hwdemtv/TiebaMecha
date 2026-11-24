@@ -173,6 +173,9 @@ tmp/
 # Claude Code
 .claude/
 
+# ZCode（AI 协作工具的计划与配置，同 .claude/）
+.zcode/
+
  
 # Uploads directory
 uploads/

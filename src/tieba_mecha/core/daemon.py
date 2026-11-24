@@ -9,13 +9,14 @@ from .sign import (
     sign_all_accounts, sign_account_forums, sign_flow_lock,
     stagger_offset_seconds, SIGN_STAGGER_SETTING_KEY, SIGN_STAGGER_DEFAULT, SIGN_STAGGER_MAX,
 )
-from .logger import log_warn
+from .logger import log_error, log_info, log_warn
 from .auto_rule import apply_rules_to_threads
 from .client_factory import create_client
 from .batch_post import BatchPostManager, BatchPostTask as CoreBatchPostTask
 from .auth import get_auth_manager
 from .account import get_account_credentials
-from ..db.crud import get_db
+from ..db.backup import DEFAULT_KEEP_DAYS, default_backup_dir, latest_backup_age, run_scheduled_backup
+from ..db.crud import DEFAULT_DB_PATH, get_db
 
 # 错峰排程的进程内幂等集合：(account_id, date)。重启后清空重放，
 # 重放安全性由核心流"今日已签剔除"保证——已签账号的 worker 零请求秒退
@@ -24,6 +25,88 @@ _STAGGER_SPAWNED = set()
 # 签到缺席对账：每进程每天只排一次（对账为只读检查，重排无副作用）
 _ATTENDANCE_CHECK_SPAWNED: set = set()
 ATTENDANCE_CHECK_BUFFER_MIN = 90  # 错峰窗结束后的宽限：对账排程与遇锁重试耐心共用（整轮实跑可达 ~90min）
+
+# 养号间隔下限（小时）。间隔为 0 时 APScheduler 把它当成约 1 秒、养号任务背靠背连跑；
+# 为负数时实测整个调度器静默停摆（所有 job 不再触发而 running 仍为 True，2026-11-24 复现）。
+# 读取端钳制 + 设置页保存校验双保险，缺省回落 4 小时。
+# 上限兜住 inf / 天文数字：datetime + timedelta 会溢出，同样会让调度器起不来。
+MIN_MAINT_INTERVAL_HOURS = 0.25
+MAX_MAINT_INTERVAL_HOURS = 24 * 31
+DEFAULT_MAINT_INTERVAL_HOURS = 4.0
+
+
+def sanitize_maint_interval(raw) -> float:
+    """把用户配置的养号间隔规整为合法值：非数字、NaN、无穷、超出 [下限, 上限] 一律回落默认 4 小时"""
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAINT_INTERVAL_HOURS
+    if not (MIN_MAINT_INTERVAL_HOURS <= hours <= MAX_MAINT_INTERVAL_HOURS):  # 同时挡住 NaN（比较恒为 False）
+        return DEFAULT_MAINT_INTERVAL_HOURS
+    return hours
+
+
+# ---- 数据库每日自动备份（2026-11-24 全项目体检整改）----
+# 体检确认生产环境没有任何自动备份（systemd 无定时器、crontab 无备份项，仅有的几份
+# .bak 都是历次手术前手动留的）。这里补上守护侧的每日备份，实现在 db/backup.py。
+BACKUP_JOB_ID = "backup_job"
+BACKUP_HOUR, BACKUP_MINUTE = 4, 30   # 固定在凌晨低活跃时段；备份只读写本地文件，不产生任何贴吧请求
+BACKUP_STARTUP_DELAY_SEC = 300       # 启动补偿的延迟：给调度器与数据库初始化留出余量
+_BACKUP_STALE_SEC = 24 * 3600        # 近 24h 内没有备份才需要启动补偿
+
+# 后台任务强引用集合：asyncio 对 Task 只持弱引用，不保存引用的任务可能在执行途中被回收
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """启动后台任务并持有强引用（完成后自动移除）"""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
+async def do_database_backup_task():
+    """每日数据库备份（SQLite 在线快照，不停服务）。失败只记日志，不影响其它定时任务。
+
+    设置项：db_backup_enabled（默认 true）、db_backup_keep_days（默认 14，<=0 表示永久保留）。
+    """
+    db = await get_db()
+    try:
+        enabled = str(await db.get_setting("db_backup_enabled", "true")).strip().lower() != "false"
+    except Exception:
+        enabled = True
+    if not enabled:
+        return
+    try:
+        keep_days = int(await db.get_setting("db_backup_keep_days", str(DEFAULT_KEEP_DAYS)))
+    except (TypeError, ValueError):
+        keep_days = DEFAULT_KEEP_DAYS
+
+    try:
+        # sqlite3 是同步调用，放线程池执行，不阻塞事件循环上的签到/发帖任务
+        path, size_kb, pruned = await asyncio.to_thread(
+            run_scheduled_backup, DEFAULT_DB_PATH, default_backup_dir(DEFAULT_DB_PATH), keep_days
+        )
+        await log_info(f"数据库自动备份完成: {path.name} ({size_kb} KB)，清理过期备份 {pruned} 份")
+    except Exception as e:
+        await log_error(f"数据库自动备份失败: {type(e).__name__}: {e}")
+
+
+async def _backup_shortly_after_start():
+    """启动补偿：进程启动几分钟后，若近 24 小时内没有备份就补做一次。
+
+    固定时刻的 cron 只在进程恰好在线时触发；VM 关机、服务重启都会错过。
+    """
+    try:
+        await asyncio.sleep(BACKUP_STARTUP_DELAY_SEC)
+        age = latest_backup_age(default_backup_dir(DEFAULT_DB_PATH))
+        if age is None or age > _BACKUP_STALE_SEC:
+            await do_database_backup_task()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await log_error(f"数据库启动补偿备份异常: {type(e).__name__}: {e}")
 
 
 async def _sign_retry_deadline(db) -> datetime:
@@ -870,11 +953,11 @@ class TiebaMechaDaemon:
             # 尝试从库热加载签到 + 养号间隔
             db = await get_db()
 
-            # [Fix 8] 养号间隔可配置，默认 4 小时
+            # [Fix 8] 养号间隔可配置，默认 4 小时（sanitize_maint_interval 兜住 0/负数/非数字）
             try:
-                maint_hours = float(await db.get_setting("maint_interval_hours", "4"))
+                maint_hours = sanitize_maint_interval(await db.get_setting("maint_interval_hours", "4"))
             except Exception:
-                maint_hours = 4.0
+                maint_hours = DEFAULT_MAINT_INTERVAL_HOURS
             self.scheduler.add_job(do_maintenance_task, 'interval', hours=maint_hours, id="biowarming_job", replace_existing=True)
 
             # 存活检测轮转：增量探测已发帖写 survival_*，供 12h 存活治理消费新鲜数据
@@ -887,6 +970,15 @@ class TiebaMechaDaemon:
                 surv_hours = 12.0
             self.scheduler.add_job(do_survival_check_task, 'interval', hours=surv_hours, id="survival_check_job", replace_existing=True,
                                    next_run_time=datetime.now() + timedelta(minutes=3))  # 首轮启动后 3 分钟：由调度器管理，避免裸 create_task 在宿主 teardown 期开新连接
+
+            # 每日数据库备份：用固定本地时刻的 cron 而非 interval——interval 在进程重启后从头计时，
+            # 常重启的部署永远等不满 24 小时；misfire 宽限 1 小时，覆盖短暂的事件循环卡顿
+            self.scheduler.add_job(
+                do_database_backup_task, 'cron', hour=BACKUP_HOUR, minute=BACKUP_MINUTE,
+                id=BACKUP_JOB_ID, replace_existing=True, misfire_grace_time=3600, coalesce=True,
+            )
+            # 启动补偿：进程在备份时刻不在线（VM 关机 / 服务重启）时，启动后补一次
+            _spawn(_backup_shortly_after_start())
 
             await self.reload(db)
 
@@ -1029,6 +1121,10 @@ class TiebaMechaDaemon:
         if self._started:
             self.scheduler.shutdown()
             self._started = False
+            # 守护自己派发的后台任务（如启动补偿备份）随守护停止一并取消
+            for task in list(_BG_TASKS):
+                task.cancel()
+            _BG_TASKS.clear()
             
 # 全局唯一实例
 daemon_instance = TiebaMechaDaemon()
