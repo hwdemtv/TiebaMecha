@@ -42,8 +42,14 @@ def temp_db_path() -> Generator[Path, None, None]:
             db_path.unlink()
         except PermissionError:
             # Windows 上新写的 .db 可能被杀软/索引器短暂锁定，也可能是进程内泄漏的
-            # aiosqlite 连接线程：先短暂重试（前者可解），仍失败则取证再抛
+            # aiosqlite 连接线程：先短暂重试（前者可解），仍失败则取证再抛。
+            # 被取消的后台任务会留下不经连接池记账的孤儿连接（SQLAlchemy 2.0.48：查询结果
+            # 已回投、任务尚未恢复时被取消，session.close 不归还该连接），它只随 GC 关闭——
+            # 主动回收一轮让孤儿连接的线程开始关闭，再进重试循环（2026-11-24 体检整改：
+            # 此前守护类用例每次收尾都在这里确定性报 PermissionError）
+            import gc
             import time
+            gc.collect()
             for _ in range(5):
                 time.sleep(0.2)
                 try:
@@ -54,12 +60,38 @@ def temp_db_path() -> Generator[Path, None, None]:
             else:
                 import threading
 
-                import psutil
+                # psutil 是可选依赖（未在 pyproject 声明）：缺失时不能盖掉原始的 PermissionError
+                hits = []
+                try:
+                    import psutil
 
-                hits = [f.path for f in psutil.Process().open_files() if Path(f.path) == db_path]
-                threads = [t.name for t in threading.enumerate() if "aiosqlite" in t.name.lower()]
+                    hits = [f.path for f in psutil.Process().open_files() if Path(f.path) == db_path]
+                except ImportError:
+                    pass
+                threads = [t.name for t in threading.enumerate() if "connection_worker" in t.name.lower()]
                 print(f"\n[CONFTEST-DBG] unlink仍失败 hits={hits} aiosqlite_threads={threads}")
                 raise
+
+
+@pytest.fixture(autouse=True)
+def _offline_account_verification(monkeypatch):
+    """常规门禁禁止真实账号验证联网（autouse）。
+
+    core.account.add_account / refresh_account 默认走 verify_account，会用传入的 BDUSS
+    真实请求百度 get_self_info——全量套件此前每次跑批向百度发出 64 次请求（全是假
+    BDUSS，均被拒）。这里统一桩成确定性的离线失败：返回值与「百度拒绝无效凭据」时
+    完全一致，账号照样落 invalid: 状态，离线与有网结果相同。
+    需要真实验证逻辑的用例可向本夹具要回原函数后自行 monkeypatch。
+    """
+    from tieba_mecha.core import account as account_module
+
+    real_verify = account_module.verify_account
+
+    async def _offline_verify(bduss, stoken="", **kwargs):
+        return False, 0, "", "无法获取用户信息，请检查凭证是否有效"
+
+    monkeypatch.setattr(account_module, "verify_account", _offline_verify)
+    return real_verify
 
 
 @pytest_asyncio.fixture

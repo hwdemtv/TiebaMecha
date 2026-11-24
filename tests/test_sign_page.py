@@ -311,7 +311,8 @@ class TestForumHistoryDialog:
         await sign_page._show_forum_history(forums[0].id, "hist_forum")
 
         assert sign_page.page.open.called, "应通过 page.open() 打开弹窗"
-        assert not hasattr(sign_page.page, "dialog") or True  # MagicMock 恒真, 主断言在上
+        # （原先这里还有一条 `not hasattr(page, "dialog") or True`：page 是 MagicMock，
+        #   hasattr 恒真、断言恒假，靠 or True 蒙混过关——2026-11-24 删除）
 
     async def test_history_empty_state(self, sign_page, db):
         acc = await _add_account_with_forum(db, "acc_empty", [(8, "empty_forum", None)])

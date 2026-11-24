@@ -122,7 +122,8 @@ def test_candidate_requires_reply_threshold():
 
 def test_candidate_requires_keyword():
     assert is_harvest_candidate(_thread("今天天气不错", 100), 30) is False
-    assert is_harvest_candidate(_thread("求一部老电影名字", 100), 30) is False or True  # "求资源"类不含特征词则不中
+    # 「求资源」类求助帖标题不含采集特征词：回复再多也不中（断言曾写成 `is False or True` 恒真，2026-11-24 修正）
+    assert is_harvest_candidate(_thread("求一部老电影名字", 100), 30) is False
     # "电影"不是特征词、"4K"是
     assert is_harvest_candidate(_thread("1080P 老片修复对比", 50), 30) is True
 
@@ -451,30 +452,9 @@ def test_extract_share_id():
     assert extract_share_id("not a share link") == ""
 
 
-@pytest.mark.asyncio
-async def test_check_link_alive_real_quark_dead():
-    """真网实测（2026-11-03）：夸克假分享 id 走 token API 判死。
-    断网/风控环境下 fail-open 为未知，两种结果都接受（不脆）。"""
-    from tieba_mecha.core.link_check import check_link_alive
-
-    v = await check_link_alive("https://pan.quark.cn/s/fake123abcde", "quark", timeout=8)
-    if v.alive is None:
-        assert "检测异常" in v.detail or "未知" in v.detail  # 断网等环境问题：fail-open
-    else:
-        assert v.alive is False
-
-
-@pytest.mark.asyncio
-async def test_check_link_alive_real_baidu_dead(monkeypatch=None):
-    """真网实测（2026-10-06）：百度无效分享链返回 404 → 判死。
-    断网/风控环境下 fail-open 为未知，测试两种结果都接受（不脆）。"""
-    from tieba_mecha.core.link_check import check_link_alive
-
-    v = await check_link_alive("https://pan.baidu.com/s/1zzZZzzZZzz-ZzZZzZZzZZz", "baidu", timeout=8)
-    if v.alive is None:
-        assert "检测异常" in v.detail  # 断网等环境问题：fail-open
-    else:
-        assert v.alive is False
+# 真网实测（夸克/百度无效分享链判死）已移至 tests/manual/test_link_live.py：
+# 常规门禁不得依赖外网，也不应在每次跑批时向第三方网盘发请求（2026-11-24 体检整改）。
+# 判定逻辑由本文件上方的 judge_* 纯函数用例覆盖。
 
 
 def test_judge_gbk_body_still_matches():

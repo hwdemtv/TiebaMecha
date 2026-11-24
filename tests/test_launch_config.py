@@ -13,7 +13,8 @@ from tieba_mecha.web.pages.batch_post.preflight import (
 )
 
 
-@pytest.mark.asyncio
+# 说明：pytest 以 asyncio_mode=auto 运行，异步用例自动识别，不再给整个类打 asyncio 标记——
+# 类级标记会连带标到同步用例上（pytest 会逐条告警）。
 class TestLaunchConfig:
     async def test_merged_fnames_dedup_preserve_order(self):
         cfg = LaunchConfig(
@@ -66,7 +67,6 @@ class TestFormatDuration:
         assert format_duration(5400) == "约 1 小时 30 分钟"
 
 
-@pytest.mark.asyncio
 class TestPreflightService:
     async def _make_db(self, accounts=None, forums=None, materials=None):
         db = MagicMock()

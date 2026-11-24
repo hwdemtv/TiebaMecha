@@ -404,8 +404,11 @@ class TestNoDunderImport:
         from sqlalchemy import delete, select, update
 
         # These should be importable from the module level
+        # （断言曾写成 `... or True` 恒真，2026-11-24 修正为真实断言）
         from tieba_mecha.db import crud
-        assert hasattr(crud, 'delete') or True  # delete is imported at module level
+        assert hasattr(crud, "delete")
+        assert hasattr(crud, "select")
+        assert hasattr(crud, "update")
 
     def test_daemon_has_proper_imports(self):
         """Test daemon.py has proper top-level imports for random and timedelta."""
