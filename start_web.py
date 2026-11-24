@@ -141,11 +141,17 @@ async def main(page: ft.Page):
     db = await get_db()
     await app.initialize(db)
 
-def run_app(port: int = 9006):
+def run_app(port: int = 9006, host: str | None = None):
     """启动 Flet 应用"""
     # 确保上传目录存在，使用绝对路径避免工作目录问题
     upload_dir = os.path.abspath("uploads")
     os.makedirs(upload_dir, exist_ok=True)
+
+    # 监听地址：默认仍对所有网卡开放（局域网访问控制台的既有用法），可用环境变量
+    # TIEBA_MECHA_HOST 收窄——例如 127.0.0.1（仅本机，配合 SSH 隧道访问）或指定内网地址。
+    # 控制台未设密码时免密直进，凡能连到该端口的设备都是管理员：跨机访问请配合设置密码。
+    if host is None:
+        host = os.getenv("TIEBA_MECHA_HOST", "").strip() or "0.0.0.0"
 
     # 获取用于 Web 上传加密的密钥 (优先从环境变量读取，已在模块加载时设置)
     secret_key = os.getenv("FLET_SECRET_KEY") or os.getenv("TIEBA_MECHA_SECRET_KEY")
@@ -203,7 +209,7 @@ def run_app(port: int = 9006):
         import webbrowser as _webbrowser
         _threading.Timer(1.5, lambda: _webbrowser.open(f"http://127.0.0.1:{port}")).start()
 
-    uvicorn.run(asgi_app, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(asgi_app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

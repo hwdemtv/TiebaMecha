@@ -93,9 +93,11 @@ class TiebaMechaApp:
             on_click=lambda _: self.page.run_task(self._show_notifications)
         )
 
-        # 分组侧边导航栏（自定义结构，支持组标题与选中态同步）
+        # 分组侧边导航栏（自定义结构，支持组标题与选中态同步）。
+        # 认证通过前保持隐藏且不构建任何导航项（见 _rebuild_nav）
         self.nav_rail = ft.Container(
             width=80,
+            visible=False,
             bgcolor=with_opacity(0.1, "surface"),
             padding=ft.padding.only(top=6, bottom=10),
             content=ft.Column(
@@ -115,12 +117,15 @@ class TiebaMechaApp:
             animate=ft.Animation(400, ft.AnimationCurve.DECELERATE),
         )
 
+        # 导航栏右侧分隔线（认证前与导航栏一起隐藏）
+        self._divider = ft.VerticalDivider(width=1, color=with_opacity(0.1, "onSurface"), visible=False)
+
         # 组合布局
         self.page.add(
             ft.Row(
                 controls=[
                     self.nav_rail,
-                    ft.VerticalDivider(width=1, color=with_opacity(0.1, "onSurface")),
+                    self._divider,
                     self.content_area,
                 ],
                 expand=True,
@@ -128,46 +133,56 @@ class TiebaMechaApp:
             )
         )
 
+    def _is_authenticated(self) -> bool:
+        """当前会话是否已通过 Web 认证"""
+        return self.page.session_id in _authenticated_sessions
+
     def _rebuild_nav(self):
-        """根据 _selected_page 重建侧栏控件（登录页隐藏前后的重建都走这里）"""
-        bell = ft.Container(
-            content=self.notification_bell,
-            padding=ft.padding.only(bottom=8),
-            alignment=ft.alignment.center,
-        )
-        controls: list = [bell]
-        for title, keys in self._nav_groups:
-            if title:
-                controls.append(ft.Container(
-                    content=ft.Text(
-                        title, size=9, weight=ft.FontWeight.W_500,
-                        color=with_opacity(0.45, "onSurfaceVariant"),
-                    ),
-                    padding=ft.padding.only(top=9, bottom=3),
-                    alignment=ft.alignment.center,
-                ))
-            for key in keys:
-                icon, selected_icon, label = self._nav_items[key]
-                selected = self._selected_page == key
-                controls.append(ft.Container(
-                    content=ft.Column([
-                        ft.Icon(
-                            selected_icon if selected else icon,
-                            size=21,
-                            color="primary" if selected else "onSurfaceVariant",
+        """根据 _selected_page 重建侧栏控件（登录页隐藏前后的重建都走这里）
+
+        未认证会话只构建空侧栏：导航项（含通知铃）带 on_click 处理器，一旦挂进控件树，
+        客户端就能凭控件 ID 直接派发点击事件——仅设 visible=False 挡不住伪造事件。
+        """
+        controls: list = []
+        if self._is_authenticated():
+            bell = ft.Container(
+                content=self.notification_bell,
+                padding=ft.padding.only(bottom=8),
+                alignment=ft.alignment.center,
+            )
+            controls.append(bell)
+            for title, keys in self._nav_groups:
+                if title:
+                    controls.append(ft.Container(
+                        content=ft.Text(
+                            title, size=9, weight=ft.FontWeight.W_500,
+                            color=with_opacity(0.45, "onSurfaceVariant"),
                         ),
-                        ft.Text(
-                            label, size=10,
-                            weight=ft.FontWeight.BOLD if selected else ft.FontWeight.W_500,
-                            color="primary" if selected else "onSurfaceVariant",
-                        ),
-                    ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                    width=72,
-                    padding=ft.padding.symmetric(vertical=5),
-                    border_radius=10,
-                    bgcolor=with_opacity(0.09, "primary") if selected else None,
-                    on_click=lambda e, k=key: self.page.run_task(self._navigate, k),
-                ))
+                        padding=ft.padding.only(top=9, bottom=3),
+                        alignment=ft.alignment.center,
+                    ))
+                for key in keys:
+                    icon, selected_icon, label = self._nav_items[key]
+                    selected = self._selected_page == key
+                    controls.append(ft.Container(
+                        content=ft.Column([
+                            ft.Icon(
+                                selected_icon if selected else icon,
+                                size=21,
+                                color="primary" if selected else "onSurfaceVariant",
+                            ),
+                            ft.Text(
+                                label, size=10,
+                                weight=ft.FontWeight.BOLD if selected else ft.FontWeight.W_500,
+                                color="primary" if selected else "onSurfaceVariant",
+                            ),
+                        ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                        width=72,
+                        padding=ft.padding.symmetric(vertical=5),
+                        border_radius=10,
+                        bgcolor=with_opacity(0.09, "primary") if selected else None,
+                        on_click=lambda e, k=key: self.page.run_task(self._navigate, k),
+                    ))
         self.nav_rail.content.controls = controls
         try:
             self.nav_rail.update()
@@ -194,38 +209,24 @@ class TiebaMechaApp:
             await log_info("密码重置模式：已清除 Web 密码，可进入设置页重新配置")
 
         # Web 认证门：已设密码且会话未认证时拦截到登录页；未设密码则免密直进，
-        # 避免每个新会话都弹出"设置访问密码"首次配置页（密码可随时在全局设置中配置）
-        if self.page.session_id not in _authenticated_sessions:
-            from ..core.web_auth import is_password_set
-            if await is_password_set(db):
-                self._show_login_only()
-                await self._navigate("login")
-                return
-            await self._on_login_success()
+        # 避免每个新会话都弹出"设置访问密码"首次配置页（密码可随时在全局设置中配置）。
+        # 未认证会话的侧栏不构建任何导航项、_navigate 也只放行 login（双保险）。
+        if self._is_authenticated():
+            self._show_main_ui()
+            await self._full_initialize(db)
             return
 
-        # 认证已通过，执行完整初始化
-        await self._full_initialize(db)
-
-    def _show_login_only(self):
-        """隐藏导航栏，仅显示登录页"""
-        self.nav_rail.visible = False
-        # 隐藏分隔线（导航栏右侧的 VerticalDivider）
-        if self.page.controls and isinstance(self.page.controls[0], ft.Row):
-            row = self.page.controls[0]
-            for ctrl in row.controls:
-                if isinstance(ctrl, ft.VerticalDivider):
-                    ctrl.visible = False
-        self.page.update()
+        from ..core.web_auth import is_password_set
+        if await is_password_set(db):
+            await self._navigate("login")
+            return
+        await self._on_login_success()
 
     def _show_main_ui(self):
-        """显示导航栏和主界面"""
+        """认证通过后显示导航栏和主界面（此时才构建出可点击的导航项）"""
         self.nav_rail.visible = True
-        if self.page.controls and isinstance(self.page.controls[0], ft.Row):
-            row = self.page.controls[0]
-            for ctrl in row.controls:
-                if isinstance(ctrl, ft.VerticalDivider):
-                    ctrl.visible = True
+        self._divider.visible = True
+        self._rebuild_nav()
         self.page.update()
 
     async def _on_login_success(self):
@@ -307,6 +308,11 @@ class TiebaMechaApp:
 
     async def _navigate(self, page_name: str):
         """页面路由跳转核心逻辑"""
+        # 认证门：未认证会话只允许停留在登录页。侧栏未构建导航项是第一道防线，
+        # 这里是第二道——即使客户端伪造事件也加载不了任何业务页面（及其全部操作控件）
+        if page_name != "login" and not self._is_authenticated():
+            logging.getLogger(__name__).warning("未认证会话尝试导航到 %s，已拒绝", page_name)
+            return
         try:
             # 同步侧栏高亮（含程序化跳转）
             self._set_selected(page_name)

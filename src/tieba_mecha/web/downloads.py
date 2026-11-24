@@ -6,13 +6,22 @@ attachment，Excel/系统下载对话框接管）。文件只能来自本模块�
 exports 目录，文件名白名单校验防目录穿越；每次导出顺手清理超 24h 的
 历史导出文件。
 
+该路由不经过 flet 会话（浏览器直接 GET，无法携带会话态），而导出文件名是
+可枚举的时间戳（一天仅 86400 种）。因此 2026-11-24 起链接必须附带签名令牌
+download_url() 生成的 ?t=<token>：令牌 = HMAC(进程密钥, 文件名)，没有令牌
+或令牌不符一律 403——知道文件名也下不了。
+
 桌面模式（无 HTTP 服务）没有该路由：导出处理器会检测 page.web，
 桌面侧只落盘并提示本地路径。
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 import re
+import secrets
 import time
 from pathlib import Path
 
@@ -20,7 +29,7 @@ from pathlib import Path
 EXPORTS_DIR = Path("data/exports")
 EXPORT_TTL_SECONDS = 24 * 3600
 
-# 文件名白名单：本模块生成的 harvest_export_YYYYMMDD_HHMMSS.csv 及同类安全名
+# 文件名白名单：本模块生成的 *_export_YYYYMMDD_HHMMSS.csv 及同类安全名
 _SAFE_FNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,128}$")
 
 _CONTENT_TYPES = {
@@ -28,6 +37,30 @@ _CONTENT_TYPES = {
     ".txt": "text/plain",
     ".json": "application/json",
 }
+
+# 进程密钥缺失时的下载令牌兜底密钥（进程级随机，重启后旧链接失效）
+_FALLBACK_SECRET: str | None = None
+
+
+def _download_secret() -> bytes:
+    """下载令牌的签名密钥：由进程已有密钥派生子密钥（不复用原值），缺失时退化为进程级随机密钥"""
+    global _FALLBACK_SECRET
+    key = os.environ.get("FLET_SECRET_KEY") or os.environ.get("TIEBA_MECHA_SECRET_KEY")
+    if not key:
+        if _FALLBACK_SECRET is None:
+            _FALLBACK_SECRET = secrets.token_hex(32)
+        key = _FALLBACK_SECRET
+    return hashlib.sha256(b"tieba-mecha-download-token\x00" + key.encode("utf-8")).digest()
+
+
+def download_token(fname: str) -> str:
+    """导出文件的下载令牌（能力凭证）：仅签发给知道文件名的导出发起方"""
+    return hmac.new(_download_secret(), fname.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+
+def download_url(fname: str) -> str:
+    """可直接交给 page.launch_url 的带令牌下载链接"""
+    return f"/downloads/{fname}?t={download_token(fname)}"
 
 
 def is_safe_export_fname(fname: str) -> bool:
@@ -53,8 +86,9 @@ def save_export_file(content: str, fname: str) -> str:
 
 
 def _cleanup_expired() -> None:
+    """清理超 24h 的历史导出（采集导出与帖子导出同一命名风格 *_export_*.csv）"""
     now = time.time()
-    for p in EXPORTS_DIR.glob("harvest_export_*.csv"):
+    for p in EXPORTS_DIR.glob("*_export_*.csv"):
         try:
             if now - p.stat().st_mtime > EXPORT_TTL_SECONDS:
                 p.unlink()
@@ -77,6 +111,10 @@ def register_download_routes(app) -> None:
         fname = request.path_params.get("fname", "")
         if not is_safe_export_fname(fname):
             return PlainTextResponse("非法下载文件名", status_code=400)
+        # 令牌校验先于存在性判断：无令牌者连「文件是否存在」都探不到
+        token = request.query_params.get("t", "")
+        if not token.isascii() or not hmac.compare_digest(token, download_token(fname)):
+            return PlainTextResponse("下载链接无效或已过期，请重新导出", status_code=403)
         path = EXPORTS_DIR / fname
         if not path.is_file():
             return PlainTextResponse(

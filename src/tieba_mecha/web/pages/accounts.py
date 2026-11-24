@@ -2070,7 +2070,12 @@ class AccountsPage:
         self.page.open(dialog)
 
     async def _show_edit_dialog(self, account):
-        """显示修改账号对话框"""
+        """显示修改账号对话框
+
+        凭据框不回显：解密后的 BDUSS/STOKEN 曾作为输入框的值随弹窗下发到浏览器，
+        password=True 只是前端显示打码——任何能打开控制台的人都能取走全部账号凭据。
+        现在两个框默认留空（留空=不修改），已有凭据只在服务端解密、仅供换凭据时验证。
+        """
         from ...core.account import decrypt_value, encrypt_value
         
         # 从数据库获取完整账号对象（含加密凭据）
@@ -2078,23 +2083,16 @@ class AccountsPage:
         if not full_account:
             self._show_snackbar("无法获取账号信息", "error")
             return
-        
-        # 解密现有凭据
-        bduss_val = ""
-        stoken_val = ""
-        try:
-            bduss_val = decrypt_value(full_account.bduss)
-        except Exception:
-            bduss_val = ""
-        if full_account.stoken:
-            try:
-                stoken_val = decrypt_value(full_account.stoken)
-            except Exception:
-                stoken_val = ""
 
         name_field = ft.TextField(label="账号备注", value=account.name or account.user_name, text_size=13)
-        bduss_field = ft.TextField(label="BDUSS", value=bduss_val, password=True, can_reveal_password=True, text_size=13, expand=True)
-        stoken_field = ft.TextField(label="STOKEN (可选)", value=stoken_val, password=True, can_reveal_password=True, text_size=13, expand=True)
+        bduss_field = ft.TextField(
+            label="BDUSS", password=True, can_reveal_password=True, text_size=13, expand=True,
+            hint_text="已保存，留空则不修改",
+        )
+        stoken_field = ft.TextField(
+            label="STOKEN (可选)", password=True, can_reveal_password=True, text_size=13, expand=True,
+            hint_text="已保存，留空则不修改" if full_account.stoken else "未设置（可选）",
+        )
         
         cookie_input = ft.TextField(
             label="从 Cookie 更新凭据 (可选)",
@@ -2144,19 +2142,28 @@ class AccountsPage:
         )
 
         async def on_save(e):
-            if not bduss_field.value:
-                self._show_snackbar("BDUSS 不能为空", "error")
-                return
-            
             save_btn.disabled = True
             save_btn.text = "保存中..."
             self.page.update()
             
             try:
-                # 如果修改了凭据，则重新验证
-                if bduss_field.value != bduss_val or stoken_field.value != stoken_val:
+                new_bduss = (bduss_field.value or "").strip() or None
+                new_stoken = (stoken_field.value or "").strip() or None
+                cred_changed = new_bduss is not None or new_stoken is not None
+
+                # 凭据有改动才重新验证；未改动的部分沿用库内已存值（仅服务端解密，不经浏览器）
+                fields = {
+                    "name": name_field.value,
+                    "proxy_id": int(proxy_dropdown.value) if proxy_dropdown.value != "0" else None,
+                    "post_weight": int(edit_weight_slider.value),
+                }
+                if cred_changed:
+                    final_bduss = new_bduss or decrypt_value(full_account.bduss)
+                    final_stoken = new_stoken if new_stoken is not None else (
+                        decrypt_value(full_account.stoken) if full_account.stoken else ""
+                    )
                     success, uid, uname, err = await asyncio.wait_for(
-                        verify_account(bduss_field.value, stoken_field.value),
+                        verify_account(final_bduss, final_stoken),
                         timeout=15.0
                     )
                     if not success:
@@ -2165,17 +2172,20 @@ class AccountsPage:
                         save_btn.text = "保存修改"
                         self.page.update()
                         return
+                    fields.update(
+                        bduss=encrypt_value(final_bduss),
+                        stoken=encrypt_value(final_stoken) if final_stoken else "",
+                    )
+                    # 验证返回的身份写回：粘贴的可能是另一个账号的 Cookie，不回写则
+                    # 库里凭据属于新号、列表仍显示旧号
+                    if uid:
+                        fields["user_id"] = uid
+                        fields["user_name"] = uname
                 
-                proxy_id = int(proxy_dropdown.value) if proxy_dropdown.value != "0" else None
-                
-                await self.db.update_account(
-                    account.id,
-                    name=name_field.value,
-                    bduss=encrypt_value(bduss_field.value),
-                    stoken=encrypt_value(stoken_field.value) if stoken_field.value else "",
-                    proxy_id=proxy_id,
-                    post_weight=int(edit_weight_slider.value)
-                )
+                await self.db.update_account(account.id, **fields)
+                if cred_changed:
+                    # 换过凭据的账号以本次验证结论为准：过期/无效状态自愈（封禁号在验证处已被拦下）
+                    await self.db.update_account_status(account.id, "active")
                 
                 self.page.close(dialog)
                 await self.load_data()
@@ -2439,16 +2449,23 @@ class AccountsPage:
 
     async def _auto_calculate_weights(self, e, incremental: bool = False):
         """一键自动计算所有账号的推荐权重"""
-        from ...core.batch_post import AutoWeightCalculator
-
         if not self._begin_op():
             return
         try:
             await self._auto_calculate_weights_impl(e, incremental)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            # 处理器里的异常不会自动冒泡到界面：此前一处 NameError 让本功能静默失效两个多月
+            await log_error(f"[UI ERROR] _auto_calculate_weights failed: {ex}")
+            self._show_snackbar(f"智能权重计算失败: {str(ex)}", "error")
         finally:
             self._end_op()
 
     async def _auto_calculate_weights_impl(self, e, incremental: bool = False):
+        # 注意 import 必须在本方法内：拆函数时它被留在了包装方法里，本方法拿不到这个名字
+        from ...core.batch_post import AutoWeightCalculator
+
         self._show_snackbar("正在分析账号数据，计算智能权重...", "info")
 
         # 加载自定义权重比例

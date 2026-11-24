@@ -47,15 +47,18 @@ def test_download_routes(tmp_exports):
     fname = dl.save_export_file("a,b\r\n", "harvest_export_20261006_093005.csv")
     client = TestClient(app)
 
-    r = client.get(f"/downloads/{fname}")
+    r = client.get(dl.download_url(fname))
     assert r.status_code == 200
     assert "attachment" in r.headers.get("content-disposition", "")
     assert r.headers["content-type"].startswith("text/csv")
 
-    # 越界/可执行后缀 → 400；不存在 → 404（提示重新导出）
+    # 越界/可执行后缀 → 400；令牌正确但文件不存在 → 404（提示重新导出）
     assert client.get("/downloads/..%2Ftieba_mecha.db").status_code in (400, 404)
     assert client.get("/downloads/x.py").status_code == 400
-    assert client.get("/downloads/harvest_export_20990101_000000.csv").status_code == 404
+    missing = "harvest_export_20990101_000000.csv"
+    assert client.get(f"/downloads/{missing}?t={dl.download_token(missing)}").status_code == 404
+    # 不带令牌 → 403（文件名是可枚举的时间戳，令牌才是能力凭证）
+    assert client.get(f"/downloads/{fname}").status_code == 403
 
 
 def test_download_route_not_shadowed_by_flet_static_mount(tmp_exports):
@@ -68,7 +71,7 @@ def test_download_route_not_shadowed_by_flet_static_mount(tmp_exports):
     fname = dl.save_export_file("x,y\r\n", "harvest_export_20261006_093005.csv")
     client = TestClient(fa)
 
-    r = client.get(f"/downloads/{fname}")
+    r = client.get(dl.download_url(fname))
     assert r.status_code == 200, "下载路由被 flet 静态 mount 遮蔽"
     assert "attachment" in r.headers.get("content-disposition", "")
     # flet 自有静态资源不受影响（首页可服务）

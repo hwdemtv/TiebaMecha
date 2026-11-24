@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import io
 from datetime import datetime
 from pathlib import Path
 
 import flet as ft
 
+from ...downloads import download_url, save_export_file
 from ...utils import with_opacity
 from ...components.icons import (
     AUTO_AWESOME,
@@ -310,7 +312,9 @@ class BatchOpsTabMixin:
     async def _on_export(self, e):
         """导出选中项；未选中时导出当前筛选结果（而非全库）。
 
-        桌面端弹出保存对话框；Web 端无法弹窗时回落写入 data/exports/。
+        桌面端弹出保存对话框写到用户指定的本地路径。Web 端不走保存框：其结果里的
+        path 同样取自客户端消息，采信等于允许覆盖写服务端任意文件——一律落到
+        exports 目录并经 /downloads/ 带令牌链接下载（与采集导出同一条通道）。
         """
         rows = self._selected_rows() or self._rows
         if not rows:
@@ -319,6 +323,9 @@ class BatchOpsTabMixin:
         self._export_rows = rows
 
         filename = f"posts_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        if getattr(self.page, "web", False) is True:
+            await self._export_for_download(rows, filename)
+            return
         try:
             if not hasattr(self, "_export_picker"):
                 self._export_picker = ft.FilePicker(on_result=self._on_export_result)
@@ -327,40 +334,80 @@ class BatchOpsTabMixin:
                     self.page.update()
                 except Exception:
                     pass
+            # 置位后才接受紧接着的那一次保存结果（结果事件可由客户端伪造）
+            self._export_save_pending = True
             self._export_picker.save_file(file_name=filename, allowed_extensions=["csv"])
         except Exception:
-            # Web 端等不支持保存对话框的场景：直接写 data/exports/
+            self._export_save_pending = False
+            # 桌面端等不支持保存对话框的场景：直接写 data/exports/
             await self._write_export(rows, Path("data") / "exports" / filename)
 
+    async def _export_for_download(self, rows: list, filename: str):
+        """Web 端导出：落盘 exports 目录后弹窗给出下载入口（点击才打开，避免被浏览器拦截）"""
+        try:
+            save_export_file(self._build_export_csv(rows), filename)
+        except Exception as ex:
+            self._show_snackbar(f"导出落盘失败: {ex}", "error")
+            return
+
+        def download(_):
+            try:
+                self.page.launch_url(download_url(filename))
+            except Exception as ex:
+                self._show_snackbar(f"打开下载失败: {ex}", "error")
+
+        dialog = ft.AlertDialog(
+            title=ft.Row([ft.Icon(SAVE_ROUNDED, color="primary"), ft.Text("导出帖子")]),
+            content=ft.Column([
+                ft.Text(f"已导出 {len(rows)} 条帖子为 CSV（UTF-8 BOM，Excel 可直接打开）。", size=12),
+                ft.Text(f"文件名: {filename}", size=12, selectable=True),
+                ft.Text("下载链接 24 小时有效（链接自带签名令牌，请勿外传），过期自动清理后需重新导出。", size=11, color="onSurfaceVariant"),
+                ft.TextButton("下载 CSV", icon=SAVE_ROUNDED, on_click=download),
+            ], tight=True, spacing=12),
+            actions=[ft.TextButton("关闭", on_click=lambda _: self.page.close(dialog))],
+        )
+        self.page.open(dialog)
+
     async def _on_export_result(self, e: ft.FilePickerResultEvent):
+        # 只认刚发起过的那一次保存对话框；未发起时到达的结果一律丢弃
+        if not getattr(self, "_export_save_pending", False):
+            return
+        self._export_save_pending = False
         if not e.path:
             return  # 用户取消
         await self._write_export(self._export_rows, Path(e.path))
 
+    def _build_export_csv(self, rows: list) -> str:
+        """帖子列表 → CSV 文本（CRLF；BOM 在写文件时由 utf-8-sig 追加）"""
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["TID", "标题", "账号", "贴吧", "回复数", "发布时间",
+                         "存活状态", "删除原因", "最近检测时间", "是否精品", "正文摘要"])
+        for r in rows:
+            state = classify_survival(r.survival_status, r.death_reason)
+            state_label = SURVIVAL_DISPLAY[state][1]
+            writer.writerow([
+                self._csv_safe(r.tid),
+                self._csv_safe(r.title),
+                self._csv_safe(self._account_display(r.account_id)),
+                self._csv_safe(r.fname),
+                self._csv_safe(r.reply_num),
+                self._csv_safe(fmt_time(r.post_time)),
+                state_label,
+                self._csv_safe(death_reason_display(r.death_reason) if r.death_reason else ""),
+                self._csv_safe(fmt_time(r.last_checked_at)),
+                "是" if r.is_good else "否",
+                self._csv_safe((r.content or "")[:120]),
+            ])
+        return buf.getvalue()
+
     async def _write_export(self, rows: list, path):
         try:
+            content = self._build_export_csv(rows)
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["TID", "标题", "账号", "贴吧", "回复数", "发布时间",
-                                 "存活状态", "删除原因", "最近检测时间", "是否精品", "正文摘要"])
-                for r in rows:
-                    state = classify_survival(r.survival_status, r.death_reason)
-                    state_label = SURVIVAL_DISPLAY[state][1]
-                    writer.writerow([
-                        self._csv_safe(r.tid),
-                        self._csv_safe(r.title),
-                        self._csv_safe(self._account_display(r.account_id)),
-                        self._csv_safe(r.fname),
-                        self._csv_safe(r.reply_num),
-                        self._csv_safe(fmt_time(r.post_time)),
-                        state_label,
-                        self._csv_safe(death_reason_display(r.death_reason) if r.death_reason else ""),
-                        self._csv_safe(fmt_time(r.last_checked_at)),
-                        "是" if r.is_good else "否",
-                        self._csv_safe((r.content or "")[:120]),
-                    ])
+                f.write(content)
             self._show_snackbar(f"已导出 {len(rows)} 条: {path}", "success")
         except Exception as ex:
             self._show_snackbar(f"导出失败: {ex}", "error")

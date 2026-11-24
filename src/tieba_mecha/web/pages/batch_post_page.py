@@ -19,7 +19,8 @@ from ...core.harvest import (
 from .batch_post.launch_config import LaunchConfig, LaunchConfigError, calc_next_weekly
 from .batch_post.preflight import PreflightService, PreflightIssue, PreflightReport, scan_import_pairs
 from .batch_post.harvest_export import build_harvest_export_csv, export_csv_filename
-from ..downloads import EXPORTS_DIR, save_export_file
+from ..downloads import EXPORTS_DIR, download_url, save_export_file
+from ..import_safety import is_importable_local_file, is_safe_upload_name
 
 def _format_schedule_display(task) -> str:
     """格式化任务的调度信息显示"""
@@ -62,6 +63,10 @@ class BatchPostPage:
             on_result=self._on_file_result,
             on_upload=self._on_upload_progress
         )
+        # 选框/上传事件里的 path、file_name 均取自客户端消息，不可信任：
+        # 只处理本会话刚发起过的选择与上传（见 web.import_safety）
+        self._pick_pending = False
+        self._pending_uploads: set[str] = set()
 
         # 搜索与批量选择状态
         self._material_search_text = ""
@@ -358,10 +363,12 @@ class BatchPostPage:
         """保存自顶配置到数据库"""
         try:
             # 读取并校验最大次数 (5-100)
+            # 内层兜底须含 TypeError：输入框值为 None 时 int(None) 抛的是它，
+            # 漏掉就会让整次保存失败（2026-11-24 体检时由回归测试发现）
             try:
                 max_count = int(self.bump_max_count_field.value)
                 max_count = max(5, min(100, max_count))  # 限制范围 5-100
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):
                 max_count = 20  # 默认值
                 self.bump_max_count_field.value = str(max_count)
             
@@ -369,7 +376,7 @@ class BatchPostPage:
             try:
                 cooldown = int(self.bump_cooldown_field.value)
                 cooldown = max(10, min(1440, cooldown))  # 限制范围 10-1440
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):
                 cooldown = 45  # 默认值
                 self.bump_cooldown_field.value = str(cooldown)
             
@@ -396,14 +403,14 @@ class BatchPostPage:
             if hasattr(self, "bump_hour_field"):
                 try:
                     bump_hour = max(0, min(23, int(self.bump_hour_field.value)))
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, TypeError):
                     bump_hour = 10
                 await self.db.set_setting("bump_hour", str(bump_hour))
             
             if hasattr(self, "bump_duration_field"):
                 try:
                     bump_duration = int(self.bump_duration_field.value) if self.bump_duration_field.value != "∞" else 0
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, TypeError):
                     bump_duration = 7
                 await self.db.set_setting("bump_duration_days", str(bump_duration))
             
@@ -415,6 +422,9 @@ class BatchPostPage:
             
             self._show_snackbar(f"自顶配置已保存: 最大{max_count}次, 冷却{cooldown}分钟, 矩阵{'开启' if matrix_enabled == '1' else '关闭'}", "success")
         except Exception as ex:
+            # 本文件的日志函数都是就地导入：此处曾漏掉，令保存失败时错误处理自身 NameError，
+            # 用户看不到「保存配置失败」提示（2026-11-24 体检）
+            from ...core.logger import log_error
             await log_error(f"[UI ERROR] _save_bump_config failed: {ex}")
             self._show_snackbar(f"保存配置失败: {str(ex)}", "error")
 
@@ -1262,7 +1272,7 @@ class BatchPostPage:
 
         def download(_):
             try:
-                self.page.launch_url(f"/downloads/{fname}")
+                self.page.launch_url(download_url(fname))
             except Exception as ex:
                 self._show_snackbar(f"打开下载失败: {ex}", "error")
 
@@ -1273,7 +1283,7 @@ class BatchPostPage:
                 ft.Text(f"已导出 {len(rows)} 条采集物料为 CSV（UTF-8 BOM，Excel 可直接打开）。", size=12),
                 ft.Text(f"文件名: {fname}", size=12, selectable=True),
                 ft.Text(f"服务端路径: {EXPORTS_DIR / fname}", size=11, color="onSurfaceVariant", selectable=True),
-                ft.Text("下载链接 24 小时有效，过期自动清理后需重新导出。", size=11, color="onSurfaceVariant"),
+                ft.Text("下载链接 24 小时有效（链接自带签名令牌，请勿外传），过期自动清理后需重新导出。", size=11, color="onSurfaceVariant"),
                 ft.TextButton("下载 CSV", icon=icons.DOWNLOAD_ROUNDED, on_click=download, visible=is_web),
             ], tight=True, spacing=12),
             actions=[ft.TextButton("关闭", on_click=close_dialog)],
@@ -1566,6 +1576,24 @@ class BatchPostPage:
         
         self.page.open(safety_dialog)
         render_forums()
+
+    async def _compute_parachute_fnames(self, local_forums) -> set:
+        """空降集合：所选账号均未关注的本地吧。未选账号或无本地吧时为空（概念无从谈起）。"""
+        acc_ids = sorted(getattr(self, "_selected_account_ids", None) or set())
+        local_fnames = [f["fname"] for f in local_forums]
+        if not acc_ids or not local_fnames:
+            return set()
+        try:
+            # 第二个参数是待判定的吧名列表。此前漏传：签名不匹配抛出的 TypeError 被 except 吞掉，
+            # 空降集合恒为空——弹窗里的空降徽标与「只看空降」快筛永远无结果，而预检
+            # （preflight.py）的同类调用参数是对的，两处结论打架（2026-11-24 体检）
+            followed = set(await self.db.get_fnames_followed_by_accounts(acc_ids, local_fnames))
+            return set(local_fnames) - followed
+        except Exception as ex:
+            from ...core.logger import log_error
+            await log_error(f"空降集合计算失败，弹窗按「无空降」展示: {ex}")
+            return set()
+
     async def _open_firepower_dialog(self, initial_tab: int = 0):
         """[火力配置主页面] 本地自留区与全域轰炸组独立锁定"""
 
@@ -1602,14 +1630,8 @@ class BatchPostPage:
 
         # 空降集合（账号感知，A 包 2026-10-25）：所选账号均未关注的本地吧 = 空降投放。
         # 未选账号时不算空降（概念无从谈起），facets 与徽标自动失效。
-        _parachute_fnames: set = set()
-        _acc_ids = sorted(self._selected_account_ids)
-        if _acc_ids:
-            try:
-                _followed = set(await self.db.get_fnames_followed_by_accounts(_acc_ids))
-                _parachute_fnames = {f['fname'] for f in local_forums} - _followed
-            except Exception:
-                _parachute_fnames = set()
+        _acc_ids = sorted(self._selected_account_ids)   # 下方 facets 的文案/可用态还要用它
+        _parachute_fnames = await self._compute_parachute_fnames(local_forums)
         
         # ===== 两个独立的选中集合 =====
         # 本地自留区选中：若上次有持久化选择则沿用，否则默认选中所有安全吧
@@ -2668,7 +2690,7 @@ class BatchPostPage:
                 ft.Row([
                     ft.Text("全域指令集", size=14, weight=ft.FontWeight.W_500),
                     ft.Row([
-                        ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._file_picker.pick_files(allow_multiple=False), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
+                        ft.IconButton(icons.UPLOAD_FILE, tooltip="本地载入文件", on_click=lambda _: self._pick_import_file(), icon_color="onSurfaceVariant", visible=not getattr(self.page, "web", False)),
                         ft.IconButton(icons.CONTENT_PASTE, tooltip="批量粘贴导入", on_click=self._open_batch_paste_dialog, icon_color="secondary"),
                         ft.IconButton(icons.DELETE_SWEEP, tooltip="摧毁总计划（清空物料池）", on_click=self._clear_all_materials, icon_color="error"),
                     ], spacing=0),
@@ -2856,10 +2878,26 @@ class BatchPostPage:
         # 物料轮转：仅循环模式显示
         self.reset_strategy_dropdown.visible = (schedule_type != "once")
 
+    def _pick_import_file(self):
+        """发起一次文件选择：置位后才接受紧接着的那一次选框结果（结果事件可由客户端伪造）"""
+        self._pick_pending = True
+        self._file_picker.pick_files(allow_multiple=False)
+
     async def _on_file_result(self, e: ft.FilePickerResultEvent):
+        # 选框结果只认刚发起过的那一次；未发起选择时到达的结果一律丢弃
+        if not self._pick_pending:
+            return
+        self._pick_pending = False
         if not e.files: return
 
         file_path = e.files[0].path
+        # Web 会话的 path 同样来自客户端消息，一律无视（Web 端走上传流程，只认文件名）
+        if getattr(self.page, "web", False) is True:
+            file_path = None
+        # 桌面原生对话框给出的本地路径：仅接受真实存在的常规 .txt/.csv 文件
+        if file_path and not is_importable_local_file(file_path):
+            self._show_snackbar("仅支持导入本机的 .txt / .csv 文件", "warning")
+            return
 
         # 兼容性处理：Web 模式下 path 为 None
         if file_path is None:
@@ -2872,6 +2910,10 @@ class BatchPostPage:
                 self._show_snackbar("正在开启 Web 传输通道，请稍候...", "info")
                 upload_files = []
                 for f in e.files:
+                    # 只放行纯文件名的 .txt/.csv，并登记为「本会话发起过的上传」——
+                    # 上传完成事件里的 file_name 必须在此名单内才会被处理
+                    if not is_safe_upload_name(f.name):
+                        continue
                     # 获取上传 URL (过期时间 60s)
                     u_url = self.page.get_upload_url(f.name, 60)
                     if u_url:
@@ -2884,9 +2926,10 @@ class BatchPostPage:
                         return
 
                 if upload_files:
+                    self._pending_uploads.update(f.name for f in upload_files)
                     self._file_picker.upload(upload_files)
                 else:
-                    self._show_snackbar("未能创建上传任务，请重试", "warning")
+                    self._show_snackbar("仅支持导入 .txt / .csv 文件", "warning")
                     self._set_progress_busy(False)
                     self.page.update()
                 return
@@ -2901,11 +2944,25 @@ class BatchPostPage:
 
     async def _on_upload_progress(self, e: ft.FilePickerUploadEvent):
         """处理 Web 端文件上传进度与后续导入"""
+        # file_name 取自客户端消息：必须同时满足「本会话发起过的上传」与「纯文件名白名单」，
+        # 否则下面的 os.remove 可能删到上传目录之外的文件（如 ../../data/tieba_mecha.db）
+        file_name = e.file_name or ""
+        if file_name not in self._pending_uploads or not is_safe_upload_name(file_name):
+            return
+
+        if e.error:
+            self._pending_uploads.discard(file_name)
+            self._show_snackbar(f"文件上传失败: {e.error}", "error")
+            self._set_progress_busy(False)
+            self.page.update()
+            return
+
         # 更新上传进度条
         self.progress_bar.value = e.progress
         self.page.update()
 
         if e.progress == 1.0:
+            self._pending_uploads.discard(file_name)
             # 上传完成，文件现在位于服务器的 uploads/ 目录下
             import os
             # 获取 Flet 配置的上传目录 (多重探测)
@@ -2923,7 +2980,7 @@ class BatchPostPage:
                 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir))))
                 upload_dir = os.path.join(root_dir, "uploads")
 
-            file_server_path = os.path.join(upload_dir, e.file_name)
+            file_server_path = os.path.join(upload_dir, file_name)
 
             # 等待 1.0s 确保 OS 文件句柄释放且缓冲区落盘
             await asyncio.sleep(1.0)

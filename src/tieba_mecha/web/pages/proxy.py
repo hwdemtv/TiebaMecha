@@ -249,22 +249,12 @@ class ProxyPage:
         self.page.open(dialog)
 
     def _show_edit_dialog(self, proxy):
-        """显示修改代理节点对话框（预填当前数据）"""
-        from ...core.account import decrypt_value
+        """显示修改代理节点对话框（预填当前数据）
 
-        # 解密现有凭据
-        user_val = ""
-        pass_val = ""
-        if proxy.username:
-            try:
-                user_val = decrypt_value(proxy.username)
-            except Exception:
-                user_val = proxy.username
-        if proxy.password:
-            try:
-                pass_val = decrypt_value(proxy.password)
-            except Exception:
-                pass_val = proxy.password
+        密码框不回显：解密后的代理密码曾作为输入框的值下发到浏览器，现在默认留空
+        （留空=不修改），库内已存密码原样保留。
+        """
+        from ...core.account import decrypt_value
 
         host_f = ft.TextField(label="服务器主机", value=proxy.host)
         port_f = ft.TextField(label="端口", value=str(proxy.port), width=120)
@@ -273,8 +263,16 @@ class ProxyPage:
             options=[ft.dropdown.Option("http"), ft.dropdown.Option("socks5")],
             value=proxy.protocol
         )
-        user_f = ft.TextField(label="用户名 (可选)", value=user_val)
-        pass_f = ft.TextField(label="密码 (可选)", password=True, can_reveal_password=True, value=pass_val)
+        # 用户名不是密钥，保留预填便于核对；密码只收新输入
+        username_val = ""
+        if proxy.username:
+            try:
+                username_val = decrypt_value(proxy.username)
+            except Exception:
+                username_val = proxy.username
+        user_f = ft.TextField(label="用户名 (可选)", value=username_val)
+        pass_f = ft.TextField(label="密码 (可选)", password=True, can_reveal_password=True,
+                              hint_text="已保存，留空则不修改" if proxy.password else "")
 
         save_btn = ft.FilledButton("保存修改", icon=SAVE_ROUNDED)
 
@@ -285,15 +283,16 @@ class ProxyPage:
             try:
                 save_btn.disabled = True
                 self.page.update()
-                await self.db.update_proxy(
-                    proxy.id,
-                    host=host_f.value,
-                    port=int(port_f.value),
-                    protocol=protocol_f.value,
-                    username=user_f.value,
-                    password=pass_f.value,
-                    is_active=True,
-                )
+                fields = {
+                    "host": host_f.value,
+                    "port": int(port_f.value),
+                    "protocol": protocol_f.value,
+                    "username": user_f.value,
+                    "is_active": True,
+                }
+                if pass_f.value:
+                    fields["password"] = pass_f.value
+                await self.db.update_proxy(proxy.id, **fields)
                 self.page.close(dialog)
                 await self.load_data()
                 self._show_snackbar("节点配置已更新", "success")

@@ -108,10 +108,9 @@ class LoginPage:
             height=44,
         )
 
-        self.skip_btn = ft.TextButton(
-            "暂不设置，直接进入",
-            on_click=self._on_skip,
-        )
+        # 注意：这里不再提供「暂不设置，直接进入」按钮——它曾无条件显示，已设密码时
+        # 点一下即调用认证成功回调，等于密码形同虚设。未设密码的免密直进由
+        # app.py 的认证门统一决定，登录页只负责验证密码。
 
         return ft.Container(
             content=ft.Column(
@@ -144,7 +143,6 @@ class LoginPage:
                     self.status_text,
                     ft.Container(height=5),
                     self.submit_btn,
-                    self.skip_btn,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -214,13 +212,6 @@ class LoginPage:
             finally:
                 # 登录成功路径由 _auth_success 接管页面，此处恢复按钮不影响
                 self.submit_btn.disabled = False
-        except asyncio.CancelledError:
-            return
-
-    async def _on_skip(self, e):
-        """跳过密码设置"""
-        try:
-            await self._auth_success()
         except asyncio.CancelledError:
             return
 
