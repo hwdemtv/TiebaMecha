@@ -145,6 +145,7 @@ class Database(
                 ("is_sign_scheduled", "BOOLEAN DEFAULT 1"),
                 ("last_maint_at", "DATETIME DEFAULT NULL"),
                 ("last_weight_calc_at", "DATETIME DEFAULT NULL"),
+                ("proxy_bind_time", "DATETIME DEFAULT NULL"),
             ]
             for col_name, col_type in accounts_migrations:
                 await self._safe_add_column(conn, "accounts", col_name, col_type, accounts_cols)

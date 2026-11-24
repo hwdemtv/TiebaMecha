@@ -97,10 +97,21 @@ class ProxyRepository:
                     proxy.is_active = False
                 await session.commit()
     async def delete_proxy(self, proxy_id: int) -> bool:
-        """删除代理"""
+        """删除代理，并在同一事务里解绑仍指向它的账号。
+
+        界面文案承诺「绑定该节点的账号将回退为直连」，但此前只删了代理行：
+        accounts.proxy_id 悬空指向一个不存在的 ID——签到总览把这些账号显示成「代理挂起」；
+        且 proxies 主键不是 AUTOINCREMENT，删掉最大 ID 后再新增会复用同一个 ID，
+        批量删再批量加时，原账号会被静默绑到新代理上（出口 IP 突变）（2026-11-24 体检）。
+        """
         async with self.async_session() as session:
             proxy = await session.get(Proxy, proxy_id)
             if proxy:
+                await session.execute(
+                    update(Account)
+                    .where(Account.proxy_id == proxy_id)
+                    .values(proxy_id=None, proxy_bind_time=None)
+                )
                 await session.delete(proxy)
                 await session.commit()
                 return True

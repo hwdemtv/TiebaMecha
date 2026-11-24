@@ -35,6 +35,10 @@ class Account(Base):
     is_sign_scheduled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否参与定时签到（守护错峰按参与账号排程）")
     last_maint_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后一次养号维护时间")
     last_weight_calc_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最后权重计算时间")
+    # 换绑代理的时刻：代理预热期（ProxyWarmupManager，48h 内不发帖）的判断依据。
+    # 此前模型里没有这一列，预热判断读到恒为 None → 保护从未生效（2026-11-24 体检）。
+    # 存量账号为 NULL = 不在预热期，不追溯。
+    proxy_bind_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="最近一次换绑代理的时间（预热期判断依据）")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"

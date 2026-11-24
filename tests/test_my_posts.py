@@ -20,15 +20,24 @@ def db_path():
         os.remove(path)
 
 
+# 测试甲的贴吧用户 UID。注意与本地账号主键是两套 ID：
+# MaterialPool.posted_account_id 存本地账号主键，ThreadRecord.author_id 存贴吧 UID
+UID_A = 424242
+
+
 def _seed(db: Database):
     """构造标准场景：
     - 物料 111: alive, 贴吧 python, 09-18, 有 ThreadRecord(回复3, 非精品)
     - 物料 222: dead(error→疑似删除), 贴吧 linux, 09-19, 无 ThreadRecord
-    - 记录 333: 导入帖(回复7, 精品), 贴吧 python, updated_at=今天
+    - 记录 333: 甲的导入帖(回复7, 精品), 贴吧 python, updated_at=今天
+    - 记录 444: 别人（贴吧 UID=2）的帖子, 贴吧 linux —— 2026-11-24 新增，见下方说明
     """
     async def run():
-        await db.add_account(name="测试甲", bduss="X" * 80, user_name="tester_a")
+        await db.add_account(name="测试甲", bduss="X" * 80, user_name="tester_a", user_id=UID_A)
         a = (await db.get_accounts())[0]
+        # 测试乙：本地主键是 2、贴吧 UID 是 7。记录 444 的作者 UID 恰好等于乙的本地主键——
+        # 按账号筛选/归属判定若混用两套 ID，444 会被错误地算到乙名下
+        await db.add_account(name="测试乙", bduss="Y" * 80, user_name="tester_b", user_id=7)
 
         await db.add_materials_bulk([("标题一号", "正文 www.example.com/1"), ("标题二号", "正文2")])
         mats = await db.get_materials()
@@ -42,10 +51,12 @@ def _seed(db: Database):
         await db.update_material_survival_status(mats[1].id, "dead", "error")
 
         await db.upsert_thread_records([
-            {"tid": 333, "title": "导入的历史帖", "author_name": "tester_a", "author_id": a.id,
+            {"tid": 333, "title": "导入的历史帖", "author_name": "tester_a", "author_id": UID_A,
              "reply_num": 7, "text": "导入内容", "fname": "python", "is_good": True},
-            {"tid": 111, "title": "标题一号", "author_name": "tester_a", "author_id": a.id,
+            {"tid": 111, "title": "标题一号", "author_name": "tester_a", "author_id": UID_A,
              "reply_num": 3, "text": "正文", "fname": "python", "is_good": False},
+            {"tid": 444, "title": "路人的帖子", "author_name": "stranger", "author_id": 2,
+             "reply_num": 1, "text": "路人内容", "fname": "linux", "is_good": False},
         ])
         return a, mats
     return run
@@ -58,9 +69,11 @@ def test_get_my_posts_merge_and_filters(db_path):
         try:
             a, mats = await _seed(db)()
 
-            # 全量合并：物料 111/222 + 记录 333（111 的记录行被 tid 去重抑制）
+            b = (await db.get_accounts())[1]
+
+            # 全量合并：物料 111/222 + 记录 333/444（111 的记录行被 tid 去重抑制）
             rows = await db.get_my_posts()
-            assert sorted(r.tid for r in rows) == [111, 222, 333]
+            assert sorted(r.tid for r in rows) == [111, 222, 333, 444]
             by_tid = {r.tid: r for r in rows}
             assert by_tid[111].src == "material" and by_tid[111].reply_num == 3
             assert by_tid[333].src == "record" and by_tid[333].is_good is True
@@ -68,22 +81,26 @@ def test_get_my_posts_merge_and_filters(db_path):
             assert by_tid[111].survival_status == "alive"
             assert by_tid[222].post_time == datetime(2026, 9, 19, 9, 0)
 
-            # 账号
-            assert len(await db.get_my_posts(account_id=a.id)) == 3
+            # 账号筛选：记录行按作者 UID（而非本地账号主键）归属
+            assert sorted(r.tid for r in await db.get_my_posts(account_id=a.id)) == [111, 222, 333]
+            assert await db.get_my_posts(account_id=b.id) == []       # 444 的作者 UID=2 ≠ 乙的 UID 7
             assert await db.get_my_posts(account_id=9999) == []
+            # 统一行的 account_id 一律是本地账号主键：作者不在本地的记录行为 None
+            assert by_tid[333].account_id == a.id and by_tid[333].author_id == UID_A
+            assert by_tid[444].account_id is None and by_tid[444].author_id == 2
             # 存活四态（alive / dead 均含 / suspected / unknown）
             assert [r.tid for r in await db.get_my_posts(survival="alive")] == [111]
             assert [r.tid for r in await db.get_my_posts(survival="suspected")] == [222]
             assert [r.tid for r in await db.get_my_posts(survival="dead")] == [222]
-            assert [r.tid for r in await db.get_my_posts(survival="unknown")] == [333]
+            assert {r.tid for r in await db.get_my_posts(survival="unknown")} == {333, 444}
             # 贴吧 / 精品 / 关键字 / 时间
             assert {r.tid for r in await db.get_my_posts(fname="python")} == {111, 333}
             assert [r.tid for r in await db.get_my_posts(is_good=True)] == [333]
-            assert sorted(r.tid for r in await db.get_my_posts(is_good=False)) == [111, 222]
+            assert sorted(r.tid for r in await db.get_my_posts(is_good=False)) == [111, 222, 444]
             assert [r.tid for r in await db.get_my_posts(keyword="历史")] == [333]
-            # date_from=今天：物料 222 命中；记录 333 (updated_at=今天) 命中；
+            # date_from=今天：物料 222 命中；记录 333/444 (updated_at=今天) 命中；
             # 物料 111 虽被时间过滤，其记录行也被 tid 去重抑制，不产生幽灵行
-            assert sorted(r.tid for r in await db.get_my_posts(date_from=datetime(2026, 9, 19))) == [222, 333]
+            assert sorted(r.tid for r in await db.get_my_posts(date_from=datetime(2026, 9, 19))) == [222, 333, 444]
         finally:
             await db.close()
 
@@ -161,28 +178,33 @@ def test_register_posted_material_inserts_success_row(db_path):
     """发布登记：单行直插 success + posted 字段，返回自增 ID；不做内容去重。"""
     async def main():
         db = Database(db_path)
-        await db.init_db()
-        acc = await db.add_account(name="甲", bduss="X" * 80, user_name="a")
+        # 不关库则 aiosqlite 连接线程一直持有文件句柄，Windows 上夹具收尾删不掉临时库
+        # （2026-11-24 体检：本用例曾令全量门禁确定性报 teardown error）
+        try:
+            await db.init_db()
+            acc = await db.add_account(name="甲", bduss="X" * 80, user_name="a")
 
-        mid1 = await db.register_posted_material(
-            "新帖标题", "新帖正文", posted_fname="python",
-            posted_tid=999, posted_account_id=acc.id, posted_time=datetime(2026, 9, 19, 12, 0))
-        assert mid1 > 0
+            mid1 = await db.register_posted_material(
+                "新帖标题", "新帖正文", posted_fname="python",
+                posted_tid=999, posted_account_id=acc.id, posted_time=datetime(2026, 9, 19, 12, 0))
+            assert mid1 > 0
 
-        mats = await db.get_materials()
-        assert len(mats) == 1
-        m = mats[0]
-        assert m.id == mid1
-        assert m.status == "success"
-        assert m.posted_tid == 999
-        assert m.posted_fname == "python"
-        assert m.posted_account_id == acc.id
+            mats = await db.get_materials()
+            assert len(mats) == 1
+            m = mats[0]
+            assert m.id == mid1
+            assert m.status == "success"
+            assert m.posted_tid == 999
+            assert m.posted_fname == "python"
+            assert m.posted_account_id == acc.id
 
-        # 追踪登记不做去重：同内容再次登记应产生第二行（各自对应一次发帖）
-        mid2 = await db.register_posted_material(
-            "新帖标题", "新帖正文", posted_fname="python",
-            posted_tid=1000, posted_account_id=acc.id)
-        assert mid2 not in (0, mid1)
-        assert len(await db.get_materials()) == 2
+            # 追踪登记不做去重：同内容再次登记应产生第二行（各自对应一次发帖）
+            mid2 = await db.register_posted_material(
+                "新帖标题", "新帖正文", posted_fname="python",
+                posted_tid=1000, posted_account_id=acc.id)
+            assert mid2 not in (0, mid1)
+            assert len(await db.get_materials()) == 2
+        finally:
+            await db.close()
 
     asyncio.run(main())

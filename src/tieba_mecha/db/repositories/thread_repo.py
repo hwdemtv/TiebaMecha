@@ -180,9 +180,18 @@ class ThreadRepository:
         """
         from types import SimpleNamespace
 
-        from sqlalchemy import or_, select as sa_select
+        from sqlalchemy import false, or_, select as sa_select
 
         async with self.async_session() as session:
+            # 本地账号主键 ↔ 贴吧用户 UID 的对照：MaterialPool.posted_account_id 存的是本地
+            # 账号主键，ThreadRecord.author_id 存的是贴吧 UID。此前记录分支直接拿本地账号
+            # 主键去比 author_id，两种 ID 混用——按账号筛选时导入的记录行要么全部消失、
+            # 要么串到别人名下；记录行的 account_id 又被填成 UID，而「用作者账号删帖」
+            # 正是拿它当本地账号 ID 用的（2026-11-24 体检）。
+            accounts = list((await session.execute(sa_select(Account))).scalars().all())
+            local_to_uid = {a.id: (a.user_id or 0) for a in accounts}
+            uid_to_local = {a.user_id: a.id for a in accounts if a.user_id}
+
             # 0. 物料 tid 身份集合（记录行去重依据）：同一 tid 一律以物料行为准。
             #    仅按账号圈定——贴吧/时间/关键字在两表字段上可能不一致
             #    （如记录行的 updated_at 近似值），纳入会导致漏去重、产生幽灵记录行。
@@ -201,7 +210,9 @@ class ThreadRepository:
             # 1. 本地帖子记录（含未入物料池的监控/导入行），同时作为 tid → 记录 映射
             rec_conds = []
             if account_id:
-                rec_conds.append(ThreadRecord.author_id == account_id)
+                # 记录行按作者 UID 归属；该账号尚未验证出 UID 时，没有记录能确定属于它
+                author_uid = local_to_uid.get(account_id, 0)
+                rec_conds.append(ThreadRecord.author_id == author_uid if author_uid else false())
             if fname:
                 rec_conds.append(ThreadRecord.fname == fname)
             if date_from:
@@ -295,7 +306,10 @@ class ThreadRepository:
                 title=r.title or "",
                 content=r.text or "",
                 fname=r.fname or "",
-                account_id=r.author_id or None,
+                # account_id 一律是本地账号主键（与物料行同口径）；作者 UID 不对应任何
+                # 本地账号（如导入的他人帖子）时为 None，界面据此判定「无法用作者账号删帖」
+                account_id=uid_to_local.get(r.author_id),
+                author_id=r.author_id or 0,
                 post_time=r.updated_at,
                 reply_num=r.reply_num or 0,
                 is_good=r.is_good,

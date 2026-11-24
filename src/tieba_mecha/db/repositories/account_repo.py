@@ -87,6 +87,8 @@ class AccountRepository:
                 user_agent=user_agent,
                 post_weight=post_weight,
                 status="active" if is_first else "pending", # 确保初次添加就有明确状态
+                # 带代理创建的账号从创建时刻起算代理预热期
+                proxy_bind_time=datetime.now() if proxy_id else None,
             )
             session.add(account)
             await session.commit()
@@ -126,7 +128,14 @@ class AccountRepository:
                     update(Account).where(Account.id == account_id).values(is_active=True)
                 )
     async def delete_account(self, account_id: int) -> bool:
-        """删除账号 (带级联删除：同时删除关联的贴吧/权重历史/异常事件，避免产生孤儿数据)"""
+        """删除账号。
+
+        级联清理关联数据，避免留下孤儿行——也避免「残留被新账号继承」：项目没有外键，
+        accounts 主键也不是 AUTOINCREMENT，删掉最大 ID 的账号后再新增会拿到同一个 ID
+        （封号后重加是常见操作），残留的熔断状态和任务账号列表会被新账号原样接手。
+        """
+        import json
+
         from sqlalchemy import delete
         async with self.async_session() as session:
             account = await session.get(Account, account_id)
@@ -138,7 +147,20 @@ class AccountRepository:
                 # 2. 级联删除权重变更历史与验证码/异常事件
                 await session.execute(delete(WeightHistory).where(WeightHistory.account_id == account_id))
                 await session.execute(delete(CaptchaEvent).where(CaptchaEvent.account_id == account_id))
-                # 3. 删除账号本身
+                # 3. 熔断状态：连续失败次数/冷却截止会直接决定新账号能不能发帖，必须清
+                from ..models import BreakerState
+
+                await session.execute(delete(BreakerState).where(BreakerState.account_id == account_id))
+                # 4. 从批量任务的账号池里摘除：否则旧循环任务会把继承此 ID 的新号拉进去发帖
+                tasks = (await session.execute(select(BatchPostTask))).scalars().all()
+                for task in tasks:
+                    try:
+                        ids = json.loads(task.accounts_json or "[]")
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(ids, list) and account_id in ids:
+                        task.accounts_json = json.dumps([i for i in ids if i != account_id], ensure_ascii=False)
+                # 5. 删除账号本身
                 await session.delete(account)
                 await session.commit()
                 if was_active:
@@ -177,9 +199,15 @@ class AccountRepository:
         async with self.async_session() as session:
             account = await session.get(Account, account_id)
             if account:
+                previous_proxy_id = account.proxy_id
                 for key, value in kwargs.items():
                     if key in self._ACCOUNT_UPDATABLE_FIELDS:
                         setattr(account, key, value)
+                # 换绑/解绑代理时记录时刻：代理预热期据此判断（48h 内不允许发帖/顶帖）。
+                # proxy_bind_time 不在可更新白名单里，只在这里由换绑动作驱动；
+                # 原值重存（如编辑资料时不改代理）不刷新预热期
+                if "proxy_id" in kwargs and kwargs["proxy_id"] != previous_proxy_id:
+                    account.proxy_bind_time = datetime.now() if kwargs["proxy_id"] else None
                 await session.commit()
                 await session.refresh(account)
                 return account

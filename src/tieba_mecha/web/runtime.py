@@ -16,6 +16,7 @@ Database 引擎（SQLite + WAL 下多连接安全）。
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from typing import Callable, Optional
 
 from ..db.crud import Database
@@ -177,13 +178,33 @@ async def _perform_notification_sync(db: Database, nm):
         await _notify_ui_refresh()
 
 
-async def _notification_sync_loop(db: Database):
-    """通知同步循环（自 app.py 迁移）"""
-    from ..core.logger import log_error
+async def _await_notification_manager(max_wait_seconds: float = 3600.0, poll_seconds: float = 30.0):
+    """等待 NotificationManager 就绪并返回它；超时返回 None。
+
+    NotificationManager 由首个浏览器会话的 _full_initialize 创建，而本模块的循环随进程自启、
+    早于任何会话——启动瞬间必然拿不到它。
+    """
     from ..core.notification import get_notification_manager
 
     nm = get_notification_manager()
-    if not nm:
+    waited = 0.0
+    while nm is None and waited < max_wait_seconds:
+        await asyncio.sleep(poll_seconds)
+        waited += poll_seconds
+        nm = get_notification_manager()
+    return nm
+
+
+async def _notification_sync_loop(db: Database):
+    """通知同步循环（自 app.py 迁移）"""
+    from ..core.logger import log_error
+
+    # 原先启动瞬间拿不到管理器就直接 return，而 ensure_started 的 _started 已置位、后续会话
+    # 不会再拉起本循环——systemd 自启的生产环境里远程通知同步从不自动运行，只能手动刷新
+    # （2026-11-24 体检）。改为等待首个会话创建出管理器再开始。
+    nm = await _await_notification_manager()
+    if nm is None:
+        await log_error("等待 1 小时仍未出现通知管理器，远程通知同步循环退出")
         return
 
     try:
@@ -205,7 +226,6 @@ async def _notification_sync_loop(db: Database):
 async def _update_checker_loop(db: Database):
     """更新检测循环（自 app.py 迁移）"""
     from ..core.logger import log_info, log_error
-    from ..core.notification import get_notification_manager
     from ..core.updater import get_update_manager
 
     updater = get_update_manager()
@@ -215,7 +235,9 @@ async def _update_checker_loop(db: Database):
             if await updater.should_check_update(interval_hours=24):
                 release = await updater.check_update()
                 if release:
-                    nm = get_notification_manager()
+                    # 进程自启早于首个会话时通知管理器尚未创建：等它出现再推送，
+                    # 而不是把这次「发现新版本」丢掉、等 24 小时后的下一轮
+                    nm = await _await_notification_manager(max_wait_seconds=3600.0, poll_seconds=60.0)
                     if nm:
                         await nm.push(
                             type="update_available",
