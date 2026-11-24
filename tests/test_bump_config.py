@@ -1,450 +1,408 @@
-"""Tests for auto-bump configuration functionality.
+"""自顶（自动回帖）配置与调度行为测试（2026-11-24 改写）
 
-Tests the following features:
-1. Database settings CRUD for bump config (max_bump_count, bump_cooldown_minutes, bump_matrix_enabled)
-2. Matrix scheduling logic in AutoBumpManager
-3. UI configuration persistence
+改写前的问题：31 个用例里 11 个零断言（只调用不断言），另有一批把生产逻辑抄进测试再
+断言自己（本地重写一份 validate_max_count、自定义一份 BUMP_TEMPLATES 等）——生产代码
+怎么变它们都不会红。正因如此，「次数上限在引擎里根本没生效」一直没被发现：界面按
+estimate_next_bump 显示「已达次数上限」，引擎的 once 分支却直接放行。
+
+现在全部直接驱动生产代码：真实的 SQLite + AutoBumpManager + make_templated_bump_content +
+BatchPostPage._save_bump_config，只把「真正回帖到贴吧」「AI 生成」「成功后的随机等待」
+三处外部副作用打桩。
 """
+
+from __future__ import annotations
+
+import json
+import random
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tieba_mecha.core.batch_post import (
+    BUMP_EMOJIS,
+    BUMP_FALLBACK_TEMPLATES,
+    AutoBumpManager,
+    make_templated_bump_content,
+)
 from tieba_mecha.db.crud import Database
-from tieba_mecha.core.batch_post import AutoBumpManager
+from tieba_mecha.web.pages.batch_post_page import BatchPostPage
+from tieba_mecha.web.pages.posts.helpers import estimate_next_bump
 
+
+# ---------- 设置项读写 ----------
 
 class TestBumpSettingsCrud:
-    """Tests for bump configuration settings in database."""
+    """自顶配置项在数据库里的读写。"""
 
-    @pytest.mark.asyncio
-    async def test_default_bump_settings(self, db: Database):
-        """Test that default bump settings can be retrieved."""
-        # Default values: 保守参数以降低封号风险
-        max_count = await db.get_setting("max_bump_count", "20")
-        cooldown = await db.get_setting("bump_cooldown_minutes", "60")  # 保守值：从45增至60分钟
-        matrix_enabled = await db.get_setting("bump_matrix_enabled", "0")
-        
-        assert max_count == "20"
-        assert cooldown == "60"
-        assert matrix_enabled == "0"
-
-    @pytest.mark.asyncio
     async def test_set_and_get_max_bump_count(self, db: Database):
-        """Test setting and retrieving max_bump_count."""
         await db.set_setting("max_bump_count", "50")
-        
-        result = await db.get_setting("max_bump_count")
-        assert result == "50"
+        assert await db.get_setting("max_bump_count") == "50"
 
-    @pytest.mark.asyncio
     async def test_set_and_get_bump_cooldown(self, db: Database):
-        """Test setting and retrieving bump_cooldown_minutes."""
         await db.set_setting("bump_cooldown_minutes", "120")
-        
-        result = await db.get_setting("bump_cooldown_minutes")
-        assert result == "120"
+        assert await db.get_setting("bump_cooldown_minutes") == "120"
 
-    @pytest.mark.asyncio
     async def test_set_and_get_matrix_enabled(self, db: Database):
-        """Test setting and retrieving bump_matrix_enabled."""
-        # Test enabling matrix mode
         await db.set_setting("bump_matrix_enabled", "1")
-        result = await db.get_setting("bump_matrix_enabled")
-        assert result == "1"
-        
-        # Test disabling matrix mode
-        await db.set_setting("bump_matrix_enabled", "0")
-        result = await db.get_setting("bump_matrix_enabled")
-        assert result == "0"
-
-    @pytest.mark.asyncio
-    async def test_bump_settings_persistence(self, db: Database):
-        """Test that all bump settings persist together."""
-        settings = {
-            "max_bump_count": "30",
-            "bump_cooldown_minutes": "90",
-            "bump_matrix_enabled": "1",
-        }
-        
-        for key, value in settings.items():
-            await db.set_setting(key, value)
-        
-        # Verify all settings are persisted correctly
-        assert await db.get_setting("max_bump_count") == "30"
-        assert await db.get_setting("bump_cooldown_minutes") == "90"
         assert await db.get_setting("bump_matrix_enabled") == "1"
+        await db.set_setting("bump_matrix_enabled", "0")
+        assert await db.get_setting("bump_matrix_enabled") == "0"
 
-    @pytest.mark.asyncio
-    async def test_bump_settings_update_existing(self, db: Database):
-        """Test updating existing settings overwrites old values."""
-        # Set initial values
+    async def test_bump_settings_update_overwrites(self, db: Database):
         await db.set_setting("max_bump_count", "20")
-        await db.set_setting("bump_cooldown_minutes", "45")
-        
-        # Update values
         await db.set_setting("max_bump_count", "100")
+        await db.set_setting("bump_cooldown_minutes", "45")
         await db.set_setting("bump_cooldown_minutes", "180")
-        
-        # Verify updated values
         assert await db.get_setting("max_bump_count") == "100"
         assert await db.get_setting("bump_cooldown_minutes") == "180"
 
 
-class TestAutoBumpManagerConfig:
-    """Tests for AutoBumpManager configuration loading."""
+# ---------- 巡检行为的测试脚手架 ----------
 
-    @pytest.mark.asyncio
-    async def test_load_default_config(self, db: Database):
-        """Test AutoBumpManager loads default config when no settings exist."""
-        manager = AutoBumpManager(db=db)
-        
-        # Should load defaults (20, 45, "0")
+FNAME, TID = "自顶测试吧", 9001
+
+
+async def _seed(db, *, bump_count=0, last_bumped_at=None, is_auto_bump=True, n_helpers=2):
+    """一个发帖号 + 若干帮顶号 + 一条已发布物料"""
+    poster = await db.add_account(name="poster", bduss="X" * 80, user_name="u_poster")
+    helpers = [await db.add_account(name=f"helper{i}", bduss="Y" * 80, user_name=f"u_helper{i}")
+               for i in range(n_helpers)]
+    mid = await db.register_posted_material(
+        "测试标题", "测试正文", posted_fname=FNAME, posted_tid=TID, posted_account_id=poster.id)
+    async with db.async_session() as session:
+        from tieba_mecha.db.models import MaterialPool
+
+        m = await session.get(MaterialPool, mid)
+        m.is_auto_bump = is_auto_bump
+        m.bump_count = bump_count
+        m.last_bumped_at = last_bumped_at
+        await session.commit()
+    return SimpleNamespace(mid=mid, poster=poster, helpers=helpers)
+
+
+async def _material(db, mid):
+    async with db.async_session() as session:
+        from tieba_mecha.db.models import MaterialPool
+
+        m = await session.get(MaterialPool, mid)
+        # 脱离 session 后仍可读取的快照
+        return SimpleNamespace(bump_count=m.bump_count, last_bumped_at=m.last_bumped_at,
+                               bump_last_date=m.bump_last_date)
+
+
+async def _set_last_bumped(db, mid, when):
+    async with db.async_session() as session:
+        from tieba_mecha.db.models import MaterialPool
+
+        m = await session.get(MaterialPool, mid)
+        m.last_bumped_at = when
+        await session.commit()
+
+
+async def _config(db, *, matrix="1", cooldown="45", max_count="20", ai_content="0"):
+    await db.set_setting("bump_matrix_enabled", matrix)
+    await db.set_setting("bump_cooldown_minutes", cooldown)
+    await db.set_setting("max_bump_count", max_count)
+    # 关掉 AI 生成：本套用例只验证调度，不向 AI 网关发请求
+    await db.set_setting("bump_ai_content", ai_content)
+
+
+async def _run_cycle(db, reply_result=(True, "")):
+    """跑一轮自顶巡检，返回回帖桩（记录每次调用的 账号/吧/TID/内容）"""
+    manager = AutoBumpManager(db)
+    reply = AsyncMock(return_value=reply_result)
+    with patch.object(manager.post_manager, "reply_to_thread", reply), \
+         patch("tieba_mecha.core.batch_post.asyncio.sleep", new_callable=AsyncMock):
         await manager.process_all_candidates()
-        
-        # Verify default values were used (by checking the manager state)
-        # The config is read inside process_all_candidates, we verify via behavior
-
-    @pytest.mark.asyncio
-    async def test_load_custom_config(self, db: Database):
-        """Test AutoBumpManager loads custom config from database."""
-        # Set custom configuration
-        await db.set_setting("max_bump_count", "50")
-        await db.set_setting("bump_cooldown_minutes", "120")
-        await db.set_setting("bump_matrix_enabled", "1")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # The manager will use these custom values when processing
-
-    @pytest.mark.asyncio
-    async def test_config_values_in_process_all_candidates(self, db: Database):
-        """Test that process_all_candidates reads config values."""
-        # Set specific config
-        await db.set_setting("max_bump_count", "35")
-        await db.set_setting("bump_cooldown_minutes", "60")
-        await db.set_setting("bump_matrix_enabled", "0")
-        
-        manager = AutoBumpManager(db=db)
-        
-        # Call process_all_candidates - it should read config from DB
-        await manager.process_all_candidates()
-        
-        # The config values are read internally; verify no errors occurred
+    return reply
 
 
-class TestBumpCooldownLogic:
-    """Tests for bump cooldown time window logic."""
+# ---------- 巡检行为 ----------
 
-    @pytest.mark.asyncio
-    async def test_cooldown_45_minutes_default(self, db: Database):
-        """Test default 45-minute cooldown window."""
-        await db.set_setting("bump_cooldown_minutes", "45")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # The cooldown window should be 45 minutes
-        # This is verified by the internal query that uses timedelta(minutes=45)
+class TestBumpCycle:
+    """一轮自顶巡检对单条物料的完整处理。"""
 
-    @pytest.mark.asyncio
-    async def test_custom_cooldown_120_minutes(self, db: Database):
-        """Test custom 120-minute cooldown window."""
-        await db.set_setting("bump_cooldown_minutes", "120")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # The cooldown window should be 120 minutes
+    async def test_bumps_eligible_material_with_non_poster_account(self, db):
+        seeded = await _seed(db)
+        await _config(db)
 
-    @pytest.mark.asyncio
-    async def test_minimum_cooldown_10_minutes(self, db: Database):
-        """Test minimum 10-minute cooldown window."""
-        await db.set_setting("bump_cooldown_minutes", "10")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # The cooldown window should be 10 minutes
+        reply = await _run_cycle(db)
+
+        reply.assert_awaited_once()
+        account_id, fname, tid, content = reply.await_args.args
+        assert account_id in {h.id for h in seeded.helpers}   # 同号自顶风险极高，必须换号
+        assert (fname, tid) == (FNAME, TID)
+        assert content and "分享好物" not in content
+        m = await _material(db, seeded.mid)
+        assert m.bump_count == 1 and m.last_bumped_at is not None
+        assert m.bump_last_date == date.today()
+        logs = await db.get_bump_logs(material_id=seeded.mid)
+        assert len(logs) == 1 and logs[0].success is True and logs[0].account_id == account_id
+
+    async def test_failed_bump_is_logged_but_not_counted(self, db):
+        seeded = await _seed(db)
+        await _config(db)
+
+        reply = await _run_cycle(db, reply_result=(False, "吧务封禁"))
+
+        reply.assert_awaited_once()
+        m = await _material(db, seeded.mid)
+        assert m.bump_count == 0 and m.last_bumped_at is None    # 失败不消耗次数
+        logs = await db.get_bump_logs(material_id=seeded.mid)
+        assert len(logs) == 1 and logs[0].success is False and "吧务封禁" in logs[0].message
+
+    async def test_auto_bump_switch_off_disables_material(self, db):
+        await _seed(db, is_auto_bump=False)
+        await _config(db)
+        (await _run_cycle(db)).assert_not_awaited()
+
+    async def test_matrix_disabled_skips_bump(self, db):
+        """未开启矩阵协同：没有别的号可用，宁可不顶也不让原帖号自顶。"""
+        seeded = await _seed(db)
+        await _config(db, matrix="0")
+
+        (await _run_cycle(db)).assert_not_awaited()
+        assert (await _material(db, seeded.mid)).bump_count == 0
+
+    async def test_ai_content_is_used_when_enabled(self, db):
+        """开启 AI 生成时用模型返回的内容（模型调用打桩）"""
+        await _seed(db)
+        await _config(db, ai_content="1")
+
+        manager_gen = AsyncMock(return_value=(True, "AI 生成的自顶内容", ""))
+        with patch("tieba_mecha.core.ai_optimizer.AIOptimizer.generate_bump_content", manager_gen):
+            reply = await _run_cycle(db)
+        assert reply.await_args.args[3] == "AI 生成的自顶内容"
+
+    async def test_ai_failure_falls_back_to_template(self, db):
+        await _seed(db)
+        await _config(db, ai_content="1")
+
+        with patch("tieba_mecha.core.ai_optimizer.AIOptimizer.generate_bump_content",
+                   AsyncMock(return_value=(False, "", "网关超时"))):
+            reply = await _run_cycle(db)
+        content = reply.await_args.args[3]
+        assert content and "网关超时" not in content
 
 
-class TestMatrixScheduling:
-    """Tests for matrix account rotation in auto-bump."""
+class TestBumpCooldown:
+    """冷却时间窗：上次自顶后 N 分钟内不再自顶。"""
 
-    @pytest.mark.asyncio
-    async def test_matrix_mode_disabled_uses_original_account(self, db: Database):
-        """Test that when matrix mode is disabled, original poster accounts are used."""
-        await db.set_setting("bump_matrix_enabled", "0")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # With matrix disabled, potential_accounts logic should fall back to original
+    @pytest.mark.parametrize("cooldown", [45, 120, 10])
+    async def test_cooldown_window_gates_second_bump(self, db, cooldown):
+        seeded = await _seed(db)
+        await _config(db, cooldown=str(cooldown))
 
-    @pytest.mark.asyncio
-    async def test_matrix_mode_enabled_rotates_accounts(self, db: Database):
-        """Test that matrix mode rotates through available accounts."""
-        await db.set_setting("bump_matrix_enabled", "1")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # With matrix enabled, accounts should be rotated
+        await _run_cycle(db)
+        assert (await _material(db, seeded.mid)).bump_count == 1
+
+        await _run_cycle(db)                                   # 立刻再跑：冷却未到
+        assert (await _material(db, seeded.mid)).bump_count == 1
+
+        await _set_last_bumped(db, seeded.mid, datetime.now() - timedelta(minutes=cooldown + 1))
+        await _run_cycle(db)                                   # 冷却已过
+        assert (await _material(db, seeded.mid)).bump_count == 2
+
+    async def test_configured_cooldown_value_is_honored(self, db):
+        """同一条「30 分钟前自顶过」的物料：冷却 120 时不顶，改成冷却 10 后就顶"""
+        await _seed(db, last_bumped_at=datetime.now() - timedelta(minutes=30))
+        await _config(db, cooldown="120")
+        (await _run_cycle(db)).assert_not_awaited()
+
+        await _config(db, cooldown="10")
+        (await _run_cycle(db)).assert_awaited_once()
+
+    async def test_zero_cooldown_setting_falls_back_to_safe_default(self, db):
+        """冷却被写成 0/负数时不能退化成「每轮巡检都顶」"""
+        await _seed(db, last_bumped_at=datetime.now() - timedelta(minutes=1))
+        await _config(db, cooldown="0")
+        (await _run_cycle(db)).assert_not_awaited()
 
 
 class TestBumpCountLimit:
-    """Tests for bump count limit behavior."""
+    """once 模式的累计次数上限（改写前引擎从不执行该上限）。"""
 
-    @pytest.mark.asyncio
-    async def test_default_max_bump_count_20(self, db: Database):
-        """Test default max bump count is 20."""
-        # Don't set max_bump_count, should default to 20
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # Query should filter by bump_count < 20
+    async def test_default_limit_20_stops_at_twenty(self, db):
+        seeded = await _seed(db, bump_count=19)
+        await _config(db)
 
-    @pytest.mark.asyncio
-    async def test_custom_max_bump_count_50(self, db: Database):
-        """Test custom max bump count of 50."""
-        await db.set_setting("max_bump_count", "50")
-        
-        _manager = AutoBumpManager(db=db)  # noqa: F841
-        
-        # Query should filter by bump_count < 50
+        await _run_cycle(db)
+        assert (await _material(db, seeded.mid)).bump_count == 20   # 第 20 次：最后一次
 
-    @pytest.mark.asyncio
-    async def test_max_bump_count_range_5_to_100(self, db: Database):
-        """Test that max_bump_count supports range 5-100."""
-        for count in [5, 50, 100]:
-            await db.set_setting("max_bump_count", str(count))
-            
-            _manager = AutoBumpManager(db=db)  # noqa: F841
-            
-            # Should handle any value in range
+        await _set_last_bumped(db, seeded.mid, None)
+        (await _run_cycle(db)).assert_not_awaited()                  # 第 21 次：不再自顶
+        assert (await _material(db, seeded.mid)).bump_count == 20
+        assert len(await db.get_bump_logs(material_id=seeded.mid)) == 1
 
+    @pytest.mark.parametrize("limit", [5, 50, 100])
+    async def test_custom_limit_is_honored(self, db, limit):
+        seeded = await _seed(db, bump_count=limit - 1)
+        await _config(db, max_count=str(limit))
 
-class TestUIBumpConfigPersistence:
-    """Tests for UI configuration persistence (simulated)."""
+        (await _run_cycle(db)).assert_awaited_once()
+        assert (await _material(db, seeded.mid)).bump_count == limit
 
-    def test_max_count_field_validation_5_to_100(self):
-        """Test that max_count field validates range 5-100."""
-        # Simulate UI field validation logic
-        def validate_max_count(value: str) -> int:
-            try:
-                count = int(value)
-                return max(5, min(100, count))  # Clamp to valid range
-            except (ValueError, TypeError):
-                return 20  # Default
-        
-        assert validate_max_count("5") == 5
-        assert validate_max_count("50") == 50
-        assert validate_max_count("100") == 100
-        assert validate_max_count("200") == 100  # Clamped to max
-        assert validate_max_count("0") == 5       # Clamped to min
-        assert validate_max_count("invalid") == 20  # Default
-        assert validate_max_count("") == 20          # Default
+        await _set_last_bumped(db, seeded.mid, None)
+        (await _run_cycle(db)).assert_not_awaited()
 
-    def test_cooldown_field_validation_10_to_1440(self):
-        """Test that cooldown field validates range 10-1440."""
-        # Simulate UI field validation logic
-        def validate_cooldown(value: str) -> int:
-            try:
-                cooldown = int(value)
-                return max(10, min(1440, cooldown))  # Clamp to valid range
-            except (ValueError, TypeError):
-                return 45  # Default
-        
-        assert validate_cooldown("10") == 10
-        assert validate_cooldown("720") == 720
-        assert validate_cooldown("1440") == 1440
-        assert validate_cooldown("2000") == 1440  # Clamped to max
-        assert validate_cooldown("5") == 10          # Clamped to min
-        assert validate_cooldown("invalid") == 45    # Default
+    async def test_material_already_over_limit_is_never_bumped(self, db):
+        await _seed(db, bump_count=25)
+        await _config(db)
+        (await _run_cycle(db)).assert_not_awaited()
 
-    def test_matrix_switch_conversion(self):
-        """Test matrix switch boolean to string conversion."""
-        def to_storage_value(enabled: bool) -> str:
-            return "1" if enabled else "0"
-        
-        assert to_storage_value(True) == "1"
-        assert to_storage_value(False) == "0"
+    async def test_non_positive_limit_setting_falls_back_to_default(self, db):
+        """上限被写成 0 时不能把所有物料一刀切成「已达上限」"""
+        await _seed(db)
+        await _config(db, max_count="0")
+        (await _run_cycle(db)).assert_awaited_once()
+
+    @pytest.mark.parametrize("limit, count", [(20, 0), (20, 19), (20, 20), (20, 25), (5, 5), (50, 49), (100, 100)])
+    def test_engine_and_post_list_agree_on_limit(self, limit, count):
+        """帖子列表显示「已达次数上限」当且仅当引擎确实不再自顶（两处口径一致）"""
+        manager = AutoBumpManager(db=None)
+        should_bump, reason = manager._should_bump_this_cycle(SimpleNamespace(bump_mode="once", bump_count=count), limit)
+        label = estimate_next_bump(True, "once", bump_count=count, max_bump_count=limit)
+
+        assert should_bump is (count < limit)
+        assert ("已达次数上限" in label) is (count >= limit)
+        if not should_bump:
+            assert reason == f"已达次数上限({limit}次)" == label
+
+    def test_limit_applies_to_once_mode_only(self):
+        """scheduled / matrix_loop 模式按「每日一次」约束，不受累计次数上限影响"""
+        manager = AutoBumpManager(db=None)
+        over = SimpleNamespace(bump_mode="scheduled", bump_count=999, bump_last_date=None, bump_hour=0, bump_duration_days=0)
+        assert manager._should_bump_this_cycle(over, 20) == (True, "scheduled")
+        today_done = SimpleNamespace(bump_mode="scheduled", bump_count=0, bump_last_date=date.today(), bump_hour=0, bump_duration_days=0)
+        assert manager._should_bump_this_cycle(today_done, 20) == (False, "今日已执行")
 
 
-class TestBumpStatusDisplayLogic:
-    """Tests for bump status display logic in UI."""
+# ---------- 账号轮换（真实选号函数） ----------
 
-    def test_limit_reached_at_max_count(self):
-        """Test that limit is reached when bump_count >= max_bump."""
-        max_bump = 20
-        
-        # Below limit
-        assert (15 >= max_bump) == False
-        assert (19 >= max_bump) == False
-        
-        # At limit
-        assert (20 >= max_bump) == True
-        
-        # Above limit (should not happen in normal flow but test anyway)
-        assert (25 >= max_bump) == True
+class TestAccountRotation:
+    def _pool(self, ids):
+        return [SimpleNamespace(id=i) for i in ids]
 
-    def test_different_max_bump_values(self):
-        """Test limit reached logic with different max_bump values."""
-        test_cases = [
-            (5, 4, False),   # max=5, count=4 -> not reached
-            (5, 5, True),    # max=5, count=5 -> reached
-            (50, 49, False), # max=50, count=49 -> not reached
-            (50, 50, True),  # max=50, count=50 -> reached
-            (100, 100, True),# max=100, count=100 -> reached
-        ]
-        
-        for max_bump, count, expected in test_cases:
-            result = (count >= max_bump)
-            assert result == expected, f"max_bump={max_bump}, count={count}"
+    def _material(self, *, posted_account_id, bump_count=0, bump_mode="once", **extra):
+        return SimpleNamespace(id=1, posted_account_id=posted_account_id, bump_count=bump_count,
+                               bump_mode=bump_mode, **extra)
+
+    def test_rotation_excludes_poster_and_cycles_through_helpers(self):
+        manager = AutoBumpManager(db=None)
+        pool = self._pool([1, 2, 3, 4])
+        picks = [manager._select_account_for_bump(self._material(posted_account_id=2, bump_count=n), pool)
+                 for n in range(9)]
+        assert 2 not in picks
+        assert picks == [1, 3, 4, 1, 3, 4, 1, 3, 4]
+
+    def test_single_account_pool_has_no_one_to_bump(self):
+        manager = AutoBumpManager(db=None)
+        assert manager._select_account_for_bump(self._material(posted_account_id=7), self._pool([7])) is None
+        assert manager._select_account_for_bump(self._material(posted_account_id=7), []) is None
+
+    def test_matrix_loop_rotates_material_account_list(self):
+        manager = AutoBumpManager(db=None)
+        pool = self._pool([1, 3, 4])
+        picks = [manager._select_account_for_bump(
+            self._material(posted_account_id=1, bump_mode="matrix_loop",
+                           bump_account_ids=json.dumps([4, 3]), bump_account_index=k), pool)
+            for k in range(5)]
+        assert picks == [4, 3, 4, 3, 4]
+
+    def test_matrix_loop_falls_back_when_list_account_left_the_pool(self):
+        manager = AutoBumpManager(db=None)
+        mat = self._material(posted_account_id=1, bump_mode="matrix_loop",
+                             bump_account_ids=json.dumps([99]), bump_account_index=0, bump_count=1)
+        assert manager._select_account_for_bump(mat, self._pool([1, 3, 4])) == 4   # 回退按 bump_count 轮换
 
 
-class TestMatrixRotationAlgorithm:
-    """Tests for matrix account rotation algorithm."""
-
-    def test_rotation_uses_modulo(self):
-        """Test that rotation uses bump_count modulo number of accounts."""
-        available_accounts = [1, 2, 3]  # 3 accounts
-        _posted_account_id = 4  # Original poster (for future use)
-        
-        # When bump_count=0, should use account 1 (index 0)
-        # When bump_count=1, should use account 2 (index 1)
-        # When bump_count=2, should use account 3 (index 2)
-        # When bump_count=3, should wrap to account 1 (index 0)
-        
-        for bump_count in range(10):
-            target_idx = bump_count % len(available_accounts)
-            assert target_idx in [0, 1, 2]
-
-    def test_rotation_excludes_original_poster(self):
-        """Test that rotation logic can exclude original poster."""
-        available_accounts = [1, 2, 3, 4]  # 4 accounts
-        posted_account_id = 2  # Original poster
-        
-        # Filter out posted_account_id
-        potential_accounts = [acc for acc in available_accounts if acc != posted_account_id]
-        
-        assert len(potential_accounts) == 3
-        assert 2 not in potential_accounts
-
-    def test_rotation_with_single_remaining_account(self):
-        """Test rotation when only one account remains after filtering."""
-        available_accounts = [1, 2, 3]
-        posted_account_id = 2
-        
-        potential_accounts = [acc for acc in available_accounts if acc != posted_account_id]
-        
-        # Should still work with single account
-        assert len(potential_accounts) == 2
-        
-        for bump_count in range(5):
-            target_idx = bump_count % len(potential_accounts)
-            assert potential_accounts[target_idx] in [1, 3]
-
+# ---------- 自顶内容（真实模板引擎） ----------
 
 class TestBumpContentEngine:
-    """Tests for the rewritten natural bump content engine."""
+    LONG_TITLE = "东川笃哉作品集免费下载快来收藏"
 
-    def test_no_share_good_prefix(self):
-        """Test that bump content never contains '分享好物' promotional prefix."""
-        import random
-
-        BUMP_TEMPLATES = [
-            "不错不错，挺有意思的", "看了，还可以", "收藏了，mark一下",
-            "嗯，挺好的", "可以可以", "这个确实不错",
-            "挺用心的，支持", "看完了，不错", "路过留个言",
-            "楼主整理得挺用心啊", "这个系列确实还可以",
-            "之前看过类似的，这个也不错", "感谢整理",
-            "内容挺丰富的，赞一个", "挺不错的，帮顶",
-            "帮顶一下", "支持下楼主", "顶一个",
-            "好帖，mark了", "看了不错，顶"
-        ]
-        RANDOM_EMOJIS = ["[赞]", "✨", "👍"]
-
-        # Simulate content generation 100 times with different random seeds
-        for seed in range(100):
+    def test_content_is_short_clean_text(self):
+        longest = 8 + len(" 还行，") + max(map(len, BUMP_FALLBACK_TEMPLATES)) + 1 + max(map(len, BUMP_EMOJIS))
+        with_prefix = 0
+        for seed in range(300):
             random.seed(seed)
-            base_text = random.choice(BUMP_TEMPLATES)
+            content = make_templated_bump_content(self.LONG_TITLE)
+            lowered = content.lower()
+            for banned in ("分享好物", "免费下载", "资源已取", "http", "【", "】"):
+                assert banned not in lowered, f"seed={seed} 自顶内容含推广/外链特征: {content}"
+            assert len(content) <= longest
+            assert content.endswith(tuple(BUMP_EMOJIS)) and any(t in content for t in BUMP_FALLBACK_TEMPLATES)
+            if " 还行，" in content:
+                with_prefix += 1
+                assert content.startswith(self.LONG_TITLE[:8] + " 还行，")   # 标题关键词截断 8 字
+        assert 0 < with_prefix < 300   # 20% 概率的前缀分支确实被走到、且不是每次都带
 
-            # 20% chance branch
-            if random.random() < 0.2:
-                keyword = "测试标题12345678"[:8]
-                base_text = f"{keyword} 还行，{base_text}"
+    def test_no_title_means_no_prefix(self):
+        random.seed(7)
+        for _ in range(100):
+            assert " 还行，" not in make_templated_bump_content("")
 
-            bump_content = f"{base_text} {random.choice(RANDOM_EMOJIS)}"
 
-            # Must NOT contain promotional patterns
-            assert "分享好物" not in bump_content, f"Found promotional text: {bump_content}"
-            assert "免费下载" not in bump_content, f"Found download text: {bump_content}"
-            assert "资源已取" not in bump_content, f"Found resource text: {bump_content}"
+# ---------- 设置页保存（真实的 _save_bump_config） ----------
 
-    def test_templates_are_natural(self):
-        """Test that all templates are short and natural-looking."""
-        BUMP_TEMPLATES = [
-            "不错不错，挺有意思的", "看了，还可以", "收藏了，mark一下",
-            "嗯，挺好的", "可以可以", "这个确实不错",
-            "挺用心的，支持", "看完了，不错", "路过留个言",
-            "楼主整理得挺用心啊", "这个系列确实还可以",
-            "之前看过类似的，这个也不错", "感谢整理",
-            "内容挺丰富的，赞一个", "挺不错的，帮顶",
-            "帮顶一下", "支持下楼主", "顶一个",
-            "好帖，mark了", "看了不错，顶"
-        ]
+class _FakePage:
+    def __init__(self):
+        self.controls, self.overlay = [], []
+        self.update = MagicMock()
+        self.open = MagicMock()
+        self.close = MagicMock()
+        self.run_task = MagicMock()
 
-        for template in BUMP_TEMPLATES:
-            # Templates should be reasonably short (< 20 chars)
-            assert len(template) < 20, f"Template too long: {template}"
-            # Should not contain brackets (removed for natural look)
-            assert "【" not in template and "】" not in template, f"Template has brackets: {template}"
-            # Should not contain URLs or links
-            assert "http" not in template.lower(), f"Template has URL: {template}"
 
-    def test_title_truncation_8_chars(self):
-        """Test that title keywords are truncated to max 8 characters."""
-        long_title = "东川笃哉作品集免费下载快来收藏"
-        keyword = long_title[:8]
-        assert len(keyword) == 8
-        assert keyword == "东川笃哉作品集免"
+def _page():
+    db = MagicMock()
+    db.set_setting = AsyncMock()
+    bp = BatchPostPage(page=_FakePage(), db=db)
+    bp._show_snackbar = MagicMock()
+    bp._refresh_material_table = AsyncMock()
+    bp.bump_max_count_field = SimpleNamespace(value=None)
+    bp.bump_cooldown_field = SimpleNamespace(value=None)
+    bp.bump_matrix_switch = SimpleNamespace(value=False)
+    bp.use_ai_switch = SimpleNamespace(value=True)
+    bp.use_schedule = SimpleNamespace(value=True)
+    bp.bump_ai_content_switch = SimpleNamespace(value=True)
+    return bp
 
-    def test_title_mention_format_natural(self):
-        """Test that title mention format uses natural style without brackets."""
-        base_text = "不错不错，挺有意思的"
-        keyword = "推理小说"
-        result = f"{keyword} 还行，{base_text}"
 
-        assert "【" not in result and "】" not in result
-        assert "推理小说 还行" in result
+def _saved(bp) -> dict:
+    return {call.args[0]: call.args[1] for call in bp.db.set_setting.await_args_list}
 
-    def test_ai_status_rewritten_no_special_branch(self):
-        """Verify that ai_status=='rewritten' no longer produces different content.
-        
-        After the fix, all materials use the same template path regardless of ai_status.
-        """
-        import random
 
-        BUMP_TEMPLATES = [
-            "不错不错，挺有意思的", "看了，还可以", "收藏了，mark一下",
-            "嗯，挺好的", "可以可以", "这个确实不错",
-        ]
-        RANDOM_EMOJIS = ["[赞]", "✨", "👍"]
+class TestBumpConfigSave:
+    """设置页「保存自顶配置」：输入钳制与落库。"""
 
-        # Both normal and rewritten materials should produce same-style content
-        for _ai_status in ["none", "rewritten"]:  # noqa: F841
-            random.seed(42)  # Same seed for both
-            base_text = random.choice(BUMP_TEMPLATES)
-            if random.random() < 0.2:
-                keyword = "测试标题"[:8]
-                base_text = f"{keyword} 还行，{base_text}"
-            content = f"{base_text} {random.choice(RANDOM_EMOJIS)}"
+    @pytest.mark.parametrize("typed, saved", [("5", "5"), ("50", "50"), ("100", "100"),
+                                              ("200", "100"), ("0", "5"), ("abc", "20"), (None, "20")])
+    async def test_max_count_clamped_5_to_100(self, typed, saved):
+        bp = _page()
+        bp.bump_max_count_field.value = typed
+        await bp._save_bump_config(None)
+        assert _saved(bp)["max_bump_count"] == saved
+        if typed in ("abc", None):
+            # 解析失败时输入框被回写成缺省值，用户能看到实际生效的配置
+            assert bp.bump_max_count_field.value == saved
 
-            # No special handling for rewritten status
-            assert "分享好物" not in content
-            assert len(content) > 0
+    @pytest.mark.parametrize("typed, saved", [("10", "10"), ("720", "720"), ("1440", "1440"),
+                                              ("2000", "1440"), ("5", "10"), ("abc", "45"), (None, "45")])
+    async def test_cooldown_clamped_10_to_1440(self, typed, saved):
+        bp = _page()
+        bp.bump_cooldown_field.value = typed
+        await bp._save_bump_config(None)
+        assert _saved(bp)["bump_cooldown_minutes"] == saved
 
-    def test_emoji_list_neutral(self):
-        """Test that emoji list only contains neutral expressions."""
-        RANDOM_EMOJIS = ["[赞]", "✨", "👍"]
-
-        for emoji in RANDOM_EMOJIS:
-            # Should not contain flashy kaomoji
-            assert "(๑" not in emoji
-            assert "￣▽￣" not in emoji
-            # Should be simple and neutral
-            assert len(emoji) <= 3 or emoji.startswith("["), f"Emoji too complex: {emoji}"
+    @pytest.mark.parametrize("enabled, stored", [(True, "1"), (False, "0")])
+    async def test_switches_stored_as_flags(self, enabled, stored):
+        bp = _page()
+        bp.bump_matrix_switch.value = enabled
+        bp.bump_ai_content_switch.value = enabled
+        await bp._save_bump_config(None)
+        settings = _saved(bp)
+        assert settings["bump_matrix_enabled"] == stored
+        assert settings["bump_ai_content"] == stored

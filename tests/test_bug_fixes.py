@@ -226,24 +226,10 @@ class TestSignAllAccountsSingleClient:
             assert mock_create.call_count == 1
 
 
-@pytest.mark.asyncio
-class TestMechaClientSessionCleanup:
-    """MechaClient should close the replacement aiohttp session on exit."""
-
-    async def test_replacement_session_closed_on_exit(self):
-        from tieba_mecha.core.client_factory import MechaClient
-        import aiotieba
-
-        client = MechaClient.__new__(MechaClient)
-        replacement_session = AsyncMock()
-        client._replacement_sessions = [replacement_session]
-
-        with patch("aiotieba.Client.__aexit__", new_callable=AsyncMock, return_value=None) as mock_super_exit:
-            await client.__aexit__(None, None, None)
-
-        replacement_session.close.assert_awaited_once()
-        assert client._replacement_sessions == []
-        mock_super_exit.assert_awaited_once()
+# MechaClient 的代理注入已于 2026-11-24 重写：旧机制（替换 HttpContainer.session 来注入
+# ProxyConnector，以及配套的 _replacement_sessions 清理）在 aiotieba 4.6.4 下是死代码，
+# 对应的 TestMechaClientSessionCleanup 一并删除。新机制（HTTP 走原生 ProxyConfig、SOCKS
+# 换共用连接器、退出时关闭）的行为测试见 tests/test_proxy_injection.py。
 
 
 # ========================================================================

@@ -1428,6 +1428,7 @@ class BatchPostManager:
         # [重构核心] 智能化调度与多账号 Failover 循环体系
         material_ptr = 0
         consecutive_no_account_skips = 0  # 连续"无可用账号"跳过计数，用于检测死锁
+        consecutive_unlaunched = 0  # 连续"账号侧预检跳过、未能进入发射"的物料数（用于提前收束本轮）
         survival_example_cache: dict[str, dict] = {}  # {fname: 存活反馈样本}（存活→AI 策略闭环）
         while task.progress < actual_total and material_ptr < len(pending_materials):
             current_material = pending_materials[material_ptr]
@@ -1469,6 +1470,14 @@ class BatchPostManager:
             forum_skip_reason = ""  # 贴吧级拦截原因（非空=该物料应顺延而非判失败）
             last_err_summary = ""  # 末次拦截摘要（供流水如实记录尝试次数与错误）
             current_target_fname = base_target_fname  # 初始化，避免循环内未绑定
+            # 发射追踪：本物料是否真的向贴吧提交过发帖请求。预检阶段的账号侧跳过
+            # （熔断冷却/预热期/阵地冷却/凭据缺失/取不到 TBS）一条请求都没发出去，
+            # 不能记成「物料失败」并给靶场记失败——此前正是如此，取号信息被风控时会在
+            # 几十秒内把整个待发池标成 failed，并给每个目标吧记失败（3 次即踢出靶场）
+            # （2026-11-24 体检）。物料侧的问题（内容重复度、执行链异常）仍按失败处理，
+            # 否则坏物料会永远卡在待发队列头部。
+            launched_any = False
+            unlaunch_reason = ""  # 非空=本轮全是账号侧预检跳过，物料应顺延而非判失败
             
             for attempt_idx in range(max_account_retries):
                 # 选取账号：传入 material_ptr+attempt_idx 以保证 Failover 时的轮转顺序
@@ -1492,7 +1501,10 @@ class BatchPostManager:
                 current_target_fname = base_target_fname
                 
                 # --- [状态预检] ---
+                # 以下预检跳过都是「账号侧暂时不可用」：一条发帖请求都没发，标记原因，
+                # 收尾时按顺延处理（不记物料失败、不给靶场记失败）
                 if captcha_breaker.is_in_cooldown(account_id) or failure_breaker.is_in_cooldown(account_id):
+                    unlaunch_reason = "账号熔断冷却中"
                     continue
 
                 # [防检测] 代理预热期检查：新绑定代理的账号在预热期内不允许发帖
@@ -1503,28 +1515,34 @@ class BatchPostManager:
                     await log_warn(
                         f"账号 [{account_id}] 代理预热期中，剩余 {remaining:.1f}h，跳过发帖"
                     )
+                    unlaunch_reason = "账号处于代理预热期"
                     continue
 
                 # 阵地冷却检查与动态跳转
                 if not af_tracker.can_post(account_id, current_target_fname):
                     if task.pairing_mode == "strict":
                         # 严格配对模式：不允许阵地跳转，该账号此贴吧冷却中则换号
+                        unlaunch_reason = "账号-贴吧冷却中(严格配对)"
                         continue
                     alt_fname = await af_tracker.get_available_forum(account_id, fnames)
                     if alt_fname:
                         current_target_fname = alt_fname
                     else:
+                        unlaunch_reason = "账号-贴吧冷却中(无可用阵地)"
                         continue # 该账号没坑位了，换下一个号尝试本物料
                 
                 acc = account_map.get(account_id)
                 if not acc or acc.status in TERMINAL_ACCOUNT_STATUSES:
+                    unlaunch_reason = "账号状态不可用"
                     continue
                 
                 # 独立限流等待
                 await per_account_limiter.wait_if_needed(account_id)
                 
                 creds = await get_account_credentials(self.db, account_id)
-                if not creds: continue
+                if not creds:
+                    unlaunch_reason = "账号凭据缺失"
+                    continue
                 _, bduss, stoken, proxy_id, cuid, ua = creds
 
                 # --- [Step 1: 文案重组与仿生微扰] ---
@@ -1568,16 +1586,22 @@ class BatchPostManager:
                 # 重复度熔断
                 passed, _ = await similarity_detector.check(title, safe_content)
                 if not passed:
-                    await log_warn(f"物料 [{current_material.id}] 历史重复度过高，已跳过")
+                    # 物料自身的问题：按失败落库（不再占待发队列），流水如实写明原因
+                    # （此前日志写「已跳过」，落库却是「N个账号均失败/末次拦截:未知」）
+                    last_err_summary = "历史重复度过高"
+                    await log_warn(f"物料 [{current_material.id}] 历史重复度过高，本物料不再发送")
                     break # 该物料本身有问题，不再换号试，直接换物料
 
                 # --- [Step 2: 仿真协议发射链] ---
+                commit_started = False   # 提交请求是否已发出（发出后结果未知时不得换号重发）
                 try:
                     async with await create_client(self.db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
                         # 2.1 模拟个人身份获取 (产生轨迹并获取 TBS)
                         try: await client.get_self_info()
                         except Exception: pass  # 非关键操作，TBS获取失败会在后续判断中跳过
-                        if not getattr(client.account, 'tbs', None): continue
+                        if not getattr(client.account, 'tbs', None):
+                            unlaunch_reason = "取号信息失败，未获取到 TBS(网络/风控)"
+                            continue
                         
                         # 2.2 仿生预热浏览 (模拟进入贴吧首页)
                         quoted_fname = urllib.parse.quote(current_target_fname)
@@ -1597,6 +1621,13 @@ class BatchPostManager:
                         _http_client = httpx.AsyncClient(proxy=proxy_url)
                         async with _http_client as http_client:
                             forum_info = await client.get_forum(current_target_fname)
+                            # get_forum 失败同样不抛异常（handle_exception 包装）：拿不到 fid 还继续提交，
+                            # 只会用 fid=0 撞出一次注定失败的发射，并给目标吧记一次失败
+                            forum_err = getattr(forum_info, "err", None)
+                            if isinstance(forum_err, BaseException) or not getattr(forum_info, 'fid', 0):
+                                unlaunch_reason = "获取吧信息失败(网络/风控)"
+                                await log_warn(f"获取吧信息失败，本物料不进入发射 @{current_target_fname}: {forum_err or '无 fid'}")
+                                continue
                             post_body = build_thread_payload(
                                 current_target_fname,
                                 getattr(forum_info, 'fid', 0),
@@ -1605,53 +1636,99 @@ class BatchPostManager:
                                 normalize_web_content(safe_content),
                             )
 
+                            commit_started = True
                             res_json = await prewarm_and_commit_thread(
                                 http_client, headers, quoted_fname, post_body,
                                 commit_timeout=25.0,
                             )
-                            err_code = res_json.get("err_code", 0)
-                            
-                            if err_code == 0:
-                                tid = res_json.get("data", {}).get("tid", 0)
+                            # 提交请求已经发出：此后无论结果如何都算「进入过发射」
+                            launched_any = True
+                            consecutive_unlaunched = 0
+
+                            # 成功须同时满足 err_code 显式为 0 且带有效 tid（与手动发帖 post.py 同口径）。
+                            # 此前 err_code 缺失也按 0 处理：畸形响应会被记成 success 且 posted_tid=0
+                            data = res_json.get("data") if isinstance(res_json, dict) else None
+                            tid = data.get("tid") if isinstance(data, dict) else 0
+                            if not isinstance(tid, int) or isinstance(tid, bool) or tid <= 0:
+                                tid = 0
+                            err_code = res_json.get("err_code") if isinstance(res_json, dict) else None
+
+                            if err_code == 0 and tid:
                                 success_for_this_material = True
-                                task.progress += 1
-                                await failure_breaker.record_success(account_id)
-                                await af_tracker.record_post(account_id, current_target_fname)
-                                await similarity_detector.record(title, safe_content)
-                                await self.db.update_material_status(
-                                    current_material.id, "success",
-                                    posted_fname=current_target_fname, posted_tid=tid,
-                                    posted_account_id=account_id, posted_time=datetime.now(),
-                                    task_id=str(task.id)
+                                try:
+                                    task.progress += 1
+                                    await failure_breaker.record_success(account_id)
+                                    await af_tracker.record_post(account_id, current_target_fname)
+                                    await similarity_detector.record(title, safe_content)
+                                    # 物料状态落库是「已发出」的唯一凭据：写失败则下一轮会把同一物料
+                                    # 再发一遍，故失败后重试一次
+                                    for _write_attempt in (1, 2):
+                                        try:
+                                            await self.db.update_material_status(
+                                                current_material.id, "success",
+                                                posted_fname=current_target_fname, posted_tid=tid,
+                                                posted_account_id=account_id, posted_time=datetime.now(),
+                                                task_id=str(task.id)
+                                            )
+                                            break
+                                        except Exception as write_ex:
+                                            if _write_attempt == 2:
+                                                raise
+                                            await log_warn(f"物料 [{current_material.id}] 状态落库失败，重试一次: {write_ex}")
+                                    # 进度上报紧随关键写入之后：守护进程靠这条更新落库任务进度，
+                                    # 不能让它排在可能失败的记账操作后面（一旦后面抛异常就上报不出去）
+                                    yield {
+                                        "status": "success", "tid": tid, "fname": current_target_fname,
+                                        "account_id": account_id,
+                                        "account_name": acc.user_name or acc.name if acc else f"账号(ID:{account_id})",
+                                        "title": title,
+                                        "material_id": current_material.id,
+                                        "progress": task.progress, "total": task.total,
+                                    }
+                                    # 以下为非关键记账，失败只记日志（帖子已发出且物料已落库）
+                                    # --- 集成：流水持久化（content 供相似度检测器跨任务回种） ---
+                                    await self.db.add_batch_post_log(
+                                        task_id=str(task.id),
+                                        account_id=account_id,
+                                        account_name=acc.user_name or acc.name if acc else f"账号(ID:{account_id})",
+                                        fname=current_target_fname,
+                                        title=title,
+                                        tid=tid,
+                                        status="success",
+                                        data={"progress": task.progress, "total": task.total, "content": safe_content}
+                                    )
+                                    acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
+                                    await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
+                                    # 记录靶场击穿
+                                    await self.db.update_target_pool_status(current_target_fname, is_success=True)
+                                    # yield 必须先于仿生休眠：休眠动辄数分钟，若放在 sleep 后
+                                    # 守护进程的进度落库会滞后整整一个发帖间隔
+                                    if task.progress < actual_total:
+                                        await BionicDelay.sleep(delay_min, delay_max)
+                                except Exception as book_ex:
+                                    # 帖子已经发出：收尾落库/休眠失败绝不能当成发射失败。
+                                    # 此前它落进外层「执行链异常」——给刚成功的账号记一次失败，
+                                    # 并换号把同一条物料再发一遍（2026-11-24 体检）
+                                    await log_error(f"发帖成功但收尾落库异常 (TID:{tid} @ {current_target_fname}): {book_ex}")
+                                break  # 退出账号重试循环
+                            elif err_code is None:
+                                # 响应里没有 err_code（或根本不是 JSON 对象）：无法判断服务端是否已建帖
+                                # （手动发帖路径同样视为失败）。不记成功，也不换号硬撞——按失败落库并提示人工核对
+                                last_err_summary = "响应异常: 缺少 err_code，请到帖子管理核对是否已发出"
+                                await log_error(
+                                    f"发帖响应异常（缺少 err_code）@ {current_target_fname} "
+                                    f"物料[{current_material.id}]: {str(res_json)[:200]}"
                                 )
-                                # --- 集成：流水持久化（content 供相似度检测器跨任务回种） ---
-                                await self.db.add_batch_post_log(
-                                    task_id=str(task.id),
-                                    account_id=account_id,
-                                    account_name=acc.user_name or acc.name if acc else f"账号(ID:{account_id})",
-                                    fname=current_target_fname,
-                                    title=title,
-                                    tid=tid,
-                                    status="success",
-                                    data={"progress": task.progress, "total": task.total, "content": safe_content}
+                                break  # 退出账号重试循环
+                            elif err_code == 0:
+                                # 声称成功却没有 tid：无法追踪的畸形响应。不记成功，也不敢换号重发
+                                # （服务端可能已经建帖）——按失败落库并提示人工核对
+                                last_err_summary = "响应异常: err_code=0 但无 tid，请到帖子管理核对是否已发出"
+                                await log_error(
+                                    f"发帖响应异常（err_code=0 但无 tid）@ {current_target_fname} "
+                                    f"物料[{current_material.id}]: {str(res_json)[:200]}"
                                 )
-                                acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
-                                await log_info(f"[{task.strategy}] 成功: {acc_display} @ {current_target_fname} ({task.progress}/{task.total})")
-                                # 记录靶场击穿
-                                await self.db.update_target_pool_status(current_target_fname, is_success=True)
-                                # yield 必须先于仿生休眠：休眠动辄数分钟，若放在 sleep 后
-                                # 守护进程的进度落库会滞后整整一个发帖间隔
-                                yield {
-                                    "status": "success", "tid": tid, "fname": current_target_fname,
-                                    "account_id": account_id,
-                                    "account_name": acc.user_name or acc.name if acc else f"账号(ID:{account_id})",
-                                    "title": title,
-                                    "material_id": current_material.id,
-                                    "progress": task.progress, "total": task.total,
-                                }
-                                if task.progress < actual_total:
-                                    await BionicDelay.sleep(delay_min, delay_max)
-                                break # 退出账号重试循环
+                                break  # 退出账号重试循环
                             else:
                                 err_msg = str(res_json.get('error') or res_json)
                                 acc_display = acc.user_name or acc.name if acc else f"账号(ID:{account_id})"
@@ -1719,36 +1796,70 @@ class BatchPostManager:
                     await log_error(f"执行链异常 ({acc_display} @ {current_target_fname}): {str(ex)}")
                     last_err_summary = f"执行链异常: {str(ex)}"[:80]
                     await failure_breaker.record_failure(account_id)
+                    if commit_started:
+                        # 提交请求已经发出，但没拿到可解析的响应（超时 / 非 JSON）：服务端可能已经
+                        # 建帖。换号重发会把同一条物料再发一遍——按失败落库并提示人工核对，不再重试
+                        launched_any = True
+                        consecutive_unlaunched = 0
+                        last_err_summary = "提交后未收到有效响应(超时/非JSON)，请到帖子管理核对是否已发出"
+                        break  # 退出账号重试循环
 
-            if not success_for_this_material:
-                if forum_skip_reason:
-                    # 贴吧级拦截（权限不足/等级限制/静默拦截/候选全封禁）：
-                    # 不标记物料失败，物料顺延由下轮轮转自然换吧
-                    await self.db.add_batch_post_log(
-                        task_id=str(task.id),
-                        fname=current_target_fname,
-                        status="skip",
-                        message=f"贴吧{forum_skip_reason}，物料顺延: {current_target_fname}",
-                        title=current_material.title,
-                        data={"progress": task.progress, "total": task.total}
-                    )
-                    yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] {forum_skip_reason}，该物料已顺延至下轮", "progress": task.progress, "total": task.total}
-                else:
-                    # --- 集成：失败流水持久化（如实记录尝试账号数与末次拦截，
-                    # 替代"多账号均告失败"的笼统文案——单账号任务只试1次也曾写作"多账号"）---
-                    _tried_n = len(tried_accounts)
-                    await self.db.add_batch_post_log(
-                        task_id=str(task.id),
-                        fname=base_target_fname,
-                        status="error",
-                        message=f"物料经{_tried_n}个账号尝试均告失败（末次拦截: {last_err_summary or '未知'}）",
-                        title=current_material.title,
-                        data={"progress": task.progress, "total": task.total, "tried_accounts": _tried_n, "last_error": last_err_summary}
-                    )
-                    await self.db.update_material_status(current_material.id, "failed", last_error=f"{_tried_n}个账号 Failover 均失败: {last_err_summary or '未知'}", task_id=str(task.id))
-                    # 记录靶场拦截
-                    await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason=f"多账号尝试均失败（末次: {last_err_summary or '未知'}）")
-                    yield {"status": "error", "msg": f"物料发帖失败：{_tried_n}个账号尝试均被拦截（{last_err_summary or '未知'}）", "progress": task.progress, "total": task.total}
+            # --- 本物料收尾：成功 / 贴吧级顺延 / 账号侧未发射顺延 / 真失败 ---
+            if success_for_this_material:
+                consecutive_unlaunched = 0
+            elif forum_skip_reason:
+                consecutive_unlaunched = 0
+                # 贴吧级拦截（权限不足/等级限制/静默拦截/候选全封禁）：
+                # 不标记物料失败，物料顺延由下轮轮转自然换吧
+                await self.db.add_batch_post_log(
+                    task_id=str(task.id),
+                    fname=current_target_fname,
+                    status="skip",
+                    message=f"贴吧{forum_skip_reason}，物料顺延: {current_target_fname}",
+                    title=current_material.title,
+                    data={"progress": task.progress, "total": task.total}
+                )
+                yield {"status": "skipped", "msg": f"贴吧 [{current_target_fname}] {forum_skip_reason}，该物料已顺延至下轮", "progress": task.progress, "total": task.total}
+            elif unlaunch_reason and not launched_any:
+                # 账号侧预检跳过：一条发帖请求都没发出去。物料保持 pending 顺延到下一轮，
+                # 不记物料失败、不给目标吧记失败（靶场连续失败 3 次会被停用）。
+                consecutive_unlaunched += 1
+                await self.db.add_batch_post_log(
+                    task_id=str(task.id),
+                    fname=base_target_fname,
+                    status="skip",
+                    message=f"{unlaunch_reason}，物料保持待发顺延: {base_target_fname}",
+                    title=current_material.title,
+                    data={"progress": task.progress, "total": task.total, "launched": False}
+                )
+                yield {"status": "skipped", "msg": f"[{base_target_fname}] {unlaunch_reason}，物料保持待发 ({consecutive_unlaunched}/3)", "progress": task.progress, "total": task.total}
+                if consecutive_unlaunched >= 3:
+                    # 连续几个物料都卡在账号侧：本轮继续扫下去只会把整个待发池逐条记一遍顺延。
+                    # 提前收束，物料原样留给账号恢复后的下一轮（轮询兜底会再派发）
+                    await log_warn("⚠️ 连续3个物料未能进入发射（账号冷却/凭据/取号失败），提前结束本轮，物料保持待发")
+                    yield {
+                        "status": "error",
+                        "msg": f"连续 {consecutive_unlaunched} 个物料未能进入发射（{unlaunch_reason}），本轮提前结束。已成功 {task.progress}/{task.total}",
+                        "progress": task.progress, "total": task.total,
+                    }
+                    break
+            else:
+                consecutive_unlaunched = 0
+                # --- 集成：失败流水持久化（如实记录尝试账号数与末次拦截，
+                # 替代"多账号均告失败"的笼统文案——单账号任务只试1次也曾写作"多账号"）---
+                _tried_n = len(tried_accounts)
+                await self.db.add_batch_post_log(
+                    task_id=str(task.id),
+                    fname=base_target_fname,
+                    status="error",
+                    message=f"物料经{_tried_n}个账号尝试均告失败（末次拦截: {last_err_summary or '未知'}）",
+                    title=current_material.title,
+                    data={"progress": task.progress, "total": task.total, "tried_accounts": _tried_n, "last_error": last_err_summary}
+                )
+                await self.db.update_material_status(current_material.id, "failed", last_error=f"{_tried_n}个账号 Failover 均失败: {last_err_summary or '未知'}", task_id=str(task.id))
+                # 记录靶场拦截
+                await self.db.update_target_pool_status(base_target_fname, is_success=False, error_reason=f"多账号尝试均失败（末次: {last_err_summary or '未知'}）")
+                yield {"status": "error", "msg": f"物料发帖失败：{_tried_n}个账号尝试均被拦截（{last_err_summary or '未知'}）", "progress": task.progress, "total": task.total}
 
             material_ptr += 1
 
@@ -1776,38 +1887,51 @@ class BatchPostManager:
             obf = await Obfuscator.from_db(self.db)
             safe_content = obf.obfuscate_all(content)
             try:
-                await client.add_post(fname, tid, safe_content)
-                return True, ""
+                resp = await client.add_post(fname, tid, safe_content)
             except Exception as e:
-                err_str = str(e)
-                await log_error(f"自顶回帖失败 [TID:{tid}]: {err_str}")
+                # 只兜本地/网络层未预期异常：API 层错误不会抛出，而是挂在返回值的 .err 上
+                resp, err_obj = None, e
+            else:
+                err_obj = getattr(resp, "err", None)
 
-                # 识别吧务封禁（统一风控分类器）
-                from .risk import is_forum_ban_error
-                if is_forum_ban_error(err_str):
-                    # 标记位熔断：不再删除记录，而是设为封禁并停止发帖许可
-                    await self.db.mark_forum_banned(account_id, fname, reason="回帖触发吧务封禁 (3250004)")
-                    await self.db.update_target_pool_status(fname, is_success=False, error_reason="回帖触发吧务封禁")
-                    try:
-                        resp = await client.unfollow_forum(fname)
-                        err = bool_resp_err(resp)
-                        if err:
-                            await log_warn(f"回帖熔断取消关注失败: {err}")
-                    except Exception as ue:
-                        await log_warn(f"回帖熔断取消关注失败: {ue}")
+            # 成败以 BoolResponse 的真值为准（真 = 无 .err）。此前不看返回值直接判成功：
+            # 验证码、吧内禁言、帖子已删都被记成「已发出」，3 分钟后校验不到楼层被误判为
+            # 被吞并给账号记击，下方吧务封禁熔断也因此不可达（2026-11-24 体检）
+            if resp:
+                return True, ""
 
-                    # 寻找关联物料并关闭自动回帖，防止持续背刺
-                    async with self.db.async_session() as session:
-                        from ..db.models import MaterialPool
-                        from sqlalchemy import update
-                        _ = await session.execute(
-                            update(MaterialPool).where(MaterialPool.posted_tid == tid).values(is_auto_bump=False)
-                        )
-                        await session.commit()
-                    await log_warn(f"账号 {_reply_acc_name} 在 {fname} 遭遇封禁，已转入标记熔断并紧急关闭 TID:{tid} 的自动回帖。")
-                    return False, f"吧务封禁: {err_str}"
+            # 识别吧务封禁（统一风控分类器）
+            from .risk import extract_err_code, is_forum_ban_error
+            err_str = str(err_obj) if err_obj is not None else "未知错误"
+            err_code = getattr(err_obj, "code", 0)
+            if not isinstance(err_code, int):
+                err_code = extract_err_code(err_str)
+            await log_error(f"自顶回帖失败 [TID:{tid}]: {err_str}")
 
-                return False, err_str
+            if is_forum_ban_error(err_str, err_code):
+                # 标记位熔断：不再删除记录，而是设为封禁并停止发帖许可
+                await self.db.mark_forum_banned(account_id, fname, reason="回帖触发吧务封禁 (3250004)")
+                await self.db.update_target_pool_status(fname, is_success=False, error_reason="回帖触发吧务封禁")
+                try:
+                    unfollow_resp = await client.unfollow_forum(fname)
+                    unfollow_err = bool_resp_err(unfollow_resp)
+                    if unfollow_err:
+                        await log_warn(f"回帖熔断取消关注失败: {unfollow_err}")
+                except Exception as ue:
+                    await log_warn(f"回帖熔断取消关注失败: {ue}")
+
+                # 寻找关联物料并关闭自动回帖，防止持续背刺
+                async with self.db.async_session() as session:
+                    from ..db.models import MaterialPool
+                    from sqlalchemy import update
+                    _ = await session.execute(
+                        update(MaterialPool).where(MaterialPool.posted_tid == tid).values(is_auto_bump=False)
+                    )
+                    await session.commit()
+                await log_warn(f"账号 {_reply_acc_name} 在 {fname} 遭遇封禁，已转入标记熔断并紧急关闭 TID:{tid} 的自动回帖。")
+                return False, f"吧务封禁: {err_str}"
+
+            return False, err_str
 
     async def unfollow_forums_bulk(
         self,
@@ -2370,10 +2494,12 @@ class AutoBumpManager:
         self.db = db
         self.post_manager = BatchPostManager(db)
 
-    def _should_bump_this_cycle(self, material) -> tuple[bool, str]:
+    def _should_bump_this_cycle(self, material, max_bump_count: int = 20) -> tuple[bool, str]:
         """
         判断物料是否应该在本次周期执行自顶
         返回: (should_bump, reason)
+
+        max_bump_count：once 模式的累计次数上限（来自全局配置 max_bump_count）。
         """
         from datetime import date, datetime, timedelta
 
@@ -2396,7 +2522,16 @@ class AutoBumpManager:
             return None
         
         if bump_mode == "once":
-            # 模式1: 次数上限模式 (原有逻辑)
+            # 模式1: 次数上限模式：累计自顶达到上限后不再执行。
+            # 候选查询处已不按次数过滤（见 process_all_candidates），封顶只能在这里判断——
+            # 此前本分支直接放行，帖子列表按 estimate_next_bump 显示「已达次数上限」而引擎照顶不误
+            # （2026-11-24 体检）
+            try:
+                done_count = int(getattr(material, 'bump_count', 0) or 0)
+            except (TypeError, ValueError):
+                done_count = 0   # 计数缺失/损坏按 0 次处理，不因脏数据让整个巡检崩掉
+            if done_count >= max_bump_count:
+                return False, f"已达次数上限({max_bump_count}次)"
             return True, "once"
             
         elif bump_mode == "scheduled":
@@ -3113,6 +3248,11 @@ class AutoBumpManager:
             bump_ai_content_enabled = (await self.db.get_setting("bump_ai_content", "1")) == "1"
         except Exception:
             _max_bump_count, bump_cooldown_minutes, bump_matrix_enabled, bump_ai_content_enabled = 20, 60, False, True  # 保守值
+        # 上限非正数会让所有物料判为「已达上限」，按缺省处理（设置页本身钳制在 5~100）
+        if _max_bump_count < 1:
+            _max_bump_count = 20
+        if bump_cooldown_minutes < 1:
+            bump_cooldown_minutes = 60
             
         # 2. 获取开启了自动回帖、发帖成功、且满足冷却时间的物料
         async with self.db.async_session() as session:
@@ -3137,7 +3277,7 @@ class AutoBumpManager:
             # 过滤真正需要执行的物料
             candidates = []
             for material in all_candidates:
-                should_bump, reason = self._should_bump_this_cycle(material)
+                should_bump, reason = self._should_bump_this_cycle(material, _max_bump_count)
                 if should_bump:
                     candidates.append(material)
                 else:

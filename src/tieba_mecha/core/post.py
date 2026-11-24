@@ -406,8 +406,8 @@ async def add_post(
 
 
 # 存活检测错误码语义（百度侧）
-_DELETION_SIGNAL_CODES = {273}  # 帖子已删除
-_NOT_FOUND_CODES = {269}        # 帖子不存在
+_DELETION_SIGNAL_CODES = {273, 350008}  # 帖子已删除（350008 为 2026-11 真网实测：该贴已被删除）
+_NOT_FOUND_CODES = {269}                # 帖子不存在
 
 
 def _classify_death_reason(code: int | None, msg: str) -> str:
@@ -423,7 +423,7 @@ def _classify_death_reason(code: int | None, msg: str) -> str:
     if "captcha" in m or "验证码" in (msg or ""):
         return "captcha_required"
 
-    # 帖子已删除类（错误码 273 或含删除关键词）
+    # 帖子已删除类（错误码 273/350008 或含删除关键词）
     if code in _DELETION_SIGNAL_CODES or "删除" in (msg or "") or "deleted" in m or "removed" in m:
         if "系统" in msg or "system" in m or "违规" in msg or "spam" in m:
             return "deleted_by_system"
@@ -437,11 +437,31 @@ def _classify_death_reason(code: int | None, msg: str) -> str:
     if "banned" in m or "blocked" in m or "封禁" in (msg or ""):
         return "deleted_by_mod"
 
-    # 帖子不存在
-    if "not found" in m or "404" in m or code in _NOT_FOUND_CODES:
+    # 帖子不存在（"帖子不存在"是确认失效的响应，不能落到未映射错误里变成永远的未知）
+    if "not found" in m or "404" in m or "不存在" in (msg or "") or code in _NOT_FOUND_CODES:
         return "auto_removed"
 
     return "error"
+
+
+async def _verdict_from_api_error(tid: int, code, msg: str) -> tuple[str, str]:
+    """把带错误码的贴吧 API 错误翻译成存活结论。
+
+    只有明确表示「帖子已不可访问」的错误码/消息才判阵亡；验证码挑战、未映射错误码
+    属于「检测本身失败」，返回 unknown，由调用方保留原状态等下一轮。
+    """
+    reason = _classify_death_reason(code, msg or "")
+    if reason in ("captcha_required", "error"):
+        from .logger import log_warn
+        await log_warn(
+            f"存活检测未能完成 tid={tid} code={code} msg={msg!r} → 按未知处理，保留原状态"
+        )
+        return "unknown", reason
+    from .logger import log_info
+    await log_info(
+        f"存活检测判定阵亡 tid={tid} code={code} msg={msg!r} → {reason}"
+    )
+    return "dead", reason
 
 
 async def check_post_survival(tid: int) -> tuple[str, str]:
@@ -473,24 +493,33 @@ async def check_post_survival(tid: int) -> tuple[str, str]:
         async with aiotieba.Client() as client:
             res = await client.get_posts(tid)
     except TiebaServerError as ex:
-        reason = _classify_death_reason(ex.code, ex.msg or "")
-        if reason in ("captcha_required", "error"):
-            # 验证码挑战/未映射错误码：检测本身失败，不能断言帖子死亡
-            return "unknown", reason
-        from .logger import log_info
-        await log_info(
-            f"存活检测判定阵亡 tid={tid} code={ex.code} msg={ex.msg!r} → {reason}"
-        )
-        return "dead", reason
+        return await _verdict_from_api_error(tid, ex.code, ex.msg or "")
     except Exception as ex:
         # 网络抖动等基础设施异常：不判死，保留原状态等下一轮
         from .logger import log_warn
         await log_warn(f"存活检测异常 tid={tid}: {ex}")
         return "unknown", "error"
 
+    # aiotieba 的 get_posts 被 handle_exception 包装：API 出错（含网络异常、超时、验证码、
+    # 限流）并不抛异常，而是返回带 .err 的空 Posts，上面两个 except 实际走不到。此前直接
+    # 落到下方「无 thread → 阵亡」，一次网络抖动就被记成 dead/deleted_unknown，再经
+    # auto_sync_post_target 关掉整个吧的发帖目标标记（2026-11-24 体检：生产近 7 天 154 条
+    # 阵亡全走这条路径，汇总里「未确认」恒为 0）。判定口径与上面两个 except 完全一致：
+    # 带错误码的 TiebaServerError 才按码分类，其它异常不从消息文本猜原因。
+    err = getattr(res, "err", None)
+    if isinstance(err, TiebaServerError):
+        return await _verdict_from_api_error(tid, err.code, getattr(err, "msg", "") or "")
+    if isinstance(err, BaseException):
+        from .logger import log_warn
+        await log_warn(f"存活检测异常 tid={tid}: {err}")
+        return "unknown", "error"
+
     # 正常响应：thread 是帖子可公开访问的唯一可靠证据
     # (Posts.text 属性并不存在，旧版基于它的验证码检查是死代码，已删除)
-    if res and getattr(res, "thread", None):
+    # thread.tid 非零单独算数：Posts 的真值取决于楼层列表是否非空，零回复的活帖
+    # 若被服务端返回空楼层，不能因为「列表为空」就当成没有 thread
+    thread = getattr(res, "thread", None) if res is not None else None
+    if (res and thread is not None) or getattr(thread, "tid", 0):
         return "alive", ""
 
     # 正常响应但 thread 缺失 → 帖子已不可公开访问。
