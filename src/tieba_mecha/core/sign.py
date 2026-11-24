@@ -68,11 +68,16 @@ class ForumInfo:
 
 
 # 错误码常量（单源定义在 core/risk.py，此处重导出以兼容既有引用）
-from .risk import ERR_ALREADY_SIGNED, ERR_FORUM_INVALID, ERR_FORUM_BANNED, ERR_SIGN_LOAD_FAILED
+from .risk import ERR_ALREADY_SIGNED, ERR_FORUM_INVALID, ERR_FORUM_BANNED, ERR_SIGN_LOAD_FAILED, is_captcha_error
 
 # 全局签到流互斥锁：防止守护进程定时签到与界面手动签到并发执行，
 # 双流并跑会令请求频率翻倍，破坏行为模拟节奏并加大风控风险
 sign_flow_lock = asyncio.Lock()
+
+# 签到连续命中风控（验证码/限流）多少次后判定为「账号被限流」并中止本账号本轮。
+# 单次命中只退避 60 秒再继续：err=40 这类验证码常是单个吧的验证码墙（如百度网盘吧的
+# 确定性陷阱），为一个吧中止整个账号会让其余几十个吧当天都签不上。
+SIGN_RISK_ABORT_STREAK = 3
 
 
 def _parse_sign_result(result_raw):
@@ -383,6 +388,7 @@ async def sign_all_forums(
     skip_p = await _get_skip_probability(db)
 
     # N+1 优化: 在外层建立单一持久化连接池
+    risk_streak = 0  # 连续命中风控的次数（中途出现正常结果即清零）
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for forum in forums:
             if stop_event is not None and stop_event.is_set():
@@ -422,6 +428,15 @@ async def sign_all_forums(
                     except Exception:
                         pass  # 重试异常时保留首试结论
 
+                # 风控/验证码拦截：aiotieba 的 sign_forum 不抛 TiebaServerError（handle_exception
+                # 包装，错误挂在返回值的 .err 上），下方 except TiebaServerError 的「退避 60 秒并
+                # 中止本账号本轮」从未走到。按统一风控分类器识别后显式抛出，交给该分支处理。
+                # （2026-11-24 体检：此前触发风控被当作普通失败，隔几秒继续签下一个吧）
+                # 已识别为「贴吧失效/封禁」的结果走各自的熔断分支，不参与风控判定
+                if not success and not is_forum_invalid and is_captcha_error(msg, err_code):
+                    raise TiebaServerError(err_code, msg)
+                risk_streak = 0
+
                 if success:
                     result = SignResult(
                         fname=forum.fname,
@@ -443,8 +458,16 @@ async def sign_all_forums(
                 else:
                     result = SignResult(fname=forum.fname, success=False, message=msg)
             except TiebaServerError as e:
+                risk_streak += 1
                 await log_warn(f"[{forum.fname}] 触发风控或 API 阻隔 ({e.code})，系统静默退避休眠 60 秒...")
-                aborted = await _interruptible_sleep(stop_event, 60)
+                # aborted 不能取 _interruptible_sleep 的返回值：它表示「睡眠期间用户点了停止」，
+                # 正常睡完恒为 False——原先写法下的 if aborted: break 在风控场景永远不会触发
+                await _interruptible_sleep(stop_event, 60)
+                aborted = risk_streak >= SIGN_RISK_ABORT_STREAK
+                if aborted:
+                    await log_warn(
+                        f"[{account.name}] 连续 {risk_streak} 次触发风控，判定账号被限流，中止本账号本轮签到"
+                    )
                 result = SignResult(fname=forum.fname, success=False, message=f"被风控限流: {e.msg}")
             except (asyncio.CancelledError, concurrent.futures.CancelledError):
                 # 优雅处理 Flet 任务取消
@@ -585,6 +608,7 @@ async def sign_account_forums(
     skip_p = await _get_skip_probability(db)
 
     # 每个账号使用单一持久化连接，避免重复创建客户端
+    risk_streak = 0  # 连续命中风控的次数（中途出现正常结果即清零）
     async with await create_client(db, bduss, stoken, proxy_id=proxy_id, cuid=cuid, ua=ua) as client:
         for forum in forums:
             if stop_event is not None and stop_event.is_set():
@@ -630,6 +654,12 @@ async def sign_account_forums(
                     except Exception:
                         pass  # 重试异常时保留首试结论
 
+                # 风控/验证码拦截：与单账号路径同理，显式抛给下方 except TiebaServerError 的退避分支
+                # （sign_forum 不抛异常，该分支此前从未走到）
+                if not success and not is_forum_invalid and is_captcha_error(message, err_code):
+                    raise TiebaServerError(err_code, message)
+                risk_streak = 0
+
                 if is_forum_invalid:
                     if err_code == ERR_FORUM_BANNED:
                         await db.mark_forum_banned(account.id, forum.fname, reason="矩阵全扫检测到吧务封禁 (3250004)")
@@ -669,8 +699,15 @@ async def sign_account_forums(
                     break
 
             except TiebaServerError as e:
+                risk_streak += 1
                 await log_warn(f"矩阵签到 [{account.name}] → {forum.fname}: 触发风控或 API 阻隔 ({e.code})，退避 60s...")
-                aborted = await _interruptible_sleep(stop_event, 60)
+                # aborted 不能取 _interruptible_sleep 的返回值（那是「用户点了停止」，正常睡完恒为 False）
+                await _interruptible_sleep(stop_event, 60)
+                aborted = risk_streak >= SIGN_RISK_ABORT_STREAK
+                if aborted:
+                    await log_warn(
+                        f"矩阵签到 [{account.name}] 连续 {risk_streak} 次触发风控，判定账号被限流，中止本账号本轮签到"
+                    )
                 # 与单账号路径保持一致：风控失败同样落日志并更新贴吧状态
                 await db.add_sign_log(
                     forum_id=forum.id,

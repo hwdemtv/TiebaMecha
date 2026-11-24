@@ -85,6 +85,10 @@ class AccountInfo:
     proxy_id: int | None = None
     post_weight: int = 5
     is_maint_enabled: bool = False
+    # 是否参与每日定时签到（守护错峰排程的参与集合）。此前 AccountInfo 没有这个字段，
+    # 账号页用 getattr(acc, 'is_sign_scheduled', True) 读取，默认值永远生效——已退出定时
+    # 签到的账号在界面上仍显示开启（2026-11-24 体检）
+    is_sign_scheduled: bool = True
     last_maint_at: datetime | None = None
     last_verified: datetime | None = None
 
@@ -159,6 +163,7 @@ async def add_account(
         proxy_id=account.proxy_id,
         post_weight=getattr(account, 'post_weight', 5),
         is_maint_enabled=account.is_maint_enabled,
+        is_sign_scheduled=getattr(account, "is_sign_scheduled", True),
         last_maint_at=account.last_maint_at,
         last_verified=getattr(account, 'last_verified', None),
     )
@@ -187,7 +192,14 @@ async def get_account_credentials(db: Database, account_id: int | None = None) -
         bduss = decrypt_value(account.bduss)
         stoken = decrypt_value(account.stoken) if account.stoken else ""
         return account.id, bduss, stoken, account.proxy_id, account.cuid, account.user_agent
-    except Exception:
+    except Exception as e:
+        # 此前静默返回 None，与「账号不存在」无法区分：加密密钥变更后所有账号都显示
+        # 「未找到凭证」却查不出原因（2026-11-24 体检）。只记异常类型，不记任何凭据内容
+        from .logger import log_warn
+        await log_warn(
+            f"账号 [{account.id}] 凭据解密失败（{type(e).__name__}），按无凭据处理；"
+            "若所有账号同时出现，请检查 TIEBA_MECHA_SALT / TIEBA_MECHA_SECRET_KEY 是否变更"
+        )
         return None
 
 
@@ -256,6 +268,7 @@ async def list_accounts(db: Database) -> list[AccountInfo]:
             proxy_id=a.proxy_id,
             post_weight=getattr(a, 'post_weight', 5),
             is_maint_enabled=a.is_maint_enabled,
+            is_sign_scheduled=getattr(a, "is_sign_scheduled", True),
             last_maint_at=a.last_maint_at,
             last_verified=getattr(a, "last_verified", None),
         )
@@ -331,6 +344,7 @@ async def refresh_account(db: Database, account_id: int) -> AccountInfo | None:
             proxy_id=updated.proxy_id,
             post_weight=getattr(updated, 'post_weight', 5),
             is_maint_enabled=updated.is_maint_enabled,
+            is_sign_scheduled=getattr(updated, "is_sign_scheduled", True),
             last_maint_at=updated.last_maint_at,
             last_verified=datetime.now(),
         )
