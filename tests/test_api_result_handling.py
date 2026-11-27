@@ -378,3 +378,47 @@ async def test_sign_forum_ban_is_not_mistaken_for_risk_control(db):
     assert forums["封禁吧"].is_banned is True
     assert forums["正常吧"].is_sign_today is True
     assert not any(call.args and call.args[0] == 60 for call in sleep.await_args_list)
+
+
+# ---------- 签到：.err 里带非贴吧异常时不崩（2026-11-24 11:08 生产实测） ----------
+
+class _FakeSocketTimeout(Exception):
+    """aiohttp SocketTimeoutError 的替身：无 .code 属性"""
+
+    def __str__(self):
+        return "Socket timeout error"
+
+
+def _err_response(err):
+    resp = BoolResponse()
+    resp.err = err
+    return resp
+
+
+def test_parse_sign_result_tolerates_error_without_code():
+    """网络超时（aiohttp SocketTimeoutError 无 .code）：按普通失败记账，不再 AttributeError"""
+    from tieba_mecha.core.sign import _parse_sign_result
+
+    raw = _err_response(_FakeSocketTimeout())
+    success, msg, already, invalid, err_code = _parse_sign_result(raw)
+
+    assert (success, already, invalid) == (False, False, False)
+    assert err_code == 0
+    assert "Socket timeout" in msg
+    # 成功响应与真贴吧错误路径不受影响
+    ok_raw = BoolResponse()
+    assert _parse_sign_result(ok_raw)[0] is True
+    bad = _err_response(TiebaServerError(300004, "加载数据失败"))
+    assert _parse_sign_result(bad)[4] == 300004
+
+
+def test_parse_sign_result_err_code_non_int_is_zeroed():
+    from tieba_mecha.core.sign import _parse_sign_result
+
+    class _WeirdErr(Exception):
+        code = "not-a-number"
+
+    raw = _err_response(_WeirdErr("boom"))
+    success, msg, already, invalid, err_code = _parse_sign_result(raw)
+    assert (success, err_code) == (False, 0)
+    assert "boom" in msg

@@ -271,12 +271,23 @@ class TestBumpCountLimit:
             assert reason == f"已达次数上限({limit}次)" == label
 
     def test_limit_applies_to_once_mode_only(self):
-        """scheduled / matrix_loop 模式按「每日一次」约束，不受累计次数上限影响"""
+        """scheduled / matrix_loop 模式按「每日一次」约束，不受累计次数上限影响
+
+        用 bump_last_date=今天 走「今日已执行」分支：完全确定（不依赖跑测试的钟点），
+        且能直接对比 bump_count=999 与 0 的结论一致——上限没有参与判定。
+        （原写法 bump_hour=0 会被生产代码 `or 10` 兜底成 10 点，10 点前跑必失败）
+        """
         manager = AutoBumpManager(db=None)
-        over = SimpleNamespace(bump_mode="scheduled", bump_count=999, bump_last_date=None, bump_hour=0, bump_duration_days=0)
-        assert manager._should_bump_this_cycle(over, 20) == (True, "scheduled")
-        today_done = SimpleNamespace(bump_mode="scheduled", bump_count=0, bump_last_date=date.today(), bump_hour=0, bump_duration_days=0)
-        assert manager._should_bump_this_cycle(today_done, 20) == (False, "今日已执行")
+        today = date.today()
+        over = SimpleNamespace(bump_mode="scheduled", bump_count=999, bump_last_date=today, bump_hour=10, bump_duration_days=0)
+        assert manager._should_bump_this_cycle(over, 20) == (False, "今日已执行")
+        fresh = SimpleNamespace(bump_mode="scheduled", bump_count=0, bump_last_date=today, bump_hour=10, bump_duration_days=0)
+        assert manager._should_bump_this_cycle(fresh, 20) == (False, "今日已执行")
+        matrix = SimpleNamespace(bump_mode="matrix_loop", bump_count=999, bump_last_date=today, bump_hour=10, bump_duration_days=0)
+        assert manager._should_bump_this_cycle(matrix, 20) == (False, "今日已执行")
+        # 对照：once 模式同量级计数被上限拦下
+        once = SimpleNamespace(bump_mode="once", bump_count=999)
+        assert manager._should_bump_this_cycle(once, 20) == (False, "已达次数上限(20次)")
 
 
 # ---------- 账号轮换（真实选号函数） ----------

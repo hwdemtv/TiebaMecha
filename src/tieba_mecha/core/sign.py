@@ -88,7 +88,12 @@ def _parse_sign_result(result_raw):
         (success: bool, message: str, is_already_signed: bool, is_forum_invalid: bool, err_code: int)
     """
     err = getattr(result_raw, 'err', None)
-    err_code = err.code if err else 0
+    # aiotieba 会把底层异常原样塞进 .err：网络超时时可能是 aiohttp 的 SocketTimeoutError，
+    # 没有 .code 属性——裸取 err.code 会 AttributeError 并让该吧被记成「矩阵签到异常」
+    # （2026-11-24 11:08 实测一发）。getattr 兜底后按普通失败记账，轮次正常继续。
+    err_code = getattr(err, "code", 0) if err else 0
+    if not isinstance(err_code, int) or isinstance(err_code, bool):
+        err_code = 0
 
     is_already_signed = bool(err and err_code == ERR_ALREADY_SIGNED)
     is_forum_invalid = bool(err and err_code in (*ERR_FORUM_INVALID, ERR_FORUM_BANNED))
